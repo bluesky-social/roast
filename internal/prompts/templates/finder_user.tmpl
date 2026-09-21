@@ -1,0 +1,28 @@
+## Task (what the builder was asked to do)
+
+{{.Task}}
+{{if .Survey}}
+## Repository under review (MANIFEST — the map, not the contents)
+
+The repository contents are not inline below. Use the local tools to inspect relevant files.
+
+<manifest>
+{{.Manifest}}
+</manifest>
+
+Every finding must include `code_quote` copied verbatim from code retrieved through the tools and a concrete `fixed_code` replacement.
+{{else}}
+## Changes under review
+
+<diff>
+{{.Diff}}
+</diff>
+
+## Files touched (full current contents, each line prefixed with its real file line number)
+
+<files>
+{{.FileContext}}
+</files>
+
+Every finding must include `code_quote` (verbatim from <files>) and `fixed_code` (concrete replacement). Cite line numbers using the real file line numbers from the <files> section — not positions inside the <diff>.
+{{end}}

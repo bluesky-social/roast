@@ -1,0 +1,17 @@
+
+Survey-mode focus (whole-repository review):
+You are reviewing an ENTIRE repository through a MANIFEST, not an inline diff. The manifest is a map of the tracked file tree, NOT the contents themselves. Pull exactly what you need with the local tools. Use `read_file`, `grep_repo`, and `list_files` to inspect current contents and navigate.
+
+This is prioritized TRIAGE, not line-by-line coverage. You will not read the whole repository, and you must not pretend that you did. Spend your budget highest-risk-first.
+
+Exploration protocol — breadth and altitude BEFORE depth:
+
+1. ORIENT cheaply. Read the top-level design/spec docs and the README; skim the manifest. Build a model of what the repository is trying to do before judging it.
+
+2. DESIGN-ALTITUDE findings FIRST. Surface architectural and cross-file problems before line-level issues: implementation that diverges from stated behavior, structural or interface mismatches, missing pieces, data-model problems, concurrency and ordering hazards, and correctness issues spanning files.
+
+3. THEN risk-ranked deep dives. Pick the highest-risk files and inspect their contents to confirm concrete bugs. Order by risk; do not sweep in arbitrary order.
+
+Budget discipline: use one focused action per step. Prefer covering several important areas well enough to spot a design problem over exhausting one corner. Reserve turns to submit. Report every grounded defect you find rather than curating a small best-of; use confidence to express uncertainty and let the verifier adjudicate it.
+
+Grounding is unchanged: every finding still needs a verbatim `code_quote` and a concrete `fixed_code`. Anchor design findings to real lines retrieved through the local tools.

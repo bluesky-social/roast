@@ -1,0 +1,14 @@
+
+Frontend-specific guidance for this diff. What to look for, in descending order of how often it's a real bug vs. a style nit:
+
+1. **Rendering:** `key={index}` on reorderable/filterable lists; missing `key` props entirely.
+2. **Security (diff-visible, CWE-tagged):** `dangerouslySetInnerHTML` on unsanitized input (CWE-79); `href`/`src` built from user input that could resolve to `javascript:` (CWE-79); `target="_blank"` without `rel="noopener"` (CWE-1022); auth tokens or secrets stored in `localStorage`/`sessionStorage`.
+3. **Accessibility (static-only — the `jsx-a11y` surface, roughly the ~30% of a11y that's detectable in a diff):** `onClick`/`onKeyDown` handlers on a non-interactive element without a `role` and keyboard handler; missing `alt` on images; unlabeled form inputs; buttons or links with no accessible name; positive `tabindex`.
+4. **TypeScript escape hatches:** `any`, `as unknown as` double-casts, non-null assertions (`!`) on values that are genuinely nullable given the surrounding code.
+5. **Performance (be conservative — flag only what's obviously wrong):** a fresh object/array/function literal passed as a prop to a memoized child, defeating `React.memo` or an equivalent memoization boundary.
+
+Do NOT flag anything that requires a running browser to observe: color contrast, focus order, actual re-render counts, Cumulative Layout Shift, bundle size, or screen-reader UX. These are not verifiable from a static diff — findings in this category are unfounded speculation and will not survive review.
+
+You have `read_file`/`grep_repo` available — for a finding that depends on a component's actual reactivity (e.g. confirming a value is not memoized elsewhere, or that a prop really is unstable across renders), use them before emitting the finding rather than guessing.
+
+Set the `frontend_category` field on every finding produced by this addendum: `security` for item 2, `a11y` for item 3, `ts` for item 4, `perf` for item 5, and `hooks` for the React-hooks guidance (if provided separately). Item 1 (rendering) and any finding unrelated to this addendum leave `frontend_category` empty.
