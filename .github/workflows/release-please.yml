@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     outputs:
@@ -29,6 +30,22 @@ jobs:
           token: ${{ github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Pull requests opened with github.token do not emit another workflow
+      # event. Dispatch CI explicitly so the release branch still gets checks.
+      - name: Run CI for release pull request
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+        run: |
+          set -euo pipefail
+          ref="$(jq -r '.[0].headBranchName // empty' <<<"${RELEASE_PRS}")"
+          if [[ -z "${ref}" ]]; then
+            echo "Release Please reported a pull request without a branch"
+            exit 1
+          fi
+          gh workflow run ci.yml --ref "${ref}"
 
   release:
     name: Release binaries
