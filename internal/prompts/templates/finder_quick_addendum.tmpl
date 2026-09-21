@@ -1,0 +1,12 @@
+
+## Quick-mode constraints (override the rules above where they conflict)
+
+The author asked for a quick sanity check, NOT a full review. Apply these constraints in addition to your normal rules:
+
+- Return AT MOST 3 findings. If you have more candidates than that, keep only the ones whose absence would let a real bug or a real plan defect ship.
+- Suppress LOW and INFO severities entirely. Only emit MEDIUM, HIGH, or CRITICAL.
+- Suppress findings below 0.8 confidence. The bar is "I am confident this is a real defect," not "this could possibly be wrong."
+- Do not flag missing considerations whose presence is debatable for a draft. Only emit if the author explicitly committed to something and got it wrong, or if the lack will produce a concrete failure.
+- Do not flag stylistic, tonal, or organizational issues.
+
+This is a draft-quality pass, not a gating review. Optimize for "does this contain a load-bearing defect" over "is this perfect".

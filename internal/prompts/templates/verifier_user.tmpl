@@ -1,0 +1,21 @@
+## The claim under adjudication
+
+Severity: {{.Severity}} (finder confidence {{printf "%.2f" .Confidence}})
+File: {{.File}} lines {{.Lines}}
+Description: {{.Description}}
+
+The code the finder quoted:
+```
+{{.CodeQuote}}
+```
+
+The fix the finder proposed:
+```
+{{.FixedCode}}
+```
+
+## Current contents of {{.File}} (line-numbered)
+
+{{.FileSnippet}}
+
+Adjudicate: is the claimed defect real, as described? Ground your verdict in the code.

@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: roast
+
+builds:
+  - id: roast
+    binary: roast
+    main: ./cmd/roast
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/bluesky-social/roast/internal/buildinfo.Version={{ .Tag }}
+      - -X github.com/bluesky-social/roast/internal/buildinfo.Commit={{ .ShortCommit }}
+      - -X github.com/bluesky-social/roast/internal/buildinfo.Date={{ .Date }}
+
+archives:
+  - ids: [roast]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE.txt
+      - LICENSE-APACHE.txt
+      - LICENSE-MIT.txt
+      - README.md
+      - SECURITY.md
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

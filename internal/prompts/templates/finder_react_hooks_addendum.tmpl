@@ -1,0 +1,12 @@
+
+React-hooks-specific guidance for this diff (highest-yield dimension — these are usually genuine correctness bugs, not style nits):
+
+- Stale closures: missing or wrong dependencies in `useEffect`/`useCallback`/`useMemo` that cause the hook to close over a stale value.
+- Missing effect cleanup: timers, subscriptions, event listeners, or other resources started in `useEffect` with no cleanup function — these leak.
+- `setState(x + 1)` instead of a functional update (`setState(x => x + 1)`) inside an async callback or interval/timeout closure, where the closed-over value is stale by the time it runs.
+- Conditional or looped hook calls — hooks called inside an `if`, loop, or after an early return, violating the rules of hooks.
+- An effect that should be an event handler: side effects gated on a state change that only ever happens in response to a specific user action, when handling it directly in the handler would avoid the extra render and the dependency-tracking complexity.
+
+Use `read_file`/`grep_repo` to confirm a dependency really is unstable across renders (e.g. it's not already memoized elsewhere) before flagging a missing-dependency finding.
+
+Set `frontend_category` to `hooks` on every finding produced by this addendum.

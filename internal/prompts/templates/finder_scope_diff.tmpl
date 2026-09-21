@@ -1,0 +1,6 @@
+
+
+Diff-mode focus:
+- Focus on the DIFF, not unchanged surrounding code, unless a change exposes a pre-existing bug.
+- Cite file paths and the REAL file line numbers shown as the prefix of each line in the <files> section. The <diff> section does not have line numbers — do not cite diff hunk positions. If a change is a new file or the lines in the diff don't appear in the file snippet (e.g. truncated), say so in the reasoning rather than guessing.
+- For `confidence`, weigh whether this is a real, exploitable bug — not a "could theoretically happen" concern. A confident MEDIUM is more useful than a hedged HIGH.
