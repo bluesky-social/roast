@@ -48,3 +48,7 @@ changelog:
     exclude:
       - "^docs:"
       - "^test:"
+
+release:
+  # Release Please creates the release before GoReleaser attaches binaries.
+  mode: keep-existing
