@@ -243,7 +243,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 			return &usageError{msg: fmt.Sprintf("invalid --error-format %q (text|json)", format)}
 		}
 		startUpdateCheck(cmd.Context(), cmd.Name(), format, stderr)
-		if gateBootstrapCommands[cmd.Name()] {
+		if format != "json" && gateBootstrapCommands[cmd.Name()] {
 			maybeBootstrapGate(stderr)
 		}
 		return nil
