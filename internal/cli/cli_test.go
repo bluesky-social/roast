@@ -60,6 +60,18 @@ func TestErrorCategoryFor(t *testing.T) {
 }
 
 func TestJSONErrorOutput(t *testing.T) {
+	t.Setenv("ROAST_NO_HOOK", "")
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
 	var stdout, stderr bytes.Buffer
 	code, err := ExecuteContext(t.Context(), []string{
 		"review", "--error-format", "json", "--format", "invalid",
