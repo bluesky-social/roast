@@ -56,11 +56,9 @@ jobs:
         run: go vet ./...
 
       - name: Staticcheck
-        uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1.4.1
-        with:
-          version: "2026.2.1"
-          install-go: false
-          use-cache: false
+        # Keep the importer compatible with the compiler without adding
+        # CI-only tool dependencies to Roast's runtime module.
+        run: go tool -modfile=.github/tools/staticcheck/go.mod staticcheck ./...
 
       - name: Build upload broker
         run: go build ./cmd/roast-broker

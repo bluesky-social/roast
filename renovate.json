@@ -50,6 +50,14 @@
       "semanticCommitScope": "deps"
     },
     {
+      "matchManagers": ["gomod"],
+      "matchFileNames": [".github/tools/**"],
+      "matchDepTypes": ["require", "indirect", "tool"],
+      "groupName": "CI Go tools",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
       "matchManagers": ["gomod", "dockerfile"],
       "matchDepNames": ["go", "golang"],
       "matchUpdateTypes": ["minor", "major"],
