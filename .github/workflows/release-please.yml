@@ -21,19 +21,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      actions: write
       contents: write
       pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - name: Checkout release policy
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          persist-credentials: false
-
       - name: Update release pull request
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
@@ -42,6 +35,22 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  maintenance:
+    name: Check maintenance release PR
+    needs: release-please
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout release policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
       - name: Queue checked patch release auto-merge
         env:
           GH_TOKEN: ${{ github.token }}
@@ -49,13 +58,24 @@ jobs:
           RELEASE_BRANCH: release-please--branches--main--components--roast
         run: |
           set -euo pipefail
+          release_fields='number,title,author,baseRefName,headRefName,headRefOid,isCrossRepository,files,labels,autoMergeRequest,mergeStateStatus'
           pr="$(gh pr list --base main --head "${RELEASE_BRANCH}" --state open \
-            --json number,title,author,baseRefName,headRefName,headRefOid,isCrossRepository,files,labels,autoMergeRequest \
+            --json "${release_fields}" \
             --jq '.[0] // empty')"
           if [[ -z "${pr}" ]]; then
             exit 0
           fi
           number="$(jq -r '.number' <<<"${pr}")"
+          # A main-branch chore can leave release files unchanged, so Release
+          # Please may not refresh its PR. Strict protection still requires the
+          # latest main. Refresh only this repository's recognized bot branch,
+          # then reread its metadata before eligibility/CI checks.
+          if jq -e '.mergeStateStatus == "BEHIND" and .isCrossRepository == false
+            and .author.is_bot == true
+            and (.author.login == "app/github-actions" or .author.login == "github-actions[bot]")' <<<"${pr}"; then
+            gh pr update-branch "${number}"
+            pr="$(gh pr view "${number}" --json "${release_fields}")"
+          fi
           head="$(jq -r '.headRefOid' <<<"${pr}")"
           base_version="$(gh api "repos/${GH_REPO}/contents/.release-please-manifest.json?ref=main" \
             --jq '.content | @base64d | fromjson | .["."]')"

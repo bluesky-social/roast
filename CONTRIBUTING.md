@@ -54,6 +54,9 @@ upgrade with `brew upgrade --cask roast`.
 
 Stable patch release PRs from Release Please are queued for GitHub's native
 squash auto-merge. Required CI checks and strict branch protection still apply.
+The workflow refreshes stale release branches from `main` using GitHub's native
+branch update, then ensures an explicit CI run exists for the resulting head.
+Unchanged heads are not rebuilt hourly, and failed tests are not blindly retried.
 Minor, major, prerelease, or source-changing release PRs require manual review.
 Renovate supplies the dependency aging policy (three days for ordinary updates,
 no delay for advisory-driven updates); release automation adds no separate timer.
@@ -63,6 +66,8 @@ do not start another workflow with `GITHUB_TOKEN`. It runs Release Please and
 the existing build/publish job directly, so no additional personal token or
 GitHub App is required. Scheduled runs can be delayed by GitHub; maintainers
 can run `Release Please` manually to reconcile immediately.
+PR maintenance and tag publishing are independent jobs, so a PR maintenance
+failure does not block publishing an already-created release.
 
 To hold a patch release, add the `release:manual` label and disable any already
 queued auto-merge (`gh pr merge <number> --disable-auto`). Automation leaves
