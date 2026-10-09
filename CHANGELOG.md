@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/bluesky-social/roast/compare/v1.1.1...v1.1.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/pb33f/go-yaml to v0.1.1 ([#15](https://github.com/bluesky-social/roast/issues/15)) ([cc4aa50](https://github.com/bluesky-social/roast/commit/cc4aa50bc74c83fa156f91d1fc93dd8e3af26e64))
+* protect run artifacts and isolate shared hook enrollment ([#13](https://github.com/bluesky-social/roast/issues/13)) ([9cc82b4](https://github.com/bluesky-social/roast/commit/9cc82b4612bda04b135129868b9c7e4e7f3fe005))
+
 ## [1.1.1](https://github.com/bluesky-social/roast/compare/v1.1.0...v1.1.1) (2026-10-09)
 
 
