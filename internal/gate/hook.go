@@ -48,6 +48,9 @@ type Status struct {
 	// SidecarPath is where the gate script lives when a foreign hook calls
 	// out to it.
 	SidecarPath string
+	// Shared reports an effective core.hooksPath override. Even a locally
+	// configured path may be used by another repo, so preserve its dispatcher.
+	Shared bool
 	// Exists reports whether HookPath exists at all.
 	Exists bool
 	// Ours reports that HookPath is roast's own gate script.
@@ -73,21 +76,24 @@ type Status struct {
 	NoticeSent bool
 }
 
-// Active reports whether a commit in this repo currently runs the gate. A
-// hook git will not execute is not a gate, however right its contents look.
-func (s Status) Active() bool { return (s.Ours || s.Appended) && s.Executable }
+// Active requires both an executable dispatcher and this repo's consent.
+func (s Status) Active() bool {
+	return s.Decision == DecisionEnabled && (s.Ours || s.Appended) && s.Executable
+}
 
 // Summary is the one-line honest state for `roast gate status`.
 func (s Status) Summary() string {
 	switch {
 	case (s.Ours || s.Appended) && !s.Executable:
 		return "INSTALLED BUT NOT RUNNING — " + s.HookPath + " is not executable, so git skips it (chmod +x it, or `roast gate enable` for roast's own hook)"
-	case s.Ours && s.Stale:
-		return "installed (stale — run `roast gate enable` to refresh): " + s.HookPath
+	case (s.Ours || s.Appended) && s.Stale:
+		return "installed dispatcher is stale — run `roast gate enable` to refresh: " + s.HookPath
+	case (s.Ours || s.Appended) && s.Decision == DecisionDeclined:
+		return "declined for this repo; dispatcher retained: " + s.HookPath
+	case (s.Ours || s.Appended) && s.Decision != DecisionEnabled:
+		return "dispatcher installed but not enrolled in this repo (`roast gate enable` enables it): " + s.HookPath
 	case s.Ours:
 		return "installed: " + s.HookPath
-	case s.Appended && s.Stale:
-		return "installed via an appended block in a foreign hook (sidecar stale — run `roast gate enable` to refresh): " + s.HookPath
 	case s.Appended:
 		return "installed via an appended block in a foreign hook: " + s.HookPath
 	case s.Foreign && s.Decision == DecisionDeclined:
@@ -120,6 +126,8 @@ func Inspect(repo string) (Status, error) {
 	}
 	st.HookPath = hookPath
 	st.SidecarPath = sidecarPath
+	_, configErr := exec.Command("git", "-C", repo, "config", "--get", "core.hooksPath").Output()
+	st.Shared = configErr == nil
 	st.Decision = readDecision(repo)
 	st.NoticeSent = gitConfigGet(repo, configKeyNotice) != ""
 
@@ -195,6 +203,8 @@ const (
 	ActionRemoved Action = "removed"
 	// ActionNothing: there was nothing of ours to remove.
 	ActionNothing Action = "nothing"
+	// ActionPreserved: a custom hooksPath dispatcher was kept for other repos.
+	ActionPreserved Action = "preserved"
 )
 
 // Install puts the gate in place for repo without ever clobbering a hook we
@@ -251,12 +261,26 @@ func Install(repo string) (Action, Status, error) {
 	}
 }
 
-// Remove takes the gate back out: deletes our standalone hook, or strips our
-// block from a foreign one. A hook that is not ours is never touched.
+// Remove deletes our standalone hook or strips our block from a dedicated
+// foreign hook. Custom hooksPath dispatchers are preserved for other repos;
+// their callers must record this repo's decline separately.
 func Remove(repo string) (Action, Status, error) {
 	st, err := Inspect(repo)
 	if err != nil {
 		return ActionNothing, st, err
+	}
+	if st.Shared {
+		// Older dispatchers do not check consent. Refresh our recognized script
+		// before disabling locally, without removing anyone else's dispatcher.
+		if (st.Ours || st.Appended) && st.Stale {
+			if _, _, err := Install(repo); err != nil {
+				return ActionNothing, st, err
+			}
+		}
+		if err := refreshOwnedSidecar(st.SidecarPath); err != nil {
+			return ActionNothing, st, err
+		}
+		return ActionPreserved, st, nil
 	}
 	action := ActionNothing
 	switch {
@@ -534,6 +558,30 @@ func removeOwnedSidecar(path string) error {
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// A manually wired foreign hook can also use a shared sidecar. Refresh only
+// an existing regular file whose header proves Roast ownership; never create
+// a new sidecar or overwrite a foreign file while disabling enrollment.
+func refreshOwnedSidecar(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if strings.HasPrefix(string(body), hookHeader) && string(body) != HookScript {
+		return writeSidecar(path)
 	}
 	return nil
 }

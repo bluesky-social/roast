@@ -103,12 +103,12 @@ func WriteReportRequired(runID, markdown string) (string, error) {
 	if runID == "" {
 		return "", fmt.Errorf("write report: empty run id")
 	}
-	runDir := filepath.Join(dir, "runs", runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return "", fmt.Errorf("create run directory %s: %w", runDir, err)
+	runDir, err := makeRunDir(dir, runID)
+	if err != nil {
+		return "", err
 	}
 	path := filepath.Join(runDir, "report.md")
-	if err := os.WriteFile(path, []byte(markdown), 0o644); err != nil {
+	if err := writePrivateFile(path, []byte(markdown)); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	return path, nil
@@ -134,8 +134,8 @@ func OpenFindingSpill(runID string) func(review.WireFinding) {
 	if dir == "" || runID == "" {
 		return nil
 	}
-	runDir := filepath.Join(dir, "runs", runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	runDir, err := makeRunDir(dir, runID)
+	if err != nil {
 		return nil
 	}
 	path := filepath.Join(runDir, "findings.jsonl")
@@ -153,7 +153,7 @@ func OpenFindingSpill(runID string) func(review.WireFinding) {
 		if err != nil {
 			return
 		}
-		fh, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		fh, err := openPrivateFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY)
 		if err != nil {
 			return
 		}
@@ -180,7 +180,7 @@ func Record(report render.Report, repo string, argv []string) {
 	if dir == "" {
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
 	}
 	now := time.Now()
@@ -226,7 +226,7 @@ func Record(report render.Report, repo string, argv []string) {
 	}
 
 	outPath := filepath.Join(dir, "runs-"+now.Format("2006-01")+".jsonl")
-	fh, err := os.OpenFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	fh, err := openPrivateFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return
 	}

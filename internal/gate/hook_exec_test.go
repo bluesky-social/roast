@@ -86,6 +86,10 @@ func seededRepo(t *testing.T) string {
 	writeFile(t, repo, "a.txt", "a-STAGED-NOT-COMMITTED\n")
 	writeFile(t, repo, "b.txt", "b-IN-THIS-COMMIT\n")
 	git(t, repo, "add", "a.txt")
+	// These execution tests exercise an explicitly enrolled repository.
+	if err := RecordDecision(repo, DecisionEnabled); err != nil {
+		t.Fatal(err)
+	}
 	return repo
 }
 

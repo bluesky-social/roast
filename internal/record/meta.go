@@ -169,9 +169,9 @@ func WriteMetaRequired(meta Meta) (string, error) {
 	if meta.RunID == "" || filepath.Base(meta.RunID) != meta.RunID || meta.RunID == "." {
 		return "", fmt.Errorf("write meta: invalid run id %q", meta.RunID)
 	}
-	runDir := filepath.Join(dir, "runs", meta.RunID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return "", fmt.Errorf("create run directory %s: %w", runDir, err)
+	runDir, err := makeRunDir(dir, meta.RunID)
+	if err != nil {
+		return "", err
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -179,7 +179,7 @@ func WriteMetaRequired(meta Meta) (string, error) {
 	}
 	path := filepath.Join(runDir, MetaFile)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	if err := writePrivateFile(tmp, append(data, '\n')); err != nil {
 		return "", fmt.Errorf("write %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -235,9 +235,9 @@ func WriteArtifactRequired(runID, name, content string) (string, error) {
 	if dir == "" {
 		return "", fmt.Errorf("resolve record directory; set ROAST_RECORD_DIR to a writable directory")
 	}
-	runDir := filepath.Join(dir, "runs", runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return "", fmt.Errorf("create run directory %s: %w", runDir, err)
+	runDir, err := makeRunDir(dir, runID)
+	if err != nil {
+		return "", err
 	}
 	var compressed bytes.Buffer
 	writer := gzip.NewWriter(&compressed)
@@ -248,7 +248,7 @@ func WriteArtifactRequired(runID, name, content string) (string, error) {
 		return "", fmt.Errorf("finish artifact %q: %w", name, err)
 	}
 	path := filepath.Join(runDir, name+".gz")
-	if err := os.WriteFile(path, compressed.Bytes(), 0o644); err != nil {
+	if err := writePrivateFile(path, compressed.Bytes()); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	return path, nil

@@ -56,12 +56,12 @@ func newGateEnableCommand(stdout io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := gate.RecordDecision(repo, gate.DecisionEnabled); err != nil {
+				return err
+			}
 			if action == gate.ActionManual {
 				fmt.Fprintf(stdout, "%s is not an appendable shell script; Roast left it untouched.\nAdd this line manually:\n\n    %s\n", status.HookPath, gate.ManualLine())
 				return nil
-			}
-			if err := gate.RecordDecision(repo, gate.DecisionEnabled); err != nil {
-				return err
 			}
 			switch action {
 			case gate.ActionInstalled:
@@ -81,7 +81,7 @@ func newGateEnableCommand(stdout io.Writer) *cobra.Command {
 
 func newGateDisableCommand(stdout io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use: "disable", Short: "Remove the Roast pre-commit gate", Args: noArgs,
+		Use: "disable", Short: "Disable the Roast pre-commit gate in this repository", Args: noArgs,
 		SilenceUsage: true, SilenceErrors: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			repo, err := scope.GitRoot(".")
@@ -97,6 +97,8 @@ func newGateDisableCommand(stdout io.Writer) *cobra.Command {
 			}
 			if action == gate.ActionRemoved {
 				fmt.Fprintf(stdout, "gate removed from %s\n", status.HookPath)
+			} else if action == gate.ActionPreserved {
+				fmt.Fprintf(stdout, "gate disabled for this repository; shared dispatcher preserved at %s\n", status.HookPath)
 			} else {
 				fmt.Fprintln(stdout, "no Roast gate was installed; recorded the decline")
 			}

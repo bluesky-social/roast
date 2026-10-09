@@ -31,6 +31,17 @@ if [ -n "${ROAST_SKIP:-}" ]; then
   exit 0
 fi
 
+# A dispatcher can be shared through core.hooksPath. Its presence is not
+# enrollment: only this repository's local decision can authorize a review.
+# Match the aliases accepted by gate.readDecision, ignoring inherited config.
+decision=$(git config --local --get roast.gate 2>/dev/null |
+  tr '[:upper:]' '[:lower:]' |
+  sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+case "$decision" in
+  enabled | enable | true | yes | on | 1) ;;
+  *) exit 0 ;;
+esac
+
 ROAST="${ROAST_BIN:-}"
 if [ -z "$ROAST" ]; then
   ROAST=$(command -v roast 2>/dev/null) || ROAST=""

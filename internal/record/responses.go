@@ -48,12 +48,12 @@ func (r *ResponseRecorder) Append(role, protocol, model string, body json.RawMes
 	if dir == "" {
 		return fmt.Errorf("resolve record directory; set ROAST_RECORD_DIR to a writable directory")
 	}
-	runDir := filepath.Join(dir, "runs", r.runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return fmt.Errorf("create run directory %s: %w", runDir, err)
+	runDir, err := makeRunDir(dir, r.runID)
+	if err != nil {
+		return err
 	}
 	path := filepath.Join(runDir, ProviderResponsesFile)
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := openPrivateFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}

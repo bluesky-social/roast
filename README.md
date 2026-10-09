@@ -17,7 +17,7 @@ navigate the local checkout with bounded file, grep, and listing tools.
 
 ## Build
 
-Roast requires Go 1.27 or newer:
+Roast requires Go 1.27.2 or newer:
 
 ```sh
 go build ./cmd/roast
@@ -41,7 +41,7 @@ amd64 and arm64. Download the archive for your platform from
 [GitHub Releases](https://github.com/bluesky-social/roast/releases) and verify
 it against the published SHA-256 checksum file.
 
-With Go 1.27 or newer, you can instead install the latest tagged version:
+With Go 1.27.2 or newer, you can instead install the latest tagged version:
 
 ```sh
 go install github.com/bluesky-social/roast/cmd/roast@latest
@@ -281,6 +281,10 @@ install its staged-content pre-commit gate. The answer is stored in local Git
 config for that repository; a decline is not prompted again. Non-interactive
 runs never install a hook. Manage the decision explicitly with
 `roast gate enable|status|disable`.
+
+Shared `core.hooksPath` dispatchers still require an opt-in in each repository's
+local Git config. Disabling one repository preserves a custom hooks directory's
+dispatcher for other repositories.
 
 The default scope includes committed changes since the best available main
 branch plus uncommitted and untracked changes. JSON is written to stdout and

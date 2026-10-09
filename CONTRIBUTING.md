@@ -7,7 +7,7 @@ contract can be agreed on first.
 
 ## Development
 
-Roast requires Go 1.27 or newer. Clone the repository, then run:
+Roast requires Go 1.27.2 or newer. Clone the repository, then run:
 
 ```sh
 go test ./...

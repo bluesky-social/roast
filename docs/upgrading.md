@@ -96,6 +96,13 @@ Git gate; it is separate from the retired Claude hook. Enable it explicitly with
 prompt does not prevent later explicit enrollment. Non-interactive invocation
 does not install a hook without consent.
 
+If `core.hooksPath` is shared, each repository must opt in independently.
+`roast gate enable` refreshes an older Roast-owned dispatcher; its presence in
+another repository no longer enrolls that repository. Disabling a custom hooks
+path leaves its dispatcher in place for other repositories and records only the
+current repository's decline. Check each repository's enrollment with
+`roast gate status`.
+
 ## 5. Optional cleanup of the retired Claude integration
 
 This is cleanup on an existing user's machine, not an integration shipped by

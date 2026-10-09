@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -67,12 +69,104 @@ func TestBuildReusesExistingBundle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte("changed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	path2, digest2, size2, err := Build(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if path2 != path || digest2 != digest || size2 != size {
 		t.Fatalf("cached bundle changed: %s %s %d", path2, digest2, size2)
+	}
+	if runtime.GOOS != "windows" {
+		assertMode(t, path, 0o600)
+	}
+}
+
+func TestBuildPrivatePermissions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte("private metadata"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path, _, _, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		assertMode(t, dir, 0o700)
+		assertMode(t, path, 0o600)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	zr, err := zstd.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Mode != 0o600 {
+			t.Fatalf("archive entry %s mode = %o, want 600", hdr.Name, hdr.Mode)
+		}
+	}
+}
+
+func TestBuildRejectsSymlinkedBundle(t *testing.T) {
+	dir, other := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "meta.json"), []byte("metadata"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path, _, _, err := Build(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, filepath.Join(dir, BundleFile)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, _, _, err := Build(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("Build() error = %v, want symlink rejection", err)
+	}
+	if runtime.GOOS != "windows" {
+		assertMode(t, path, 0o644)
+	}
+}
+
+func TestBundleLockPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits do not describe Windows ACLs")
+	}
+	path := filepath.Join(t.TempDir(), "bundle.tmp")
+	if err := acquireBundleLock(path); err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, path, 0o600)
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
 	}
 }
 

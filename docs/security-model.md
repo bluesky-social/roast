@@ -45,6 +45,14 @@ already present in reviewed content, or sensitive model output. Protect the
 Roast data directory and repository's `refs/roast/snapshots/*` with the same
 controls as the repository itself, and prune them according to local policy.
 
+On Unix, Roast creates managed run directories with owner-only (`0700`)
+permissions and artifacts, monthly records, and bundles with `0600` permissions.
+Existing managed directories and files are tightened when written or reused.
+New bundle entries also use `0600`; cached bundles retain their original bytes
+and digest, so older archive entries may still carry their original permissions.
+Roast does not change permissions on an existing configured data root or its
+ancestors, and Unix permission bits do not establish Windows ACL isolation.
+
 Known credential environment values are excluded from run metadata. Roast
 cannot guarantee that a repository, model, provider, or tool result will not
 echo a secret into an artifact or response.
@@ -69,6 +77,13 @@ and a decline is not prompted again. Non-interactive runs never install a hook
 without consent. Roast does not overwrite foreign hooks: compatible shell hooks
 receive a delimited invocation block, while incompatible hooks require a manual
 step.
+
+Gate dispatch requires this repository's local `roast.gate` opt-in, even when
+`core.hooksPath` points to a shared directory. An inherited dispatcher is not
+consent. Disabling a repository with a custom hooks path records a local decline
+and preserves the dispatcher and foreign hooks for other repositories. Existing
+Roast-owned dispatchers are refreshed to enforce this check when encountered;
+foreign scripts are not rewritten.
 
 The gate reviews staged content and fails open on operational errors. Use
 `roast gate status`, `roast gate enable`, and `roast gate disable` to inspect or

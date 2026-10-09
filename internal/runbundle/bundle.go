@@ -74,8 +74,18 @@ var ErrBundleBuildInProgress = errors.New("bundle build already in progress by a
 // itself and temporary files. Git snapshot objects live in the repository's
 // object store, not this directory.
 func Build(runDir string) (path string, sha256hex string, size int64, err error) {
+	if err := os.Chmod(runDir, 0o700); err != nil {
+		return "", "", 0, fmt.Errorf("protect run directory %s: %w", runDir, err)
+	}
 	path = filepath.Join(runDir, BundleFile)
-	if fi, statErr := os.Stat(path); statErr == nil && !fi.IsDir() {
+	if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
+		if !fi.Mode().IsRegular() {
+			return "", "", 0, fmt.Errorf("existing bundle %s is not a regular file", path)
+		}
+		// Keep cached bytes/digests intact, but protect older readable bundles.
+		if err := os.Chmod(path, 0o600); err != nil {
+			return "", "", 0, fmt.Errorf("protect existing bundle %s: %w", path, err)
+		}
 		if _, verifyErr := Verify(path); verifyErr != nil {
 			return "", "", 0, fmt.Errorf("verify existing bundle %s: %w", path, verifyErr)
 		}
@@ -205,7 +215,7 @@ func readRegularArtifact(path, name string) ([]byte, error) {
 // holds this exact tmp path. A tmp left behind by a crashed writer is
 // reclaimed once it is older than bundleStaleLockAge.
 func acquireBundleLock(tmp string) error {
-	if f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644); err == nil {
+	if f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
 		return f.Close()
 	} else if !os.IsExist(err) {
 		return fmt.Errorf("create bundle lock %s: %w", tmp, err)
@@ -232,7 +242,7 @@ func acquireBundleLock(tmp string) error {
 	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reclaim stale bundle lock %s: %w", tmp, err)
 	}
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return ErrBundleBuildInProgress
 	}
@@ -243,9 +253,13 @@ func acquireBundleLock(tmp string) error {
 // at destPath. acquireBundleLock created the file exclusively; opening it for
 // truncation here preserves that cross-process lock.
 func writeBundle(destPath string, files []archiveFile) error {
-	f, err := os.OpenFile(destPath, os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(destPath, os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open bundle: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("protect bundle: %w", err)
 	}
 	// Closed exactly once, on every path: the happy path falls through to
 	// the final f.Close() below; any early return goes through this named
@@ -264,7 +278,7 @@ func writeBundle(destPath string, files []archiveFile) error {
 	tw := tar.NewWriter(zw)
 
 	for _, file := range files {
-		hdr := &tar.Header{Name: file.name, Mode: 0o644, Size: int64(len(file.data)), ModTime: time.Unix(0, 0).UTC()}
+		hdr := &tar.Header{Name: file.name, Mode: 0o600, Size: int64(len(file.data)), ModTime: time.Unix(0, 0).UTC()}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return fmt.Errorf("tar header %s: %w", file.name, err)
 		}

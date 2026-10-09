@@ -47,6 +47,23 @@ func Bootstrap(opts BootstrapOptions) (Outcome, error) {
 	if err != nil {
 		return OutcomeQuiet, err
 	}
+	if status.Shared {
+		if err := refreshOwnedSidecar(status.SidecarPath); err != nil {
+			return OutcomeQuiet, err
+		}
+	}
+	// Refresh only an already recognized Roast dispatcher, never a foreign
+	// hook. In particular, an inherited old shared hook must gain the consent
+	// check even when this repo declined or has not answered yet.
+	if status.Decision != DecisionEnabled && (status.Ours || status.Appended) && status.Stale {
+		if _, _, err := Install(opts.Repo); err != nil {
+			return OutcomeQuiet, err
+		}
+		status, err = Inspect(opts.Repo)
+		if err != nil {
+			return OutcomeQuiet, err
+		}
+	}
 	switch status.Decision {
 	case DecisionDeclined:
 		return OutcomeQuiet, nil
@@ -57,15 +74,6 @@ func Bootstrap(opts BootstrapOptions) (Outcome, error) {
 		return opts.install(false)
 	}
 
-	if status.Active() {
-		if err := RecordDecision(opts.Repo, DecisionEnabled); err != nil {
-			return OutcomeQuiet, err
-		}
-		if !status.Stale {
-			return OutcomeSatisfied, nil
-		}
-		return opts.install(false)
-	}
 	if status.Foreign && !status.Appendable {
 		return opts.hint(status, fmt.Sprintf(
 			"this repo's %s hook is not an appendable shell script, so Roast left it untouched; run `roast gate enable` to install the sidecar and print the line to add",
@@ -99,6 +107,11 @@ func (opts BootstrapOptions) install(record bool) (Outcome, error) {
 		return OutcomeQuiet, err
 	}
 	if action == ActionManual {
+		if record {
+			if err := RecordDecision(opts.Repo, DecisionEnabled); err != nil {
+				return OutcomeQuiet, err
+			}
+		}
 		return opts.hint(status, fmt.Sprintf(
 			"this repo's %s hook cannot be appended to, so Roast left it untouched; add this line to enable the gate:\n    %s",
 			HookName, ManualLine()))
