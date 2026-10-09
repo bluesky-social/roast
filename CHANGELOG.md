@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.3](https://github.com/bluesky-social/roast/compare/v1.1.2...v1.1.3) (2026-10-09)
+
+
+### Bug Fixes
+
+* **deps:** update module golang.org/x/sync to v0.24.0 ([#21](https://github.com/bluesky-social/roast/issues/21)) ([0b2c80e](https://github.com/bluesky-social/roast/commit/0b2c80efd3fee3aa7d15785cdebef5845b6076ed))
+
 ## [1.1.2](https://github.com/bluesky-social/roast/compare/v1.1.1...v1.1.2) (2026-10-09)
 
 
