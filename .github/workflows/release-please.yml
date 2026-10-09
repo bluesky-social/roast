@@ -84,6 +84,15 @@ jobs:
             --jq '.content | @base64d | fromjson | .["."]')"
           if jq -e --arg base_version "${base_version}" --arg next_version "${next_version}" \
             --arg release_branch "${RELEASE_BRANCH}" -f scripts/maintenance-release.jq <<<"${pr}"; then
+            # A bot-created PR can have an approval-required pull_request run
+            # even after dispatched head CI passes. Approve only this eligible
+            # release head's CI using the native API, not arbitrary PR runs.
+            pending_ci="$(gh run list --workflow ci.yml --commit "${head}" \
+              --event pull_request --status action_required --limit 1 \
+              --json databaseId --jq '.[0].databaseId // empty')"
+            if [[ -n "${pending_ci}" ]]; then
+              gh api --method POST "repos/${GH_REPO}/actions/runs/${pending_ci}/approve"
+            fi
             # GitHub enforces the required checks and strict branch protection.
             gh pr merge "${number}" --auto --squash --match-head-commit "${head}"
           elif [[ "$(jq '.autoMergeRequest != null' <<<"${pr}")" == true ]]; then
