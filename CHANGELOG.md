@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/bluesky-social/roast/compare/v1.1.0...v1.1.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **deps:** patch Go toolchain and x/net ([2cba5d1](https://github.com/bluesky-social/roast/commit/2cba5d17f4e4e295a3b55fed18709e13edeafbba))
+* **deps:** update go dependencies ([#11](https://github.com/bluesky-social/roast/issues/11)) ([8c2a2e5](https://github.com/bluesky-social/roast/commit/8c2a2e5cbffe6325b4364adc3f3d24905c3a1455))
+
 ## [1.1.0](https://github.com/bluesky-social/roast/compare/v1.0.14...v1.1.0) (2026-10-02)
 
 
