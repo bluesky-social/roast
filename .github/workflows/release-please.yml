@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch: {}
+  # GITHUB_TOKEN merges do not trigger push workflows. Reconcile them without
+  # adding a personal token or another GitHub App. Avoid the busy top of hour.
+  schedule:
+    - cron: '17 * * * *'
 
 permissions: {}
 
@@ -24,6 +28,12 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      - name: Checkout release policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
       - name: Update release pull request
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
@@ -32,21 +42,42 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # Pull requests opened with github.token do not emit another workflow
-      # event. Dispatch CI explicitly so the release branch still gets checks.
-      - name: Run CI for release pull request
-        if: steps.release.outputs.prs_created == 'true'
+      - name: Queue checked patch release auto-merge
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_BRANCH: release-please--branches--main--components--roast
         run: |
           set -euo pipefail
-          ref="$(jq -r '.[0].headBranchName // empty' <<<"${RELEASE_PRS}")"
-          if [[ -z "${ref}" ]]; then
-            echo "Release Please reported a pull request without a branch"
-            exit 1
+          pr="$(gh pr list --base main --head "${RELEASE_BRANCH}" --state open \
+            --json number,title,author,baseRefName,headRefName,headRefOid,isCrossRepository,files,labels,autoMergeRequest \
+            --jq '.[0] // empty')"
+          if [[ -z "${pr}" ]]; then
+            exit 0
           fi
-          gh workflow run ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${ref}"
+          number="$(jq -r '.number' <<<"${pr}")"
+          head="$(jq -r '.headRefOid' <<<"${pr}")"
+          base_version="$(gh api "repos/${GH_REPO}/contents/.release-please-manifest.json?ref=main" \
+            --jq '.content | @base64d | fromjson | .["."]')"
+          next_version="$(gh api "repos/${GH_REPO}/contents/.release-please-manifest.json?ref=${head}" \
+            --jq '.content | @base64d | fromjson | .["."]')"
+          if jq -e --arg base_version "${base_version}" --arg next_version "${next_version}" \
+            --arg release_branch "${RELEASE_BRANCH}" -f scripts/maintenance-release.jq <<<"${pr}"; then
+            # GitHub enforces the required checks and strict branch protection.
+            gh pr merge "${number}" --auto --squash --match-head-commit "${head}"
+          elif [[ "$(jq '.autoMergeRequest != null' <<<"${pr}")" == true ]]; then
+            # A pending patch can become a minor release or be put on hold.
+            gh pr merge "${number}" --disable-auto
+          fi
+
+          # GITHUB_TOKEN-created PR runs can require approval. Dispatch CI
+          # explicitly, including recovery from an earlier failed dispatch.
+          # Do not rerun unchanged heads every hour or retry failed tests.
+          ci_runs="$(gh run list --workflow ci.yml --commit "${head}" \
+            --event workflow_dispatch --limit 1 --json databaseId --jq 'length')"
+          if [[ "${ci_runs}" == 0 ]]; then
+            gh workflow run ci.yml --ref "${RELEASE_BRANCH}"
+          fi
 
   release:
     name: Release binaries

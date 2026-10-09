@@ -52,6 +52,22 @@ archives with GoReleaser. GoReleaser updates `Casks/roast.rb` on `main` in
 Existing `bluesky-social/tap` installations keep the same package name and
 upgrade with `brew upgrade --cask roast`.
 
+Stable patch release PRs from Release Please are queued for GitHub's native
+squash auto-merge. Required CI checks and strict branch protection still apply.
+Minor, major, prerelease, or source-changing release PRs require manual review.
+Renovate supplies the dependency aging policy (three days for ordinary updates,
+no delay for advisory-driven updates); release automation adds no separate timer.
+
+The release workflow also runs hourly to reconcile bot merges whose push events
+do not start another workflow with `GITHUB_TOKEN`. It runs Release Please and
+the existing build/publish job directly, so no additional personal token or
+GitHub App is required. Scheduled runs can be delayed by GitHub; maintainers
+can run `Release Please` manually to reconcile immediately.
+
+To hold a patch release, add the `release:manual` label and disable any already
+queued auto-merge (`gh pr merge <number> --disable-auto`). Automation leaves
+that PR for manual review. Removing the label makes it eligible again.
+
 The release workflow requires `TAP_GITHUB_TOKEN`, with contents write access to
 the tap. It checks access before building a stable release. The archive
 repository must not have this credential or publish this cask. Preview releases
