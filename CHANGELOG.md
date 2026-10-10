@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.6](https://github.com/bluesky-social/roast/compare/v1.1.5...v1.1.6) (2026-10-10)
+
+
+### Bug Fixes
+
+* **deps:** update module google.golang.org/api to v0.301.0 ([#27](https://github.com/bluesky-social/roast/issues/27)) ([a72d970](https://github.com/bluesky-social/roast/commit/a72d970fad9a27928e1fd91a1a2251bc3baac768))
+
 ## [1.1.5](https://github.com/bluesky-social/roast/compare/v1.1.4...v1.1.5) (2026-10-10)
 
 
