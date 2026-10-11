@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.8](https://github.com/bluesky-social/roast/compare/v1.1.7...v1.1.8) (2026-10-11)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.79.1 ([#31](https://github.com/bluesky-social/roast/issues/31)) ([fd9a2ce](https://github.com/bluesky-social/roast/commit/fd9a2ce15cb3c5d1c3d7746defee0abcf7fcdb70))
+
 ## [1.1.7](https://github.com/bluesky-social/roast/compare/v1.1.6...v1.1.7) (2026-10-11)
 
 
