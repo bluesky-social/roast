@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.10](https://github.com/bluesky-social/roast/compare/v1.1.9...v1.1.10) (2026-10-13)
+
+
+### Bug Fixes
+
+* **deps:** update go dependencies ([#37](https://github.com/bluesky-social/roast/issues/37)) ([10306ee](https://github.com/bluesky-social/roast/commit/10306ee6f6057fad54938e4d6e5a4f089b5828ba))
+
 ## [1.1.9](https://github.com/bluesky-social/roast/compare/v1.1.8...v1.1.9) (2026-10-11)
 
 
