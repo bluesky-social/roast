@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.12](https://github.com/bluesky-social/roast/compare/v1.1.11...v1.1.12) (2026-10-15)
+
+
+### Bug Fixes
+
+* **deps:** replace prerelease dependency pins ([923fd08](https://github.com/bluesky-social/roast/commit/923fd08019a7ef20078f368b577bda1fdb3439a8))
+
 ## [1.1.11](https://github.com/bluesky-social/roast/compare/v1.1.10...v1.1.11) (2026-10-15)
 
 
