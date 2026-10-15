@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.11](https://github.com/bluesky-social/roast/compare/v1.1.10...v1.1.11) (2026-10-15)
+
+
+### Bug Fixes
+
+* **llm:** preserve conversation identity across provider calls ([244d9fa](https://github.com/bluesky-social/roast/commit/244d9fac547a56812a1b721919d99c7d2701e64e))
+
 ## [1.1.10](https://github.com/bluesky-social/roast/compare/v1.1.9...v1.1.10) (2026-10-13)
 
 
