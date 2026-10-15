@@ -5,7 +5,7 @@ go 1.27.2
 require (
 	charm.land/fantasy v0.45.2
 	github.com/invopop/jsonschema v0.14.0
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v3 v3.0.5
