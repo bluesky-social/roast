@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.13](https://github.com/bluesky-social/roast/compare/v1.1.12...v1.1.13) (2026-10-15)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/klauspost/compress to v1.20.3 ([#42](https://github.com/bluesky-social/roast/issues/42)) ([72d175c](https://github.com/bluesky-social/roast/commit/72d175c151a4f062b70bb295d494118f51738cc4))
+
 ## [1.1.12](https://github.com/bluesky-social/roast/compare/v1.1.11...v1.1.12) (2026-10-15)
 
 
