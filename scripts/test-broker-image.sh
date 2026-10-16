@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Exercise the shipped image without credentials or a reachable object store.
+set -euo pipefail
+
+image=${1:?usage: test-broker-image.sh IMAGE}
+container="roast-broker-test-$$"
+trap 'docker logs "$container"; docker rm --force "$container" >/dev/null' EXIT
+docker run --detach --name "$container" \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --publish 127.0.0.1::8080 \
+  --env ROAST_BROKER_S3_ENDPOINT=http://127.0.0.1:1 \
+  --env ROAST_BROKER_S3_BUCKET=smoke-test \
+  --env ROAST_BROKER_S3_ACCESS_KEY=test \
+  --env ROAST_BROKER_S3_SECRET_KEY=test \
+  --env ROAST_BROKER_SIGNING_KEY=smoke-test-signing-key-not-a-secret \
+  --env ROAST_BROKER_PRINCIPAL_HEADER=X-Test-Principal \
+  "$image"
+port=$(docker port "$container" 8080/tcp)
+curl --fail --silent --show-error --retry 10 --retry-connrefused \
+  --retry-delay 1 --retry-max-time 30 "http://$port/healthz"
+docker exec "$container" /roast-broker healthcheck

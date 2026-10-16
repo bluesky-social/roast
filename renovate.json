@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", ":semanticCommits"],
+  "extends": ["config:recommended", ":semanticCommits", "docker:pinDigests"],
   "enabledManagers": ["gomod", "dockerfile", "github-actions"],
   "minimumReleaseAge": "3 days",
   "internalChecksFilter": "strict",
@@ -62,6 +62,12 @@
       "matchDepNames": ["go", "golang"],
       "matchUpdateTypes": ["minor", "major"],
       "automerge": false
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "Container image digests",
+      "automerge": true
     }
   ]
 }

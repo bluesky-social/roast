@@ -3,13 +3,16 @@ version: 2
 
 project_name: roast
 
+snapshot:
+  version_template: '{{ if index .Env "ROAST_PREVIEW_VERSION" }}{{ index .Env "ROAST_PREVIEW_VERSION" }}{{ else }}{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}{{ end }}'
+
 before:
   hooks:
     - bash scripts/licenses.sh
 
 builds:
   - id: roast
-    binary: roast
+    binary: "{{ if .IsSnapshot }}roast-preview{{ else }}roast{{ end }}"
     main: ./cmd/roast
     env:
       - CGO_ENABLED=0
@@ -22,30 +25,44 @@ builds:
       - arm64
     flags:
       - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w
-      - -X github.com/bluesky-social/roast/internal/buildinfo.Version={{ .Tag }}
+      - -X github.com/bluesky-social/roast/internal/buildinfo.Version={{ if .IsSnapshot }}{{ .Version }}{{ else }}{{ .Tag }}{{ end }}
       - -X github.com/bluesky-social/roast/internal/buildinfo.Commit={{ .ShortCommit }}
-      - -X github.com/bluesky-social/roast/internal/buildinfo.Date={{ .Date }}
+      - -X github.com/bluesky-social/roast/internal/buildinfo.Date={{ .CommitDate }}
 
 archives:
   - id: roast
     ids: [roast]
     formats: [tar.gz]
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "{{ if .IsSnapshot }}roast-preview{{ else }}{{ .ProjectName }}{{ end }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds_info:
+      owner: root
+      group: root
+      mtime: "{{ .CommitDate }}"
     format_overrides:
       - goos: windows
         formats: [zip]
     files:
-      - LICENSE.txt
-      - LICENSE-APACHE.txt
-      - LICENSE-MIT.txt
-      - README.md
-      - SECURITY.md
-      - THIRD_PARTY_LICENSES/*
+      - src: LICENSE.txt
+        info: &file_info
+          owner: root
+          group: root
+          mtime: "{{ .CommitDate }}"
+      - src: LICENSE-APACHE.txt
+        info: *file_info
+      - src: LICENSE-MIT.txt
+        info: *file_info
+      - src: README.md
+        info: *file_info
+      - src: SECURITY.md
+        info: *file_info
+      - src: THIRD_PARTY_LICENSES/*
+        info: *file_info
 
 checksum:
-  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  name_template: "{{ if .IsSnapshot }}roast-preview{{ else }}{{ .ProjectName }}{{ end }}_{{ .Version }}_checksums.txt"
   algorithm: sha256
 
 changelog:
@@ -56,14 +73,16 @@ changelog:
       - "^test:"
 
 release:
-  # Release Please creates the release before GoReleaser attaches binaries.
+  # Release Please creates the tag and a draft. GoReleaser reuses the draft,
+  # preserves its notes, and publishes only after its artifacts are uploaded.
+  use_existing_draft: true
   mode: keep-existing
 
 # Keep the existing cask identity so current installations upgrade in place.
 homebrew_casks:
   - name: roast
     ids: [roast]
-    binaries: [roast]
+    binaries: ["{{ if .IsSnapshot }}roast-preview{{ else }}roast{{ end }}"]
     directory: Casks
     description: "Adversarial cross-model code review CLI"
     homepage: https://github.com/bluesky-social/roast

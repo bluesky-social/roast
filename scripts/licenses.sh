@@ -18,20 +18,24 @@ done
 
 # Only replace a bundle this script owns, never a user-provided directory or
 # symlink. Stage everything first so failed generation preserves the old one.
-marker='roast runtime notices: go-licenses/v2 v2.0.1'
+marker='roast runtime notices: v1'
 if [[ -e THIRD_PARTY_LICENSES || -L THIRD_PARTY_LICENSES ]]; then
-  if [[ -L THIRD_PARTY_LICENSES || ! -f THIRD_PARTY_LICENSES/.roast-generated ]] ||
-    [[ "$(<THIRD_PARTY_LICENSES/.roast-generated)" != "$marker" ]]; then
+  if [[ -L THIRD_PARTY_LICENSES || ! -f THIRD_PARTY_LICENSES/.roast-generated ]]; then
     echo 'refusing to replace an unowned THIRD_PARTY_LICENSES directory' >&2
     exit 1
   fi
+  case "$(<THIRD_PARTY_LICENSES/.roast-generated)" in
+    "$marker"|'roast runtime notices: go-licenses/v2 v2.0.1') ;;
+    *) echo 'refusing to replace an unowned THIRD_PARTY_LICENSES directory' >&2; exit 1 ;;
+  esac
 fi
 
 license_work=$(mktemp -d "${TMPDIR:-/tmp}/roast-licenses.XXXXXXXX")
 trap 'rm -r -- "$license_work"' EXIT
 mkdir -p "$license_work/bin" "$license_work/bundle"
 env GOOS="$(go env GOHOSTOS)" GOARCH="$(go env GOHOSTARCH)" \
-  GOBIN="$license_work/bin" go install github.com/google/go-licenses/v2@v2.0.1
+  go build -modfile=.github/tools/licenses/go.mod -o "$license_work/bin/go-licenses" \
+  github.com/google/go-licenses/v2
 license_tool="$license_work/bin/go-licenses"
 allowed='Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,MPL-2.0,Unlicense'
 

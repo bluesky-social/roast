@@ -6,7 +6,9 @@
       "component": "roast",
       "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",
-      "versioning": "default"
+      "versioning": "default",
+      "draft": true,
+      "force-tag-creation": true
     }
   }
 }

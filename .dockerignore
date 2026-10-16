@@ -1,5 +1,8 @@
 .git
-.github
+.github/*
+!.github/tools/
+.github/tools/*
+!.github/tools/licenses/
 dist
 bin
 THIRD_PARTY_LICENSES

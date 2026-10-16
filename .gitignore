@@ -4,3 +4,5 @@
 *.test
 /roast
 /roast.exe
+/roast-broker
+/roast-broker.exe

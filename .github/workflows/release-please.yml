@@ -18,6 +18,8 @@ concurrency:
 jobs:
   release-please:
     name: Prepare release
+    # Forks and manually selected branches must not run upstream release policy.
+    if: github.repository == 'bluesky-social/roast' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -48,7 +50,6 @@ jobs:
       - name: Checkout release policy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
           persist-credentials: false
 
       - name: Queue checked patch release auto-merge
@@ -100,11 +101,11 @@ jobs:
             gh pr merge "${number}" --disable-auto
           fi
 
-          # GITHUB_TOKEN-created PR runs can require approval. Dispatch CI
-          # explicitly, including recovery from an earlier failed dispatch.
-          # Do not rerun unchanged heads every hour or retry failed tests.
+          # Use native PR CI when present. Dispatch only if neither native nor
+          # dispatched CI exists; a failed run still needs human attention.
           ci_runs="$(gh run list --workflow ci.yml --commit "${head}" \
-            --event workflow_dispatch --limit 1 --json databaseId --jq 'length')"
+            --limit 100 --json event \
+            --jq '[.[] | select(.event == "pull_request" or .event == "workflow_dispatch")] | length')"
           if [[ "${ci_runs}" == 0 ]]; then
             gh workflow run ci.yml --ref "${RELEASE_BRANCH}"
           fi
@@ -145,7 +146,9 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: false
+          cache-dependency-path: |
+            go.sum
+            .github/tools/*/go.sum
 
       - name: Test
         run: go test ./...
