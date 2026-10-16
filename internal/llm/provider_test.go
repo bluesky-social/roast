@@ -121,7 +121,7 @@ func TestAnthropicAgentUsesNativeMessages(t *testing.T) {
 	}
 }
 
-func TestResponsesAgentReplaysToolOutputAndForcesFinalTurn(t *testing.T) {
+func TestResponsesAgentReplaysToolOutputAndRestrictsFinalTurn(t *testing.T) {
 	var mu sync.Mutex
 	var requests []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +185,9 @@ func TestResponsesAgentReplaysToolOutputAndForcesFinalTurn(t *testing.T) {
 	if len(requests) != 2 || requests[1]["previous_response_id"] != nil || requests[1]["store"] != false {
 		t.Fatalf("requests = %#v", requests)
 	}
+	if requests[1]["tool_choice"] != "auto" {
+		t.Fatalf("final tool choice = %#v, want auto", requests[1]["tool_choice"])
+	}
 	tools, _ := requests[1]["tools"].([]any)
 	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "submit" {
 		t.Fatalf("second tools = %#v", requests[1]["tools"])
@@ -196,11 +199,16 @@ func TestResponsesAgentReplaysToolOutputAndForcesFinalTurn(t *testing.T) {
 	}
 }
 
-func TestAnthropicCompleteStructuredForcesTool(t *testing.T) {
+func TestAnthropicCompleteStructuredUsesAutomaticToolChoice(t *testing.T) {
 	var request map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		_ = json.NewDecoder(r.Body).Decode(&request)
+		choice, _ := request["tool_choice"].(map[string]any)
+		if choice["type"] != "auto" {
+			http.Error(w, `{"type":"error","error":{"type":"invalid_request_error","message":"forced tool choice is not supported"}}`, http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = testutil.WriteInferenceStream(w, "anthropic", anthropicResponse("verdict", `{"status":"confirmed"}`))
 	}))
@@ -223,7 +231,7 @@ func TestAnthropicCompleteStructuredForcesTool(t *testing.T) {
 	}
 	choice, _ := request["tool_choice"].(map[string]any)
 	tools, _ := request["tools"].([]any)
-	if choice["type"] != "tool" || choice["name"] != "verdict" || len(tools) != 1 {
+	if choice["type"] != "auto" || len(tools) != 1 || tools[0].(map[string]any)["name"] != "verdict" {
 		t.Fatalf("request = %#v", request)
 	}
 }

@@ -32,12 +32,15 @@ func TestAnthropicNativeMessagesPreservesOutputBudget(t *testing.T) {
 					return
 				}
 				var request struct {
-					Model     string            `json:"model"`
-					MaxTokens int               `json:"max_tokens"`
-					Stream    bool              `json:"stream"`
-					System    json.RawMessage   `json:"system"`
-					Messages  json.RawMessage   `json:"messages"`
-					Tools     []json.RawMessage `json:"tools"`
+					Model      string            `json:"model"`
+					MaxTokens  int               `json:"max_tokens"`
+					Stream     bool              `json:"stream"`
+					System     json.RawMessage   `json:"system"`
+					Messages   json.RawMessage   `json:"messages"`
+					Tools      []json.RawMessage `json:"tools"`
+					ToolChoice struct {
+						Type string `json:"type"`
+					} `json:"tool_choice"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 					t.Errorf("decode native request: %v", err)
@@ -47,6 +50,10 @@ func TestAnthropicNativeMessagesPreservesOutputBudget(t *testing.T) {
 				if request.MaxTokens != budget || request.Model != "claude-test" || len(request.System) == 0 || len(request.Tools) == 0 {
 					t.Errorf("native request lost its budget/model/system/tools: %+v", request)
 					http.Error(w, "request configuration changed", http.StatusBadRequest)
+					return
+				}
+				if request.ToolChoice.Type != "auto" {
+					http.Error(w, "forced tool choice is not supported", http.StatusBadRequest)
 					return
 				}
 				tool, arguments := "read", `{"path":"fixture.go"}`

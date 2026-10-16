@@ -2,9 +2,9 @@ package llm
 
 import "errors"
 
-// ErrNoFinalCall means a Converse loop hit MaxTurns without the model
-// calling the final tool. Callers decide the policy (the verify stage
-// fails open; the finder reports a note).
+// ErrNoFinalCall means finalization exhausted its bounded submission attempts
+// without a valid final tool call. The finder reports incomplete coverage;
+// verifier failures leave candidates unverified rather than refuting them.
 var ErrNoFinalCall = errors.New("llm: tool loop ended without a final tool call")
 
 // ErrWorkDeadline marks a Converse loop cut off by ConverseOpts.WorkDeadline.

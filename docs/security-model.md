@@ -22,7 +22,7 @@ before replacing the user's configuration.
 A review sends its prompt, selected diff or repository manifest, file content,
 tool schemas, and local tool results to the configured finder endpoint. Candidate
 findings and the code needed to adjudicate them are sent to the configured
-verifier endpoint. `roast doctor` makes a small forced-tool inference request to
+verifier endpoint. `roast doctor` makes a small tool-submission inference request to
 each configured role in addition to querying its model-listing endpoint.
 
 Roast does not infer trust from a model name. An OpenAI-compatible gateway,

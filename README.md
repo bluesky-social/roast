@@ -272,9 +272,14 @@ roast doctor
 
 `roast doctor` validates the resolved profiles and credentials, performs an
 authenticated `GET` of each provider's `/models` endpoint, then makes one small
-forced-tool inference request through each configured model and protocol. It
+tool-submission inference request through each configured model and protocol. It
 also reports Git/gate, Agent Skill, upload, and release status. Use `--json` for
 machine-readable results.
+
+Finalization uses automatic tool selection with only the result tool available.
+Roast accepts only a schema-validated tool submission, not free-form text. Missing
+submissions receive bounded reminders within the existing attempt, token, and
+deadline limits; an exhausted run is incomplete, never silently clean.
 
 On the first interactive review in a repository, Roast asks once whether to
 install its staged-content pre-commit gate. The answer is stored in local Git

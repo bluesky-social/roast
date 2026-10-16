@@ -32,7 +32,8 @@ type agentRunState struct {
 	toolNames   map[string]bool
 	toolSchemas map[string]map[string]any
 
-	structuredCalls     int
+	// Count all final-phase responses, even ones Fantasy rejects before dispatch.
+	submissionAttempts  int
 	validationExhausted bool
 	budgetOnce          sync.Once
 }
@@ -96,12 +97,14 @@ func (s *agentRunState) prepareStep(ctx context.Context, opts fantasy.PrepareSte
 
 	prepared := fantasy.PrepareStepResult{Messages: messages, ActiveTools: s.active}
 	if s.finalTurn {
-		choice := fantasy.SpecificToolChoice(s.opts.FinalTool)
 		prepared.ActiveTools = []string{s.opts.FinalTool}
-		prepared.ToolChoice = &choice
-		if !s.noticeSent && !s.structured {
+		if !s.noticeSent {
 			s.noticeSent = true
-			prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(s.notice()))
+			notice := s.notice()
+			if s.structured {
+				notice = "Return the requested structured result via the `" + s.opts.FinalTool + "` tool call. Do not answer in prose."
+			}
+			prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(notice))
 		}
 	}
 	return ctx, prepared, nil
@@ -138,7 +141,7 @@ func (m *managedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 	}
 	final := onlyFinalTool(call.Tools, m.state.opts.FinalTool)
 	if final {
-		choice := fantasy.SpecificToolChoice(m.state.opts.FinalTool)
+		choice := fantasy.ToolChoiceAuto
 		call.ToolChoice = &choice
 	}
 	return func(yield func(fantasy.StreamPart) bool) {
@@ -297,10 +300,19 @@ func (m *managedModel) finalCall(call fantasy.Call, notice string) fantasy.Call 
 		}
 	}
 	call.Tools = tools
-	choice := fantasy.SpecificToolChoice(m.state.opts.FinalTool)
+	choice := fantasy.ToolChoiceAuto
 	call.ToolChoice = &choice
 	call.Prompt = append(call.Prompt, fantasy.NewUserMessage(notice))
 	return call
+}
+
+func (m *managedModel) canRetrySubmission() bool {
+	// Never reopen exploration or start another wrap-up window after a cutoff.
+	// Every reminder still goes through the normal token admission and deadlines.
+	if m.state.wd.check() {
+		m.state.forceFinal(ErrWorkDeadline)
+	}
+	return m.state.cutoff == nil && m.state.submissionAttempts < maxAttempts(m.client.cfg)
 }
 
 func (m *managedModel) rewriteResponse(resp *fantasy.Response) *fantasy.Response {
@@ -332,10 +344,12 @@ func (m *managedModel) rewriteResponse(resp *fantasy.Response) *fantasy.Response
 		}
 	}
 
+	if m.state.finalTurn {
+		m.state.submissionAttempts++
+	}
 	if finalCall != nil {
-		m.state.structuredCalls++
 		validationErr := validateFinalArguments(finalCall.Input, m.state.out)
-		if validationErr != nil && m.state.structured && m.state.structuredCalls < maxAttempts(m.client.cfg) {
+		if validationErr != nil && m.state.finalTurn && m.canRetrySubmission() {
 			// This failure is provisional. Do not let it mask a provider error
 			// from the follow-up call.
 			m.state.finalErr = nil
@@ -350,6 +364,20 @@ func (m *managedModel) rewriteResponse(resp *fantasy.Response) *fantasy.Response
 		}
 		resp.Content = fantasy.ResponseContent{*finalCall}
 		resp.FinishReason = fantasy.FinishReasonToolCalls
+		return resp
+	}
+
+	if m.state.finalTurn {
+		// Auto tool selection can produce prose or hallucinated tool calls. Only
+		// a validated final submission may finish successfully; never dispatch
+		// exploration tools, even ones Fantasy still knows how to execute.
+		resp.Content = nil
+		resp.FinishReason = fantasy.FinishReasonStop
+		if m.canRetrySubmission() {
+			resp.Content = fantasy.ResponseContent{nudgeCall(fmt.Sprintf("roast-final-%d", m.state.submissionAttempts),
+				"Exploration is finished. Return the result via the `"+m.state.opts.FinalTool+"` tool call, not prose or another tool.")}
+			resp.FinishReason = fantasy.FinishReasonToolCalls
+		}
 		return resp
 	}
 
@@ -419,7 +447,8 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 			return nil, errors.New("tool-call repair disabled")
 		}),
 		fantasy.WithStopConditions(func([]fantasy.StepResult) bool {
-			return state.finalDone || state.validationExhausted
+			return state.finalDone || state.validationExhausted ||
+				(state.finalTurn && state.submissionAttempts >= maxAttempts(c.cfg))
 		}),
 	)
 

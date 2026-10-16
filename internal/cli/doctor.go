@@ -169,7 +169,7 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 		if errors.Is(err, llm.ErrAuth) {
 			return doctorResult{name + "-roundtrip", doctorFail, "credential rejected by the configured inference route"}
 		}
-		return doctorResult{name + "-roundtrip", doctorFail, fmt.Sprintf("%s/%s forced-tool probe failed: %v", role.Protocol, role.Model, err)}
+		return doctorResult{name + "-roundtrip", doctorFail, fmt.Sprintf("%s/%s tool-submission probe failed: %v", role.Protocol, role.Model, err)}
 	}
 	if !output.OK {
 		return doctorResult{name + "-roundtrip", doctorFail, "doctor_probe returned ok=false"}
