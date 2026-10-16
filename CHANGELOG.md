@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.15](https://github.com/bluesky-social/roast/compare/v1.1.14...v1.1.15) (2026-10-16)
+
+
+### Bug Fixes
+
+* **llm:** finalize with automatic tool selection ([#55](https://github.com/bluesky-social/roast/issues/55)) ([4f4ce4c](https://github.com/bluesky-social/roast/commit/4f4ce4ca8f45f57d37ce6c7e26816d870818e37f))
+
 ## [1.1.14](https://github.com/bluesky-social/roast/compare/v1.1.13...v1.1.14) (2026-10-16)
 
 
