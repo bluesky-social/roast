@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.14](https://github.com/bluesky-social/roast/compare/v1.1.13...v1.1.14) (2026-10-16)
+
+
+### Bug Fixes
+
+* harden releases and stream native inference ([#47](https://github.com/bluesky-social/roast/issues/47)) ([5cc7121](https://github.com/bluesky-social/roast/commit/5cc712181a93fd541ff1e9a471b37fa50fc2a157))
+
 ## [1.1.13](https://github.com/bluesky-social/roast/compare/v1.1.12...v1.1.13) (2026-10-15)
 
 
