@@ -697,7 +697,7 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	snapshotDurable = true
 	responseRecorder := record.NewResponseRecorder(runID)
 	captureResponse := func(response llm.RawResponse) error {
-		return responseRecorder.Append(response.Role, response.Protocol, response.Model, response.Body)
+		return responseRecorder.Append(response.Role, response.Protocol, response.Model, response.ContentType, response.Body)
 	}
 	finder, err := llm.New(ctx, clientConfig("finder", finderRole, ledger, captureResponse, maxAttempts, requestTimeout))
 	if err != nil {

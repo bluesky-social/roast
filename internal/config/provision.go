@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,8 +33,9 @@ func LegacyUserPath() (string, error) {
 	return filepath.Join(home, ".config", "roast", "config.yaml"), nil
 }
 
-// NeedsProvision reports whether path contains an unversioned pre-public
-// configuration which should be upgraded with an organization template.
+// NeedsProvision reports whether an organization template could initialize a
+// legacy config or authorize a native-protocol update. A Claude model served
+// through a compatibility protocol is only a candidate, not necessarily wrong.
 func NeedsProvision(path string) (bool, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -46,7 +50,68 @@ func NeedsProvision(path string) (bool, error) {
 	if err := decodeKnown(raw, &header, false); err != nil {
 		return false, err
 	}
-	return header.Version == nil, nil
+	if header.Version == nil {
+		return true, nil
+	}
+	cfg, err := decode(raw)
+	if err != nil {
+		return false, err
+	}
+	if len(compatibilityProfiles(cfg)) == 0 {
+		return false, nil
+	}
+	acknowledged, err := os.ReadFile(path + ".protocol-update-ack")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return string(acknowledged) != fmt.Sprintf("%x\n", sha256.Sum256(raw)), nil
+}
+
+// AcknowledgeProtocolUpdate records a choice for these exact config bytes,
+// without storing credentials or modifying the config. A later config edit
+// invalidates the choice; explicit config init never consults this marker.
+func AcknowledgeProtocolUpdate(path string) error {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var header struct {
+		Version *int `yaml:"version"`
+	}
+	if err := decodeKnown(raw, &header, false); err != nil || header.Version == nil {
+		return err
+	}
+	cfg, err := decode(raw)
+	if err != nil || len(compatibilityProfiles(cfg)) == 0 {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".protocol-update-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if _, err := fmt.Fprintf(file, "%x\n", sha256.Sum256(raw)); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path+".protocol-update-ack")
+}
+
+func compatibilityProfiles(cfg Config) []string {
+	var names []string
+	for name, profile := range cfg.InferenceProfiles {
+		if InferFamily(profile.Model) == "anthropic" && (profile.Protocol == "" || profile.Protocol == "chat" || profile.Protocol == "responses") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Provision downloads a complete versioned configuration, optionally carries
@@ -54,9 +119,36 @@ func NeedsProvision(path string) (bool, error) {
 // it at path. The remote document may contain endpoint and model policy but no
 // inline secrets.
 func Provision(ctx context.Context, sourceURL, path, legacyPath string) error {
+	if path == "" {
+		var err error
+		path, err = UserPath()
+		if err != nil {
+			return err
+		}
+	}
 	raw, cfg, err := fetchProvision(ctx, sourceURL)
 	if err != nil {
 		return err
+	}
+	if existing, readErr := os.ReadFile(path); readErr == nil {
+		var header struct {
+			Version *int `yaml:"version"`
+		}
+		if err := decodeKnown(existing, &header, false); err != nil {
+			return err
+		}
+		if header.Version != nil {
+			updated, err := updateProtocols(existing, cfg)
+			if err != nil {
+				return err
+			}
+			if err := writeAtomic(path, updated, ".pre-protocol-update"); err != nil {
+				return err
+			}
+			return AcknowledgeProtocolUpdate(path)
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
 	}
 	if legacyPath != "" {
 		legacyRaw, readErr := os.ReadFile(legacyPath)
@@ -86,14 +178,81 @@ func Provision(ctx context.Context, sourceURL, path, legacyPath string) error {
 			}
 		}
 	}
-	if path == "" {
-		path, err = UserPath()
-		if err != nil {
-			return err
+	backupSuffix := ""
+	if legacyPath != "" && filepath.Clean(path) == filepath.Clean(legacyPath) {
+		backupSuffix = ".pre-v1"
+	}
+	return writeAtomic(path, raw, backupSuffix)
+}
+
+// updateProtocols uses an explicitly supplied template as the authority for
+// endpoint support. It never infers gateway capabilities from model names alone
+// and never replaces a versioned config with the template's unrelated settings.
+func updateProtocols(raw []byte, template Config) ([]byte, error) {
+	cfg, err := decode(raw)
+	if err != nil {
+		return nil, err
+	}
+	var updates []string
+	for _, name := range compatibilityProfiles(cfg) {
+		profile := cfg.InferenceProfiles[name]
+		for _, target := range template.InferenceProfiles {
+			if profile.BaseURL != "" && strings.TrimRight(profile.BaseURL, "/") == strings.TrimRight(target.BaseURL, "/") &&
+				InferFamily(target.Model) == "anthropic" && target.Protocol == "anthropic" {
+				updates = append(updates, name)
+				profile.Protocol = "anthropic"
+				cfg.InferenceProfiles[name] = profile
+				break
+			}
 		}
 	}
-	replaceLegacy := legacyPath != "" && filepath.Clean(path) == filepath.Clean(legacyPath)
-	return writeAtomic(path, raw, replaceLegacy)
+	if len(updates) == 0 {
+		return nil, errors.New("config already exists; the template authorizes no matching Claude protocol updates (use --output for a new config)")
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	profiles := yamlMappingValue(document.Content[0], "inference_profiles")
+	for _, name := range updates {
+		profile := yamlMappingValue(profiles, name)
+		if profile == nil || profile.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("profile %q uses a YAML alias; update its protocol manually", name)
+		}
+		if node := yamlMappingValue(profile, "protocol"); node != nil {
+			node.Kind, node.Tag, node.Value = yaml.ScalarNode, "!!str", "anthropic"
+			node.Alias, node.Content = nil, nil
+		} else {
+			profile.Content = append(profile.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "protocol"}, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "anthropic"})
+		}
+	}
+	updated, err := yaml.Marshal(&document)
+	if err != nil {
+		return nil, err
+	}
+	actual, err := decode(updated)
+	if err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(actual, cfg) {
+		return nil, errors.New("protocol update would change other settings through YAML aliases; update protocols manually")
+	}
+	if _, err := normalize(actual); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(updated), nil
+}
+
+func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
 }
 
 func fetchProvision(ctx context.Context, sourceURL string) ([]byte, Config, error) {
@@ -172,7 +331,7 @@ func ValidateProvisionDocument(raw []byte) (Config, error) {
 	return cfg, nil
 }
 
-func writeAtomic(path string, raw []byte, replaceLegacy bool) error {
+func writeAtomic(path string, raw []byte, backupSuffix string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
@@ -199,15 +358,15 @@ func writeAtomic(path string, raw []byte, replaceLegacy bool) error {
 		return err
 	}
 	if info, err := os.Lstat(path); err == nil {
-		if !replaceLegacy {
+		if backupSuffix == "" {
 			return fmt.Errorf("config already exists at %s", path)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return fmt.Errorf("refusing to replace non-regular legacy config at %s", path)
+			return fmt.Errorf("refusing to replace non-regular config at %s", path)
 		}
-		backup := path + ".pre-v1"
-		if err := ensureLegacyBackup(path, backup, info.Mode().Perm()); err != nil {
-			return fmt.Errorf("back up legacy config: %w", err)
+		backup := path + backupSuffix
+		if err := ensureLegacyBackup(path, backup, 0o600); err != nil {
+			return fmt.Errorf("back up config: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

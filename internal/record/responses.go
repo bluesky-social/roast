@@ -6,10 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"unicode/utf8"
 )
 
-// ProviderResponsesFile is the append-only successful-response transcript.
-// It records response JSON only, never request headers or credentials.
+// ProviderResponsesFile is the append-only provider-response transcript.
+// It records native response bodies, never request headers or credentials.
 const ProviderResponsesFile = "provider-responses.jsonl"
 
 // ResponseRecorder serializes model responses from concurrent verifier calls.
@@ -23,24 +24,37 @@ func NewResponseRecorder(runID string) *ResponseRecorder {
 	return &ResponseRecorder{runID: runID}
 }
 
-// Append durably appends one valid provider JSON body.
-func (r *ResponseRecorder) Append(role, protocol, model string, body json.RawMessage) error {
+// Append durably appends a native provider body. JSON stays JSON; raw SSE is
+// stored losslessly as a JSON string, identified by its content_type.
+func (r *ResponseRecorder) Append(role, protocol, model, contentType string, body []byte) error {
 	if r == nil || r.runID == "" || filepath.Base(r.runID) != r.runID || r.runID == "." {
 		return fmt.Errorf("record provider response: invalid run id")
 	}
-	if !json.Valid(body) {
-		return fmt.Errorf("record provider response: body is not valid JSON")
+	encodedBody := json.RawMessage(body)
+	switch contentType {
+	case "application/json":
+		if !json.Valid(body) {
+			return fmt.Errorf("record provider response: body is not valid JSON")
+		}
+	case "text/event-stream":
+		if !utf8.Valid(body) {
+			return fmt.Errorf("record provider response: event stream is not valid UTF-8")
+		}
+		encodedBody, _ = json.Marshal(string(body))
+	default:
+		return fmt.Errorf("record provider response: unsupported content type %q", contentType)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.seq++
 	line, err := json.Marshal(struct {
-		Sequence int             `json:"sequence"`
-		Role     string          `json:"role"`
-		Protocol string          `json:"protocol"`
-		Model    string          `json:"model"`
-		Body     json.RawMessage `json:"body"`
-	}{r.seq, role, protocol, model, body})
+		Sequence    int             `json:"sequence"`
+		Role        string          `json:"role"`
+		Protocol    string          `json:"protocol"`
+		Model       string          `json:"model"`
+		ContentType string          `json:"content_type"`
+		Body        json.RawMessage `json:"body"`
+	}{r.seq, role, protocol, model, contentType, encodedBody})
 	if err != nil {
 		return fmt.Errorf("marshal provider response: %w", err)
 	}

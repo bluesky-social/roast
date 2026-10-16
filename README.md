@@ -366,11 +366,17 @@ writes the result to stdout, while diagnostics remain on stderr.
 Every non-empty review creates a local run under `$XDG_DATA_HOME/roast`, or
 `~/.local/share/roast` when that variable is unset (override either with
 `ROAST_RECORD_DIR`). It records secret-free role configuration, invocation
-argv, exact prompts and reviewed input, successful raw provider response JSON,
+argv, exact prompts and reviewed input, raw provider response bodies,
 normalized usage, results, a Git snapshot, and a deterministic
 `bundle.tar.zst`. Provider requests, HTTP headers, and credentials are not
 recorded. The snapshot and digests make a run reproducible by external tooling
 without recording API keys or other credential values.
+
+Inference uses each configured protocol's native streaming implementation in
+Fantasy. `provider-responses.jsonl` identifies each captured body's
+`content_type`: JSON bodies remain JSON values, while `text/event-stream`
+bodies are stored as JSON strings containing the original SSE bytes, including
+partial streams from failed attempts. No inference protocol conversion is used.
 
 Repository-navigation tools read that immutable snapshot during the run. For
 staged reviews they read the captured index; other reviews read the captured

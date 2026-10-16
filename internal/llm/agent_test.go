@@ -14,14 +14,43 @@ import (
 
 type fakeLanguageModel struct {
 	generate func(context.Context, fantasy.Call) (*fantasy.Response, error)
+	stream   func(context.Context, fantasy.Call) (fantasy.StreamResponse, error)
 }
 
 func (m *fakeLanguageModel) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
 	return m.generate(ctx, call)
 }
 
-func (*fakeLanguageModel) Stream(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
-	return nil, errors.New("not implemented")
+func (m *fakeLanguageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	if m.stream != nil {
+		return m.stream(ctx, call)
+	}
+	return func(yield func(fantasy.StreamPart) bool) {
+		response, err := m.generate(ctx, call)
+		if err != nil {
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
+			return
+		}
+		for _, item := range response.Content {
+			switch item := item.(type) {
+			case fantasy.ToolCallContent:
+				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: item.ToolCallID, ToolCallName: item.ToolName, ToolCallInput: item.Input}) {
+					return
+				}
+			case fantasy.TextContent:
+				for _, part := range []fantasy.StreamPart{
+					{Type: fantasy.StreamPartTypeTextStart, ID: "text"},
+					{Type: fantasy.StreamPartTypeTextDelta, ID: "text", Delta: item.Text},
+					{Type: fantasy.StreamPartTypeTextEnd, ID: "text"},
+				} {
+					if !yield(part) {
+						return
+					}
+				}
+			}
+		}
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: response.FinishReason, Usage: response.Usage})
+	}, nil
 }
 
 func (*fakeLanguageModel) GenerateObject(context.Context, fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {

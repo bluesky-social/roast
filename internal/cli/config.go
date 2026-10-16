@@ -76,11 +76,16 @@ func maybeProvision(cmd *cobra.Command, explicitPath string, stdout io.Writer) e
 	if err != nil || stat.Mode()&os.ModeCharDevice == 0 {
 		return nil
 	}
+	return offerProvision(cmd, path, legacy, input, stdout)
+}
+
+func offerProvision(cmd *cobra.Command, path, legacy string, input io.Reader, stdout io.Writer) error {
 	if legacy == "" {
 		legacy, _ = config.LegacyUserPath()
 	}
 	if _, err := os.Stat(legacy); err == nil {
-		_, _ = fmt.Fprintf(stdout, "Roast found a legacy configuration at %s.\n", legacy)
+		_, _ = fmt.Fprintf(stdout, "Roast found a configuration to initialize or update at %s.\n", legacy)
+		_, _ = fmt.Fprintln(stdout, "A trusted configuration URL can update matching Claude profiles to native Messages without replacing your other settings. Leave blank to keep intentional compatibility protocols.")
 	} else {
 		legacy = ""
 		_, _ = fmt.Fprintln(stdout, "Roast is not configured.")
@@ -89,7 +94,7 @@ func maybeProvision(cmd *cobra.Command, explicitPath string, stdout io.Writer) e
 	line, _ := bufio.NewReader(input).ReadString('\n')
 	sourceURL := strings.TrimSpace(line)
 	if sourceURL == "" {
-		return nil
+		return config.AcknowledgeProtocolUpdate(path)
 	}
 	if err := config.Provision(cmd.Context(), sourceURL, path, legacy); err != nil {
 		return &usageError{msg: err.Error()}

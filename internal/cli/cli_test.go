@@ -20,6 +20,7 @@ import (
 	"github.com/bluesky-social/roast/internal/llm"
 	"github.com/bluesky-social/roast/internal/record"
 	"github.com/bluesky-social/roast/internal/runbundle"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestExitCodeContract(t *testing.T) {
@@ -348,7 +349,7 @@ func TestFinderVerifierPipelineWithMockEndpoint(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"id":"test","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`, request.Model, name, arguments)
+		_ = testutil.WriteJSONStream(w, "chat", fmt.Sprintf(`{"id":"test","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`, request.Model, name, arguments))
 	}))
 	defer server.Close()
 	var uploadMu sync.Mutex
@@ -526,7 +527,7 @@ func TestNativeAnthropicFinderWithChatVerifier(t *testing.T) {
 				http.Error(w, "unexpected Anthropic request", http.StatusBadRequest)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			_ = testutil.WriteInferenceStream(w, "anthropic", map[string]any{
 				"id": "msg", "type": "message", "role": "assistant", "model": request.Model,
 				"content": []any{map[string]any{
 					"type": "tool_use", "id": "toolu-findings", "name": "findings",
@@ -542,7 +543,7 @@ func TestNativeAnthropicFinderWithChatVerifier(t *testing.T) {
 				"stop_reason": "tool_use", "usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
 			})
 		case "/v1/chat/completions":
-			_, _ = w.Write([]byte(`{"id":"test","object":"chat.completion","created":1,"model":"verifier-test","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"submit_verdict","arguments":"{\"reasoning\":\"the panic is unconditional\",\"status\":\"confirmed\",\"confidence\":0.99,\"grounding\":\"bad.go line 3 calls panic unconditionally\",\"recalibrated_severity\":\"\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+			_ = testutil.WriteJSONStream(w, "chat", `{"id":"test","object":"chat.completion","created":1,"model":"verifier-test","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"submit_verdict","arguments":"{\"reasoning\":\"the panic is unconditional\",\"status\":\"confirmed\",\"confidence\":0.99,\"grounding\":\"bad.go line 3 calls panic unconditionally\",\"recalibrated_severity\":\"\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -634,7 +635,7 @@ func TestRepositorySurveyUsesManifestAndInteractiveTools(t *testing.T) {
 			arguments = `{"assessment":"NO_FINDINGS","findings":[]}`
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"id":"test","object":"chat.completion","created":1,"model":"finder-test","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call-%d","type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`, call, name, arguments)
+		_ = testutil.WriteJSONStream(w, "chat", fmt.Sprintf(`{"id":"test","object":"chat.completion","created":1,"model":"finder-test","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call-%d","type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`, call, name, arguments))
 	}))
 	defer server.Close()
 

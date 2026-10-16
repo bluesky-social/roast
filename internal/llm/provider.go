@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"reflect"
 	"strings"
@@ -41,17 +42,19 @@ type ClientConfig struct {
 	CaptureResponse func(RawResponse) error
 }
 
-// RawResponse is a successful provider body without requests or headers.
+// RawResponse is a provider HTTP response body without requests or headers.
 type RawResponse struct {
-	Role     string
-	Protocol string
-	Model    string
-	Body     json.RawMessage
+	Role        string
+	Protocol    string
+	Model       string
+	ContentType string
+	Body        []byte
 }
 
 type client struct {
-	cfg   ClientConfig
-	model fantasy.LanguageModel
+	cfg       ClientConfig
+	model     fantasy.LanguageModel
+	transport *captureTransport
 
 	mu    sync.Mutex
 	usage Usage
@@ -104,7 +107,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize %s model %q: %w", protocolName(cfg), cfg.Model, err)
 	}
-	return &client{cfg: cfg, model: mdl}, nil
+	return &client{cfg: cfg, model: mdl, transport: httpClient.Transport.(*captureTransport)}, nil
 }
 
 func userAgent() string { return "roast/" + buildinfo.Version }
@@ -164,6 +167,19 @@ type captureError struct{ err error }
 
 type sessionContextKey struct{}
 
+// Each model attempt owns its response body, including when a provider stops
+// reading at a terminal SSE event rather than EOF. Never share bodies between
+// concurrent verifier calls.
+type responseBodyKey struct{}
+type responseBody struct{ body io.ReadCloser }
+
+func (b *responseBody) close() error {
+	if b.body == nil {
+		return nil
+	}
+	return b.body.Close()
+}
+
 func (e *captureError) Error() string { return e.err.Error() }
 func (e *captureError) Unwrap() error { return e.err }
 
@@ -182,6 +198,15 @@ func (t *captureTransport) fail(err error) error {
 	return wrapped
 }
 
+func (t *captureTransport) failure() error {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.failed
+}
+
 func (t *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 	failed := t.failed
@@ -194,12 +219,23 @@ func (t *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		req.Header.Set("X-Agent-Session-Id", sessionID)
 	}
 	resp, err := t.base.RoundTrip(req)
-	if err != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 || t.cfg.CaptureResponse == nil {
+	if err != nil || resp == nil {
 		return resp, err
+	}
+	if owner, ok := req.Context().Value(responseBodyKey{}).(*responseBody); ok {
+		defer func() { owner.body = resp.Body }()
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || t.cfg.CaptureResponse == nil {
+		return resp, nil
 	}
 	if resp.ContentLength > maxCapturedResponseSize {
 		_ = resp.Body.Close()
 		return nil, t.fail(fmt.Errorf("capture %s provider response: body exceeds %d-byte limit", t.cfg.Role, maxCapturedResponseSize))
+	}
+	contentType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if contentType == "text/event-stream" {
+		resp.Body = &streamCaptureBody{body: resp.Body, transport: t}
+		return resp, nil
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCapturedResponseSize+1))
 	_ = resp.Body.Close()
@@ -215,12 +251,54 @@ func (t *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	captureErr := t.cfg.CaptureResponse(RawResponse{
 		Role: t.cfg.Role, Protocol: protocolName(t.cfg), Model: t.cfg.Model,
-		Body: append(json.RawMessage(nil), body...),
+		ContentType: "application/json", Body: body,
 	})
 	if captureErr == nil {
 		return resp, nil
 	}
 	return nil, t.fail(fmt.Errorf("capture %s provider response: %w", t.cfg.Role, captureErr))
+}
+
+// Tee raw SSE bytes as Fantasy consumes them. Do not parse provider events,
+// eagerly drain the stream, or reconstruct a non-streaming provider response.
+type streamCaptureBody struct {
+	body      io.ReadCloser
+	transport *captureTransport
+	data      bytes.Buffer
+	err       error
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (b *streamCaptureBody) Read(p []byte) (int, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+	n, err := b.body.Read(p)
+	if n > maxCapturedResponseSize-b.data.Len() {
+		b.err = b.transport.fail(fmt.Errorf("capture %s provider response: body exceeds %d-byte limit", b.transport.cfg.Role, maxCapturedResponseSize))
+		return 0, b.err
+	}
+	_, _ = b.data.Write(p[:n])
+	return n, err
+}
+
+func (b *streamCaptureBody) Close() error {
+	b.closeOnce.Do(func() {
+		b.closeErr = b.body.Close()
+		if b.err != nil {
+			b.closeErr = b.err
+			return
+		}
+		cfg := b.transport.cfg
+		if err := cfg.CaptureResponse(RawResponse{
+			Role: cfg.Role, Protocol: protocolName(cfg), Model: cfg.Model,
+			ContentType: "text/event-stream", Body: append([]byte(nil), b.data.Bytes()...),
+		}); err != nil {
+			b.closeErr = b.transport.fail(fmt.Errorf("capture %s provider response: %w", cfg.Role, err))
+		}
+	})
+	return b.closeErr
 }
 
 func providerHTTPClient(cfg ClientConfig) *http.Client {

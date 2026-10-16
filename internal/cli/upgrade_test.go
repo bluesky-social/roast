@@ -20,6 +20,7 @@ import (
 	"github.com/bluesky-social/roast/internal/record"
 	"github.com/bluesky-social/roast/internal/runbundle"
 	"github.com/bluesky-social/roast/internal/runupload"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 // Exercise the real CLI enrollment, both model roles, durable records, and
@@ -91,7 +92,7 @@ upload:
 				}
 				modelCalls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"id":"upgrade","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call","type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`, request.Model, name, arguments)
+				_ = testutil.WriteJSONStream(w, "chat", fmt.Sprintf(`{"id":"upgrade","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call","type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`, request.Model, name, arguments))
 			}))
 			defer models.Close()
 

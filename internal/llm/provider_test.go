@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func anthropicResponse(tool, arguments string) map[string]any {
@@ -55,7 +57,7 @@ func TestAnthropicAgentUsesNativeMessages(t *testing.T) {
 			tool, args = "submit", `{"answer":"done"}`
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(anthropicResponse(tool, args))
+		_ = testutil.WriteInferenceStream(w, "anthropic", anthropicResponse(tool, args))
 	}))
 	defer server.Close()
 
@@ -93,6 +95,11 @@ func TestAnthropicAgentUsesNativeMessages(t *testing.T) {
 	}
 	if requests[0]["system"] == nil {
 		t.Fatalf("first request lacks system prompt: %#v", requests[0])
+	}
+	for _, request := range requests {
+		if request["stream"] != true {
+			t.Fatal("native Anthropic request did not enable streaming")
+		}
 	}
 	secondTools, _ := requests[1]["tools"].([]any)
 	if len(secondTools) != 1 || secondTools[0].(map[string]any)["name"] != "submit" {
@@ -139,7 +146,7 @@ func TestResponsesAgentReplaysToolOutputAndForcesFinalTurn(t *testing.T) {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		_ = testutil.WriteInferenceStream(w, "responses", map[string]any{
 			"id": "resp-" + string(rune('0'+call)), "object": "response", "created_at": 1,
 			"status": "completed", "model": "test-model", "output": []any{output},
 			"usage": map[string]any{
@@ -195,7 +202,7 @@ func TestAnthropicCompleteStructuredForcesTool(t *testing.T) {
 		defer r.Body.Close()
 		_ = json.NewDecoder(r.Body).Decode(&request)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(anthropicResponse("verdict", `{"status":"confirmed"}`))
+		_ = testutil.WriteInferenceStream(w, "anthropic", anthropicResponse("verdict", `{"status":"confirmed"}`))
 	}))
 	defer server.Close()
 	c, err := New(t.Context(), ClientConfig{
@@ -226,7 +233,7 @@ func TestCaptureFailureDoesNotRetryProviderCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(anthropicResponse("verdict", `{"status":"confirmed"}`))
+		_ = testutil.WriteInferenceStream(w, "anthropic", anthropicResponse("verdict", `{"status":"confirmed"}`))
 	}))
 	defer server.Close()
 	c, err := New(t.Context(), ClientConfig{

@@ -115,7 +115,11 @@ type managedModel struct {
 func (m *managedModel) Provider() string { return m.client.model.Provider() }
 func (m *managedModel) Model() string    { return m.client.model.Model() }
 
-func (m *managedModel) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
+func (m *managedModel) Generate(context.Context, fantasy.Call) (*fantasy.Response, error) {
+	return nil, errors.New("roast agent runtime requires streaming")
+}
+
+func (m *managedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
 	// Fantasy's AgentTool API keeps only properties and required. Restore the
 	// complete caller-supplied JSON Schema at the model boundary so providers
 	// that accept it retain top-level constraints such as additionalProperties.
@@ -137,63 +141,144 @@ func (m *managedModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 		choice := fantasy.SpecificToolChoice(m.state.opts.FinalTool)
 		call.ToolChoice = &choice
 	}
-	toolJSON, _ := json.Marshal(call.Tools)
-	release, err := m.client.cfg.Ledger.Reserve(fantasyConversationBytes(call.Prompt)+len(toolJSON)+2048, m.client.cfg.MaxOutputTokens, final)
-	if err != nil {
-		if final {
-			if m.state.cutoff == nil {
-				m.state.forceFinal(ErrBudgetExhausted)
-				m.state.notifyBudget()
+	return func(yield func(fantasy.StreamPart) bool) {
+		toolJSON, _ := json.Marshal(call.Tools)
+		release, err := m.client.cfg.Ledger.Reserve(fantasyConversationBytes(call.Prompt)+len(toolJSON)+2048, m.client.cfg.MaxOutputTokens, final)
+		if err != nil {
+			if final {
+				if m.state.cutoff == nil {
+					m.state.forceFinal(ErrBudgetExhausted)
+					m.state.notifyBudget()
+				}
+				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: m.state.cutoffError("no headroom for the wrap-up call", err)})
+				return
 			}
-			return nil, m.state.cutoffError("no headroom for the wrap-up call", err)
+			m.state.forceFinal(ErrBudgetExhausted)
+			m.state.notifyBudget()
+			m.streamFinal(ctx, call, yield)
+			return
 		}
-		m.state.forceFinal(ErrBudgetExhausted)
-		m.state.notifyBudget()
-		return m.Generate(ctx, m.finalCall(call, m.state.notice()))
-	}
 
-	callCtx, cancel := m.state.wd.callCtx(ctx)
-	if m.client.cfg.RequestTimeout > 0 {
-		deadlineCtx, deadlineCancel := context.WithTimeout(callCtx, m.client.cfg.RequestTimeout)
-		workCancel := cancel
-		callCtx = deadlineCtx
-		cancel = func() {
-			deadlineCancel()
-			workCancel()
+		err = m.streamCall(ctx, call, release, yield)
+		deadlineReached := m.state.wd.check()
+		if err == nil || errors.Is(err, errStreamStopped) {
+			return
+		}
+		var captureErr *captureError
+		if errors.As(err, &captureErr) {
+			err = permanentModelError{err: err}
+		} else if !final && deadlineReached && ctx.Err() == nil {
+			m.state.forceFinal(ErrWorkDeadline)
+			m.streamFinal(ctx, call, yield)
+			return
+		} else if final && m.state.cutoff != nil {
+			err = m.state.cutoffError("wrap-up call failed", normalizeProviderError(ctx, m.client.cfg.Model, err))
+		}
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
+	}, nil
+}
+
+var errStreamStopped = errors.New("stream consumer stopped")
+
+func (m *managedModel) streamFinal(ctx context.Context, call fantasy.Call, yield func(fantasy.StreamPart) bool) {
+	stream, err := m.Stream(ctx, m.finalCall(call, m.state.notice()))
+	if err != nil {
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
+		return
+	}
+	for part := range stream {
+		if !yield(part) {
+			return
 		}
 	}
-	resp, callErr := m.client.model.Generate(callCtx, call)
-	usage := Usage{}
-	if resp != nil {
-		usage = m.client.addUsage(resp.Usage)
+}
+
+func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, release func(Usage), yield func(fantasy.StreamPart) bool) (callErr error) {
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	callCtx, workCancel := m.state.wd.callCtx(callCtx)
+	defer workCancel()
+	if m.client.cfg.RequestTimeout > 0 {
+		var deadlineCancel context.CancelFunc
+		callCtx, deadlineCancel = context.WithTimeout(callCtx, m.client.cfg.RequestTimeout)
+		defer deadlineCancel()
 	}
-	release(usage)
-	deadlineReached := m.state.wd.check()
-	cancel()
-	if callErr == nil {
-		return m.rewriteResponse(resp), nil
+	body := &responseBody{}
+	callCtx = context.WithValue(callCtx, responseBodyKey{}, body)
+	var finish *fantasy.StreamPart
+	defer func() {
+		usage := Usage{}
+		if finish != nil {
+			usage = m.client.addUsage(finish.Usage)
+		}
+		release(usage)
+	}()
+	defer func() {
+		cancel()
+		_ = body.close()
+		if err := m.client.transport.failure(); err != nil {
+			callErr = err
+		}
+	}()
+	stream, err := m.client.model.Stream(callCtx, call)
+	if err != nil {
+		return err
 	}
-	if !final && deadlineReached {
-		m.state.forceFinal(ErrWorkDeadline)
-		return m.Generate(ctx, m.finalCall(call, m.state.notice()))
+	var content fantasy.ResponseContent
+	for part := range stream {
+		switch part.Type {
+		case fantasy.StreamPartTypeError:
+			return part.Error
+		case fantasy.StreamPartTypeFinish:
+			finish = &part
+		case fantasy.StreamPartTypeToolCall:
+			content = append(content, fantasy.ToolCallContent{
+				ToolCallID: part.ID, ToolName: part.ToolCallName, Input: part.ToolCallInput,
+				ProviderExecuted: part.ProviderExecuted, ProviderMetadata: part.ProviderMetadata,
+			})
+		default:
+			if !yield(part) {
+				return errStreamStopped
+			}
+		}
 	}
-	if final && m.state.cutoff != nil {
-		return nil, m.state.cutoffError("wrap-up call failed", normalizeProviderError(ctx, m.client.cfg.Model, callErr))
+	// Capture must succeed before Fantasy is allowed to dispatch any tool, even
+	// if the SDK stopped at a terminal event without reading through EOF.
+	_ = body.close()
+	if err := m.client.transport.failure(); err != nil {
+		return err
 	}
-	var captureErr *captureError
-	if errors.As(callErr, &captureErr) {
-		return nil, permanentModelError{err: callErr}
+	if err := callCtx.Err(); err != nil {
+		return err
 	}
-	return nil, callErr
+	if finish == nil {
+		return fantasy.NewIncompleteStreamError()
+	}
+	response := &fantasy.Response{Content: content, FinishReason: finish.FinishReason}
+	// Let Fantasy reject incomplete/truncated/filtered turns. Rewriting their
+	// finish reason to tool_calls could execute a partial tool invocation.
+	if finish.FinishReason == fantasy.FinishReasonToolCalls || finish.FinishReason == fantasy.FinishReasonStop {
+		response = m.rewriteResponse(response)
+	}
+	for _, tool := range response.Content.ToolCalls() {
+		if !yield(fantasy.StreamPart{
+			Type: fantasy.StreamPartTypeToolCall, ID: tool.ToolCallID,
+			ToolCallName: tool.ToolName, ToolCallInput: tool.Input,
+			ProviderExecuted: tool.ProviderExecuted, ProviderMetadata: tool.ProviderMetadata,
+		}) {
+			return errStreamStopped
+		}
+	}
+	finish.FinishReason = response.FinishReason
+	if !yield(*finish) {
+		return errStreamStopped
+	}
+	return nil
 }
 
 type permanentModelError struct{ err error }
 
 func (e permanentModelError) Error() string { return e.err.Error() }
-
-func (m *managedModel) Stream(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
-	return nil, errors.New("roast agent runtime does not stream model responses")
-}
 
 func (m *managedModel) GenerateObject(context.Context, fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
 	return nil, errors.New("roast agent runtime does not generate objects directly")
@@ -339,7 +424,7 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 	)
 
 	ctx = context.WithValue(ctx, sessionContextKey{}, "roast-"+rand.Text())
-	_, runErr := agent.Generate(ctx, fantasy.AgentCall{Prompt: user})
+	_, runErr := agent.Stream(ctx, fantasy.AgentStreamCall{Prompt: user})
 	var permanent permanentModelError
 	if errors.As(runErr, &permanent) {
 		// permanentModelError is intentionally opaque while Fantasy classifies
@@ -407,6 +492,13 @@ func explorationFantasyTool(info fantasy.ToolInfo, definition Tool, state *agent
 
 func finalFantasyTool(info fantasy.ToolInfo, state *agentRunState) fantasy.AgentTool {
 	return &roastFantasyTool{info: info, run: func(_ context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		// Fantasy may repair malformed JSON locally. A final submission that
+		// Roast already rejected must not become successful after that repair.
+		if state.finalErr != nil {
+			resp := fantasy.NewTextErrorResponse(state.finalErr.Error())
+			resp.StopTurn = true
+			return resp, nil
+		}
 		resp := fantasy.NewTextResponse(call.Input)
 		resp.StopTurn = true
 		if err := json.Unmarshal([]byte(call.Input), state.out); err != nil {

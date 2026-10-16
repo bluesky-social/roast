@@ -1,7 +1,6 @@
 package record
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,7 +36,7 @@ func TestPrivateRecordPermissions(t *testing.T) {
 			}
 		}},
 		{"responses", ProviderResponsesFile, func(t *testing.T) {
-			if err := NewResponseRecorder(runID).Append("finder", "responses", "model", json.RawMessage(`{}`)); err != nil {
+			if err := NewResponseRecorder(runID).Append("finder", "responses", "model", "application/json", []byte(`{}`)); err != nil {
 				t.Fatal(err)
 			}
 		}},

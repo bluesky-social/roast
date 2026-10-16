@@ -33,9 +33,14 @@ roast doctor
 ```
 
 Use the URL supplied by your maintainer, not the illustrative URL above.
-An interactive first review also offers the configuration-URL prompt when the
-current config is missing or unversioned. Non-interactive runs do not prompt;
-initialize them explicitly. An explicit `--config` bypasses automatic enrollment.
+An interactive review also offers the configuration-URL prompt when the current
+config is missing, unversioned, or has Claude profiles using Chat Completions or
+Responses. Compatibility protocols can be intentional; leave the URL blank to
+keep them. For versioned configs, that choice is recorded in a private sibling
+`.protocol-update-ack` file containing only the config's hash, so the prompt does
+not repeat unless the config changes. Explicit `config init` still works after
+a decline. Non-interactive runs do not prompt or update files. An explicit
+`--config` bypasses automatic enrollment.
 
 The configuration document must declare `version: 1` and contain no inline
 secrets. It may name credential environment variables. If a trusted template
@@ -59,8 +64,24 @@ operating system's user-config directory:
 a `.pre-v1` backup and writes the new file with owner-only permissions on Unix.
 When the destination differs, the old file is left untouched. Both the old file
 and any backup can contain credentials: protect them and never attach them to a
-public bug report. Provisioning refuses to overwrite an existing versioned
-destination. For a deliberate alternate destination, use `--output <new-path>`.
+public bug report.
+
+For an existing versioned destination, `config init` only repairs Claude
+compatibility protocols authorized by the supplied template. The template must
+configure a Claude profile with `protocol: anthropic` at the same endpoint.
+Matching local Claude profiles change to native Messages, including alternate
+profiles selected by author routes. Model names, credentials, output limits,
+roles, prompts, uploads, and other local settings remain unchanged. YAML comments
+are preserved, and the original file is backed up as `.pre-protocol-update` with
+owner-only permissions. Aliases which would change unrelated settings cause the
+update to stop without replacing the file.
+
+The template does not replace other settings in a versioned destination. If it
+authorizes no matching protocol updates, the existing file is left untouched.
+For a deliberate new configuration, use `--output <new-path>`. Updating a remote
+template alone does not update existing installations: users must accept the
+interactive URL prompt or run `config init` explicitly. No organization-specific
+endpoint or model policy is built into Roast.
 
 Without a configuration URL, use the README's named-profile examples. Roast
 can load old inline-role configs in memory; the retired `gate` and `sourcebot`

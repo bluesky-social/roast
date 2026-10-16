@@ -3,7 +3,7 @@ module github.com/bluesky-social/roast
 go 1.27.2
 
 require (
-	charm.land/fantasy v0.45.2
+	charm.land/fantasy v0.45.3
 	github.com/invopop/jsonschema v0.14.0
 	github.com/klauspost/compress v1.20.3
 	github.com/minio/minio-go/v7 v7.3.0

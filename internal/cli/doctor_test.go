@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/bluesky-social/roast/internal/config"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestDoctorEndpointCheck(t *testing.T) {
@@ -36,7 +37,7 @@ func TestDoctorJSON(t *testing.T) {
 			_, _ = w.Write([]byte(`{"data":[]}`))
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		_ = testutil.WriteInferenceStream(w, "responses", map[string]any{
 			"id": "resp-doctor", "object": "response", "created_at": 1,
 			"status": "completed", "model": "doctor-model",
 			"output": []any{map[string]any{
@@ -82,7 +83,7 @@ func TestDoctorRoundtripUsesConfiguredResponsesRoute(t *testing.T) {
 			t.Errorf("path=%q auth=%q", r.URL.Path, r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp","object":"response","created_at":1,"status":"completed","model":"finder-model","output":[{"id":"fc","type":"function_call","call_id":"call","name":"doctor_probe","arguments":"{\"ok\":true}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`))
+		_ = testutil.WriteJSONStream(w, "responses", `{"id":"resp","object":"response","created_at":1,"status":"completed","model":"finder-model","output":[{"id":"fc","type":"function_call","call_id":"call","name":"doctor_probe","arguments":"{\"ok\":true}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
 	}))
 	defer server.Close()
 	result := doctorRoundtripCheck(t.Context(), "finder", config.ResolvedRole{

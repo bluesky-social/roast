@@ -2,7 +2,6 @@ package llm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestProviderConversationIdentity(test *testing.T) {
@@ -57,7 +57,7 @@ func TestProviderConversationIdentity(test *testing.T) {
 				if attempt >= 3 {
 					tool, arguments = "submit", `{"answer":"done"}`
 				}
-				var response any
+				var response map[string]any
 				switch protocol {
 				case "anthropic":
 					response = anthropicResponse(tool, arguments)
@@ -83,7 +83,7 @@ func TestProviderConversationIdentity(test *testing.T) {
 						"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 					}
 				}
-				_ = json.NewEncoder(writer).Encode(response)
+				_ = testutil.WriteInferenceStream(writer, protocol, response)
 			}))
 			defer server.Close()
 			client, err := New(test.Context(), ClientConfig{
