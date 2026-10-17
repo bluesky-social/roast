@@ -25,6 +25,10 @@ func newRepo(t *testing.T) string {
 		dir = resolved
 	}
 	git(t, dir, "init", "-q")
+	// These disposable repos do not need background object maintenance. Git
+	// commits may detach it, racing TempDir's removal of .git/objects.
+	git(t, dir, "config", "maintenance.auto", "false")
+	git(t, dir, "config", "gc.auto", "0")
 	git(t, dir, "config", "user.email", "roast-test@example.com")
 	git(t, dir, "config", "user.name", "roast test")
 	git(t, dir, "config", "commit.gpgsign", "false")
@@ -38,6 +42,15 @@ func git(t *testing.T, repo string, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func TestRepoDisablesAutomaticMaintenance(t *testing.T) {
+	repo := newRepo(t)
+	for key, want := range map[string]string{"maintenance.auto": "false", "gc.auto": "0"} {
+		if got := git(t, repo, "config", "--local", "--get", key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
 }
 
 func writeHook(t *testing.T, path, body string, mode os.FileMode) {

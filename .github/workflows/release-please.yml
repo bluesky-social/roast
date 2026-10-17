@@ -75,8 +75,7 @@ jobs:
           # its metadata before eligibility/CI checks.
           if jq -e '.isCrossRepository == false and .author.is_bot == true
             and (.author.login == "app/github-actions" or .author.login == "github-actions[bot]")' <<<"${pr}"; then
-            gh pr update-branch "${number}"
-            pr="$(gh pr view "${number}" --json "${release_fields}")"
+            pr="$(bash scripts/refresh-release-pr.sh "${number}" "${release_fields}")"
           fi
           head="$(jq -r '.headRefOid' <<<"${pr}")"
           base_version="$(gh api "repos/${GH_REPO}/contents/.release-please-manifest.json?ref=main" \
