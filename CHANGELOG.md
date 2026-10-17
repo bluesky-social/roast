@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.16](https://github.com/bluesky-social/roast/compare/v1.1.15...v1.1.16) (2026-10-17)
+
+
+### Bug Fixes
+
+* **ci:** wait for refreshed release heads and isolate Git fixtures ([#57](https://github.com/bluesky-social/roast/issues/57)) ([a5b71c8](https://github.com/bluesky-social/roast/commit/a5b71c88ccc8775efe5d0765a21c40dd4081783b))
+* **deps:** update go dependencies ([#46](https://github.com/bluesky-social/roast/issues/46)) ([826dcbf](https://github.com/bluesky-social/roast/commit/826dcbf7ef0b3ff19312fb2450d5db93ed7314b3))
+
 ## [1.1.15](https://github.com/bluesky-social/roast/compare/v1.1.14...v1.1.15) (2026-10-16)
 
 
