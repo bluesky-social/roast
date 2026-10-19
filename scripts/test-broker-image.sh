@@ -22,6 +22,8 @@ grep -Fq 'Copyright (c) 2018 Igneous Systems' <<<"$notice"
 grep -Fq 'The above copyright notice and this permission notice shall be included in all' <<<"$notice"
 grep -Fxq '  SOFTWARE.' <<<"$notice"
 port=$(docker port "$container" 8080/tcp)
-curl --fail --silent --show-error --retry 10 --retry-connrefused \
-  --retry-delay 1 --retry-max-time 30 "http://$port/healthz"
+# The Docker port proxy can accept connections before the server is ready and
+# return an empty reply rather than ECONNREFUSED. This GET is safe to retry.
+curl --fail --silent --show-error --retry 10 --retry-all-errors \
+  --max-time 5 --retry-delay 1 --retry-max-time 30 "http://$port/healthz"
 docker exec "$container" /roast-broker healthcheck
