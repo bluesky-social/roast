@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.19](https://github.com/bluesky-social/roast/compare/v1.1.18...v1.1.19) (2026-10-19)
+
+
+### Bug Fixes
+
+* include embedded MIT notice in distribution bundles ([#65](https://github.com/bluesky-social/roast/issues/65)) ([f435b86](https://github.com/bluesky-social/roast/commit/f435b8690f3070d5d22ba04f58d4751b054bdfee))
+
 ## [1.1.18](https://github.com/bluesky-social/roast/compare/v1.1.17...v1.1.18) (2026-10-18)
 
 
