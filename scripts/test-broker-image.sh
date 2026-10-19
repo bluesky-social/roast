@@ -15,6 +15,12 @@ docker run --detach --name "$container" \
   --env ROAST_BROKER_SIGNING_KEY=smoke-test-signing-key-not-a-secret \
   --env ROAST_BROKER_PRINCIPAL_HEADER=X-Test-Principal \
   "$image"
+# Inspect the final image, not just the build-stage bundle. Distroless has no
+# shell, so use Docker's archive API to read the supplemental assembly notice.
+notice=$(docker cp "$container:/usr/share/licenses/roast/third-party/github.com/minio/md5-simd/NOTICE-Igneous-Systems-MIT.txt" - | tar -xOf -)
+grep -Fq 'Copyright (c) 2018 Igneous Systems' <<<"$notice"
+grep -Fq 'The above copyright notice and this permission notice shall be included in all' <<<"$notice"
+grep -Fxq '  SOFTWARE.' <<<"$notice"
 port=$(docker port "$container" 8080/tcp)
 curl --fail --silent --show-error --retry 10 --retry-connrefused \
   --retry-delay 1 --retry-max-time 30 "http://$port/healthz"

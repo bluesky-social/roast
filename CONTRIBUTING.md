@@ -138,6 +138,10 @@ path. Run `roast --version` after upgrading to confirm which binary is active.
 notices for all six CGO-disabled CLI release targets, plus the broker. It uses
 the `go-licenses/v2` tool module in `.github/tools/licenses`, generates per-target
 CSV inventories, and includes the Go runtime/standard-library license.
+It also extracts the embedded Igneous Systems MIT grant from the selected
+`md5-simd` assembly source into `NOTICE-Igneous-Systems-MIT.txt`; the scanner only
+collects its root Apache license. Generation fails if the expected complete
+grant cannot be found, leaving any previous generated bundle intact.
 Generated files live in the ignored
 `THIRD_PARTY_LICENSES/` directory, separate from Roast's own licenses. The script
 refuses to replace a directory it did not generate.

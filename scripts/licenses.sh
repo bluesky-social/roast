@@ -58,6 +58,28 @@ for target in "${targets[@]}"; do
     > "$license_work/bundle/$goos-$goarch.csv"
 done
 
+# go-licenses collects md5-simd's module-root Apache license, but its AMD64
+# assembly also carries an Igneous Systems MIT grant. Keep the entire grant
+# from the selected module source, not a separately maintained copy. Include
+# it in every bundle so target subsets and broker images carry the same notice.
+md5_module=$(go list -m -f '{{.Dir}}' github.com/minio/md5-simd)
+md5_notice="$license_work/bundle/github.com/minio/md5-simd/NOTICE-Igneous-Systems-MIT.txt"
+mkdir -p "$(dirname "$md5_notice")"
+if ! awk '
+  $0 == "// Copyright (c) 2018 Igneous Systems" { copying = 1 }
+  copying {
+    if ($0 !~ /^\/\//) exit 1
+    line = $0
+    sub(/^\/\/ ?/, "", line)
+    print line
+    if ($0 == "//   SOFTWARE.") { complete = 1; exit }
+  }
+  END { if (!complete) exit 1 }
+' "$md5_module/block8_amd64.s" > "$md5_notice"; then
+  echo 'cannot collect complete embedded md5-simd MIT notice; inspect the selected dependency source' >&2
+  exit 1
+fi
+
 # The Go runtime and standard library are also part of static binaries.
 go_root=$(go env GOROOT)
 go_license="$go_root/LICENSE"
