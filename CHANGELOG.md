@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.20](https://github.com/bluesky-social/roast/compare/v1.1.19...v1.1.20) (2026-10-19)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/klauspost/cpuid/v2 to v2.4.1 ([#67](https://github.com/bluesky-social/roast/issues/67)) ([d155427](https://github.com/bluesky-social/roast/commit/d155427ce336c05518d40d0a8aa8df5c9f5e02e1))
+
 ## [1.1.19](https://github.com/bluesky-social/roast/compare/v1.1.18...v1.1.19) (2026-10-19)
 
 
