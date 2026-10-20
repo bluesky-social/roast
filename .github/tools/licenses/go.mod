@@ -1,6 +1,6 @@
 module github.com/bluesky-social/roast/tools/licenses
 
-go 1.27.2
+go 1.27.3
 
 tool github.com/google/go-licenses/v2
 
