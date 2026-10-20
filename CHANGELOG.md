@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.21](https://github.com/bluesky-social/roast/compare/v1.1.20...v1.1.21) (2026-10-20)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/philhofer/fwd to v1.2.1 ([#70](https://github.com/bluesky-social/roast/issues/70)) ([9f84e11](https://github.com/bluesky-social/roast/commit/9f84e1144574d6a6d7d1da2dc1f9a0de2094897f))
+
 ## [1.1.20](https://github.com/bluesky-social/roast/compare/v1.1.19...v1.1.20) (2026-10-19)
 
 
