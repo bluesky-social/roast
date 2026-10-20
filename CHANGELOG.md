@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.22](https://github.com/bluesky-social/roast/compare/v1.1.21...v1.1.22) (2026-10-20)
+
+
+### Bug Fixes
+
+* build with Go 1.27.3 for CVE-2026-111943 ([#69](https://github.com/bluesky-social/roast/issues/69)) ([9a56c4c](https://github.com/bluesky-social/roast/commit/9a56c4c646ad24a84b6aa1737457080511ca5dfe))
+
 ## [1.1.21](https://github.com/bluesky-social/roast/compare/v1.1.20...v1.1.21) (2026-10-20)
 
 
