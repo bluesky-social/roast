@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.23](https://github.com/bluesky-social/roast/compare/v1.1.22...v1.1.23) (2026-10-24)
+
+
+### Bug Fixes
+
+* **deps:** update golang:1.27.3 docker digest to f20d83a ([#76](https://github.com/bluesky-social/roast/issues/76)) ([57faeb1](https://github.com/bluesky-social/roast/commit/57faeb1a693d820ca223392699c5194bf87bd021))
+
 ## [1.1.22](https://github.com/bluesky-social/roast/compare/v1.1.21...v1.1.22) (2026-10-20)
 
 
