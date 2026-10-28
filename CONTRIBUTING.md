@@ -74,23 +74,20 @@ GoReleaser updates `Casks/roast.rb` on `main` in
 Existing `bluesky-social/tap` installations keep the same package name and
 upgrade with `brew upgrade --cask roast`.
 
-Stable patch release PRs from Release Please are queued for GitHub's native
-squash auto-merge. Required CI checks and strict branch protection still apply.
-The workflow refreshes stale release branches from `main` using GitHub's native
-branch update, then uses native pull-request CI when available, dispatching CI
-only if no native or dispatched run exists for the resulting head.
-Unchanged heads are not rebuilt hourly, and failed tests are not blindly retried.
-Minor, major, prerelease, or source-changing release PRs require manual review.
-Renovate supplies the dependency aging policy (three days for ordinary updates,
-no delay for advisory-driven updates); release automation adds no separate timer.
-
-The release workflow also runs hourly to reconcile bot merges whose push events
-do not start another workflow with `GITHUB_TOKEN`. It runs Release Please and
-the existing build/publish job directly, so no additional personal token or
-GitHub App is required. Scheduled runs can be delayed by GitHub; maintainers
-can run `Release Please` manually to reconcile immediately.
-PR maintenance and tag publishing are independent jobs, so a PR maintenance
-failure does not block publishing an already-created release.
+Release automation is the org reusable workflow
+(`bluesky-social/.github` `.github/workflows/release-please.yml`; commit
+rules are in the README's "Releases and commit messages"). The
+`bsky-release-bot` App maintains the Release PR, so its CI runs normally. A
+Release PR auto-merges only when every commit since the last tag came from a
+merged Renovate or Dependabot PR made of that bot's own verified commits, and
+only from the hourly scheduled run on weekdays 09:00-16:00 PT. Required CI
+checks and strict branch protection still apply. Any human-authored change,
+including a `fix:`, waits for a maintainer to merge the Release PR. Renovate
+supplies the dependency aging policy (three days for ordinary updates, no
+delay for advisory-driven updates). Maintainers can run `Release Please`
+manually to queue an eligible release immediately or reconcile a missed tag.
+Once a release is cut, PR-maintenance and gate failures in the same run do
+not block the binaries job.
 
 If release building or uploading fails, fix the cause and use GitHub's **Re-run
 failed jobs** on the original run. That retains the original release outputs

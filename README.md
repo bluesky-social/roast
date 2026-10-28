@@ -466,6 +466,41 @@ roast gate disable
 It reviews staged content and fails open on operational errors. Set
 `ROAST_SKIP=1` to bypass one commit.
 
+## Releases and commit messages
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please)
+through the org release pipeline ([onboarding guide](https://github.com/bluesky-social/.github/blob/main/docs/reference/release-please-onboarding.md)).
+
+**Commit messages decide whether `main` releases, and the version bump.** PRs
+are squash-merged, so the PR title becomes the commit message. Use
+[Conventional Commits](https://www.conventionalcommits.org/):
+
+- `fix:`, `perf:` and `revert:` release a patch; `feat:` releases a minor;
+  a breaking change (`feat!:`, or a `BREAKING CHANGE:` footer) releases a
+  major. Scopes are fine, e.g. `fix(review): ...`.
+- `chore:`, `docs:`, `ci:`, `build:`, `test:`, `refactor:`, `style:`, other
+  types, and messages with no `type:` prefix at all don't release on their
+  own. They ship with the next releasable commit.
+
+**How a release happens.** Every push to `main` updates a standing
+`chore(main): release X.Y.Z` PR maintained by `bsky-release-bot`. Merging it
+tags `vX.Y.Z` and builds the release binaries and Homebrew cask (goreleaser).
+
+- If every commit since the last tag came from a merged Renovate or
+  Dependabot PR, the Release PR merges itself on the hourly run, weekdays
+  09:00-16:00 PT. Otherwise a human merges it.
+- Any human-authored commit in that range, even one that doesn't release on
+  its own, means a human merges the next Release PR.
+- Label the Release PR `release:manual` to hold a release.
+
+**Dependencies** come from Renovate with the [org preset](https://github.com/bluesky-social/.github/blob/main/renovate/default.json)
+(`renovate.json`). Don't push to a Renovate PR or click "Update branch" on
+one: that adds a human commit, so the next release needs a human. If a bump
+needs code changes, make them in a separate PR.
+
+**CI.** `main` requires `Test and build` and `Security and licenses` to pass, and PRs must be up to date with
+`main` before they merge.
+
 ## License
 
 This project is dual-licensed under MIT and Apache 2.0:
