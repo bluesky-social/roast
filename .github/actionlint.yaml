@@ -1,0 +1,6 @@
+# GitHub-hosted runner labels newer than the pinned actionlint knows about.
+# ubuntu-26.04 is a real hosted image (ubuntu-latest already resolves to it);
+# drop this once .github/tools/actionlint is on a release that lists it.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
