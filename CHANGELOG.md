@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.25 (2026-10-29)
+
+## What's Changed
+* ci: move to the org release pipeline (Renovate, unattended dependency releases) by @amckinley in https://github.com/bluesky-social/roast/pull/81
+* ci: let actionlint accept the ubuntu-26.04 runner label by @amckinley in https://github.com/bluesky-social/roast/pull/83
+* chore(deps): update ci go tools by @renovate[bot] in https://github.com/bluesky-social/roast/pull/60
+* fix(deps): update module golang.org/x/net to v0.62.0 [security] by @renovate[bot] in https://github.com/bluesky-social/roast/pull/84
+* docs: AGENTS.md as the agent file; release and commit guidance in README by @amckinley in https://github.com/bluesky-social/roast/pull/88
+* chore(deps): update module github.com/mattn/go-runewidth to v0.0.31 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/86
+* ci: baseline (release-please convergence, required checks) by @amckinley in https://github.com/bluesky-social/roast/pull/89
+* chore(deps): update anthropics/claude-code-action action to v1.0.262 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/90
+* ci: Claude workflows read the gateway URL from an org variable by @amckinley in https://github.com/bluesky-social/roast/pull/91
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.1.24...v1.1.25
+
 ## [1.1.24](https://github.com/bluesky-social/roast/compare/v1.1.23...v1.1.24) (2026-10-26)
 
 
