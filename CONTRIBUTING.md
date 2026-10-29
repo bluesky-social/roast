@@ -7,10 +7,10 @@ contract can be agreed on first.
 
 ## Development
 
-Roast requires Go 1.27.2 or newer. Clone the repository, then run:
+Roast requires Go 1.27.3 or newer. Clone the repository, then run:
 
 ```sh
-go test ./...
+go test -race ./...
 go vet ./...
 go tool -modfile=.github/tools/staticcheck/go.mod staticcheck ./...
 go build ./cmd/roast
@@ -39,11 +39,15 @@ compatible with Roast's MIT/Apache-2.0 dual license and should be justified in
 the pull request.
 
 Pull-request CI runs on GitHub-hosted runners with read-only repository
-permissions and no inference, upload, or tap credentials. Keep that boundary:
-do not run contributor-controlled code in `pull_request_target` or a privileged
-`workflow_run` job. Pin external actions to full commit SHAs. Go caches use the
-standard setup-go branch scopes, and container caches use BuildKit's GitHub
-Actions backend. Do not bootstrap privileged jobs from pull-request artifacts.
+permissions and no inference, upload, or tap credentials. The `claude-review`
+and `claude-mention` workflows are the exception: they hold an Agent Gateway
+inference credential and can comment on pull requests, but review only
+non-draft PRs from branches in this repository and answer only commenters with
+write access. Keep that boundary: do not run contributor-controlled code in
+`pull_request_target` or a privileged `workflow_run` job. Pin external actions
+to full commit SHAs. Go caches use the standard setup-go branch scopes, and
+container caches use BuildKit's GitHub Actions backend. Do not bootstrap
+privileged jobs from pull-request artifacts.
 
 Keep changes narrow and include regression tests for behavior changes. Update
 the README whenever a public flag, environment variable, configuration field,

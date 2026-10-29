@@ -17,7 +17,7 @@ navigate the local checkout with bounded file, grep, and listing tools.
 
 ## Build
 
-Roast requires Go 1.27.2 or newer:
+Roast requires Go 1.27.3 or newer:
 
 ```sh
 go build ./cmd/roast
@@ -41,7 +41,7 @@ amd64 and arm64. Download the archive for your platform from
 [GitHub Releases](https://github.com/bluesky-social/roast/releases) and verify
 it against the published SHA-256 checksum file.
 
-With Go 1.27.2 or newer, you can instead install the latest tagged version:
+With Go 1.27.3 or newer, you can instead install the latest tagged version:
 
 ```sh
 go install github.com/bluesky-social/roast/cmd/roast@latest
@@ -471,16 +471,14 @@ It reviews staged content and fails open on operational errors. Set
 Releases are cut by [release-please](https://github.com/googleapis/release-please)
 through the org release pipeline ([onboarding guide](https://github.com/bluesky-social/.github/blob/main/docs/reference/release-please-onboarding.md)).
 
-**Commit messages decide whether `main` releases, and the version bump.** PRs
-are squash-merged, so the PR title becomes the commit message. Use
-[Conventional Commits](https://www.conventionalcommits.org/):
-
-- `fix:`, `perf:` and `revert:` release a patch; `feat:` releases a minor;
-  a breaking change (`feat!:`, or a `BREAKING CHANGE:` footer) releases a
-  major. Scopes are fine, e.g. `fix(review): ...`.
-- `chore:`, `docs:`, `ci:`, `build:`, `test:`, `refactor:`, `style:`, other
-  types, and messages with no `type:` prefix at all don't release on their
-  own. They ship with the next releasable commit.
+**Commit messages need a `type:` prefix, but any word works.** PRs are
+squash-merged, so the PR title becomes the commit, and a required `pr-title`
+check enforces the prefix. release-please drops commits without one. `feat:`
+releases a minor version, a breaking change (`feat!:`, or a `BREAKING CHANGE:`
+footer) a major one (a minor while the version is 0.x), and anything else,
+including subsystem prefixes like `ask:`, a patch. Release notes are built from
+merged PR titles, so write the title as the changelog line you want. Direct
+pushes appear only in the release's compare link.
 
 **How a release happens.** Every push to `main` updates a standing
 `chore(main): release X.Y.Z` PR maintained by `bsky-release-bot`. Merging it
@@ -498,8 +496,9 @@ tags `vX.Y.Z` and builds the release binaries and Homebrew cask (goreleaser).
 one: that adds a human commit, so the next release needs a human. If a bump
 needs code changes, make them in a separate PR.
 
-**CI.** `main` requires `Test and build` and `Security and licenses` to pass, and PRs must be up to date with
-`main` before they merge.
+**CI.** `main` requires `Test and build`, `Security and licenses` and
+`pr-title / pr-title` to pass, and PRs must be up to date with `main` before
+they merge.
 
 ## License
 

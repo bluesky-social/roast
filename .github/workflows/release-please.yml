@@ -9,9 +9,12 @@ name: release-please
 # Merging creates the tag + GitHub release, then the release_created-gated
 # jobs below run.
 #
-# goreleaser runs HERE (not via the tag-triggered release.yml) because the
-# reusable creates tags with GITHUB_TOKEN, which does not trigger another
-# workflow. release.yml stays for manual `git tag && git push` releases only.
+# goreleaser runs HERE because the reusable creates tags with GITHUB_TOKEN,
+# which does not trigger another workflow. There is no tag-triggered
+# release.yml: a hand-pushed tag bypasses release-please's manifest. To
+# recover a failed release, fix the cause and re-run this workflow's failed
+# jobs on the original run, which keeps its release outputs and reuses the
+# draft (CONTRIBUTING.md, "Stable releases and Homebrew").
 
 on:
   push:
@@ -43,7 +46,7 @@ jobs:
     name: Release binaries
     needs: release
     if: needs.release.outputs.release_created == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: write

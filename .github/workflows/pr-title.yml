@@ -1,0 +1,11 @@
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  pr-title:
+    uses: bluesky-social/.github/.github/workflows/pr-title.yml@v1
