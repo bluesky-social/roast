@@ -59,8 +59,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-          # claude-code-action replaces checkout credentials with its own token.
-          persist-credentials: false
+          # Keep checkout's credential: claude-code-action fetches the PR head with
+          # it before swapping in its own token (tag mode runs setupBranch before
+          # configureGitAuth), and the fetch fails without it in private repos.
 
       - name: Claude
         uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
