@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.27 (2026-10-29)
+
+## What's Changed
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/94
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.1.26...v1.1.27
+
 ## 1.1.26 (2026-10-29)
 
 ## What's Changed
