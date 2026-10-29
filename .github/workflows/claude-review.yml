@@ -19,7 +19,10 @@ jobs:
     # gateway spend on unvetted code). Branch PRs can only
     # be created by people with write access, i.e. org members.
     # Bot-authored PRs (Renovate, release-please) are also skipped.
+    # AGENT_GATEWAY_URL is an org variable visible only to private and internal
+    # repos: on a public repo this job skips instead of exposing the gateway.
     if: >
+      vars.AGENT_GATEWAY_URL != '' &&
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.type != 'Bot'
@@ -49,7 +52,7 @@ jobs:
       - name: Claude review
         uses: anthropics/claude-code-action@925afb53776cf1a2b738c6bdbed37b4d4000ef13 # v1.0.262
         env:
-          ANTHROPIC_BASE_URL: https://agentgateway.k1.prod.bsky.dev
+          ANTHROPIC_BASE_URL: ${{ vars.AGENT_GATEWAY_URL }}
         with:
           # Agent Gateway service keys use Authorization: Bearer, the wire
           # shape emitted by the action's OAuth-token input.

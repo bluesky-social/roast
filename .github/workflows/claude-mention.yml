@@ -28,7 +28,10 @@ jobs:
     # Skip comments/reviews that don't mention @claude, non-PR issue
     # comments, and events from claude[bot] itself (its review prose
     # often quotes "@claude" and must not retrigger the workflow).
+    # AGENT_GATEWAY_URL is an org variable visible only to private and internal
+    # repos: on a public repo this job skips instead of exposing the gateway.
     if: >
+      vars.AGENT_GATEWAY_URL != '' &&
       (
         (github.event_name == 'issue_comment' &&
           github.event.issue.pull_request != null &&
@@ -66,7 +69,7 @@ jobs:
       - name: Claude
         uses: anthropics/claude-code-action@925afb53776cf1a2b738c6bdbed37b4d4000ef13 # v1.0.262
         env:
-          ANTHROPIC_BASE_URL: https://agentgateway.k1.prod.bsky.dev
+          ANTHROPIC_BASE_URL: ${{ vars.AGENT_GATEWAY_URL }}
         with:
           # Agent Gateway service keys use Authorization: Bearer, the wire
           # shape emitted by the action's OAuth-token input.
