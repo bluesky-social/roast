@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.26 (2026-10-29)
+
+## What's Changed
+* fix(deps): update module google.golang.org/api to v0.309.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/92
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.1.25...v1.1.26
+
 ## 1.1.25 (2026-10-29)
 
 ## What's Changed
