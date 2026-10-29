@@ -116,6 +116,10 @@ expectations were restored.
   `go-licenses/v2` v2.0.1 and the release-target build graphs.
 - [ ] Final human/legal review of attribution and non-Go-code inspection
   warnings, alongside the rest of the publication content review.
+- [ ] Before flipping the repository public, confirm the Claude review/mention
+  jobs skip: they require the org variable `AGENT_GATEWAY_URL`, which only
+  private and internal repositories can read. No internal endpoint should
+  remain anywhere under `.github/`.
 - [x] Validate final local snapshot archives for all six targets and the broker
   image: dependency notices, root Go license, CSV inventories, Windows-only
   dependency attribution, and no eval/broker binary in CLI archives. Smoke-test
