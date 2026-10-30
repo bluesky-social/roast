@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.30 (2026-10-30)
+
+## What's Changed
+* chore(deps): update anthropics/claude-code-action action to v1.0.264 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/101
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.1.29...v1.1.30
+
 ## 1.1.29 (2026-10-30)
 
 ## What's Changed
