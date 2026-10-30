@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.28 (2026-10-30)
+
+## What's Changed
+* chore(deps): update anthropics/claude-code-action action to v1.0.263 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/96
+* fix(deps): update module google.golang.org/grpc to v1.85.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/98
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.1.27...v1.1.28
+
 ## 1.1.27 (2026-10-29)
 
 ## What's Changed
