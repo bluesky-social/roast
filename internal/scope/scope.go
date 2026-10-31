@@ -5,9 +5,12 @@
 // pathspec-filtered git queries that produced the diff text — a file outside
 // the post-exclude diff can never reach the reviewer or the output.
 //
-// Renames are never detected (--no-renames): a rename becomes a plain
-// delete+add, so pathspec excludes apply uniformly to both sides. Rename
-// detection added no review value and was the root of the v1 vendor-escape bug.
+// Diffs are built with --no-renames: a rename becomes a plain delete+add, so
+// pathspec excludes apply uniformly to both sides (rename detection across an
+// exclude boundary was the root of the v1 vendor-escape bug). compactRenames
+// then collapses delete+add pairs whose two paths both survived the excludes
+// into git's rename form, so a large move costs a header per file instead of
+// every line twice.
 package scope
 
 import (
@@ -188,6 +191,8 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 		if err != nil {
 			return Scope{}, fmt.Errorf("git diff (staged): %w", err)
 		}
+		diff, renamed := compactRenames(repo, stagedRef, spec, diff)
+		notes = renameNote(notes, renamed)
 
 		nameArgs := append([]string{"diff"}, diffFlags...)
 		nameArgs = append(nameArgs, "--name-only")
@@ -227,6 +232,9 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 			if err != nil {
 				return Scope{}, fmt.Errorf("git diff (committed): %w", err)
 			}
+			var renamed int
+			committed, renamed = compactRenames(repo, rangeArgs, spec, committed)
+			notes = renameNote(notes, renamed)
 
 			nameArgs := append([]string{"diff"}, diffFlags...)
 			nameArgs = append(nameArgs, "--name-only")
@@ -246,6 +254,8 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 	if err != nil {
 		return Scope{}, fmt.Errorf("git diff (uncommitted): %w", err)
 	}
+	uncommitted, renamedUncommitted := compactRenames(repo, []string{head}, spec, uncommitted)
+	notes = renameNote(notes, renamedUncommitted)
 
 	uncommittedNameArgs := append([]string{"diff"}, diffFlags...)
 	uncommittedNameArgs = append(uncommittedNameArgs, "--name-only", head)
@@ -1042,6 +1052,13 @@ func fileDiffBytes(s *Scope, relpath string) int {
 		}
 		total += end - start
 		pos = end
+	}
+	// A collapsed move's header names two different paths, so the marker
+	// above never matches it; count it for both of them.
+	for _, sec := range splitSections(s.Diff) {
+		if from, to, ok := renameOf(sec.text); ok && (from == relpath || to == relpath) {
+			total += len(sec.text)
+		}
 	}
 	return total
 }

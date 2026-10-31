@@ -1,9 +1,11 @@
 package scope
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -882,5 +884,156 @@ func TestStagedModeHonorsGitIndexFile(t *testing.T) {
 	}
 	if strings.Contains(s.Diff, "a-v2-staged-not-committed") {
 		t.Errorf("diff leaked the live index's staged content:\n%s", s.Diff)
+	}
+}
+
+// gitMove is git mv into a directory that may not exist yet.
+func gitMove(t *testing.T, repo, from, to string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(repo, filepath.Dir(to)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "mv", from, to)
+}
+
+func bigFile(lines int, extra string) string {
+	var b strings.Builder
+	b.WriteString("package p\n")
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&b, "var v%d = %d\n", i, i)
+	}
+	b.WriteString(extra)
+	return b.String()
+}
+
+func countAddedLines(diff string) int {
+	n := 0
+	for l := range strings.SplitSeq(diff, "\n") {
+		if strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "+++") {
+			n++
+		}
+	}
+	return n
+}
+
+// A moved file with a small edit is shown as git's rename section with only
+// the edited lines, not as a whole-file delete plus a whole-file add.
+func TestMovedFilesCollapseToRenameSections(t *testing.T) {
+	repo := initRepoWithDefaultBranch(t)
+	gitRun(t, repo, "switch", "-q", "-c", "move")
+	writeFile(t, repo, "pkg/big.go", bigFile(200, ""))
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "add big")
+	gitMove(t, repo, "pkg/big.go", "moved/big.go")
+	writeFile(t, repo, "moved/big.go", bigFile(200, "var edited = true\n"))
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "move big")
+
+	s, err := Build(repo, BuildOpts{Base: "HEAD~1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"rename from pkg/big.go", "rename to moved/big.go", "+var edited = true"} {
+		if !strings.Contains(s.Diff, want) {
+			t.Errorf("diff missing %q:\n%s", want, s.Diff)
+		}
+	}
+	if strings.Contains(s.Diff, "deleted file mode") && strings.Contains(s.Diff, "--- a/pkg/big.go\n+++ /dev/null") {
+		t.Errorf("moved file still shown as a whole-file deletion")
+	}
+	if n := countAddedLines(s.Diff); n > 20 {
+		t.Errorf("diff adds %d lines; a move with one edit should add a handful", n)
+	}
+	if !slices.ContainsFunc(s.Notes, func(n string) bool { return strings.Contains(n, "collapsed") }) {
+		t.Errorf("notes = %v, want a collapse note", s.Notes)
+	}
+}
+
+func TestPureMoveHasNoHunks(t *testing.T) {
+	repo := initRepo(t)
+	writeFile(t, repo, "src/x.go", bigFile(50, ""))
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "initial")
+	gitMove(t, repo, "src/x.go", "lib/x.go")
+
+	s, err := Build(repo, BuildOpts{StagedOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s.Diff, "similarity index 100%") || !strings.Contains(s.Diff, "rename to lib/x.go") {
+		t.Fatalf("diff = %s", s.Diff)
+	}
+	if strings.Contains(s.Diff, "@@") {
+		t.Fatalf("pure move has hunks: %s", s.Diff)
+	}
+	for _, f := range []string{"src/x.go", "lib/x.go"} {
+		if !slices.Contains(s.Files, f) {
+			t.Errorf("files = %v, missing %s", s.Files, f)
+		}
+	}
+}
+
+// Moving a file across an exclude boundary must never pair it: the excluded
+// side stays invisible and the included side is shown in full.
+func TestMovesAcrossExcludesAreNotPaired(t *testing.T) {
+	repo := initRepo(t)
+	writeFile(t, repo, "src/in.go", "package in\n\nfunc In() string { return \"in\" }\n")
+	writeFile(t, repo, "vendor/lib/out.go", "package out\n\nvar vendored = 1\n\nfunc Out() int { return vendored }\n")
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "initial")
+	gitMove(t, repo, "src/in.go", "vendor/lib/in.go")
+	gitMove(t, repo, "vendor/lib/out.go", "src/out.go")
+
+	s, err := Build(repo, BuildOpts{StagedOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(s.Diff, "vendor/") {
+		t.Fatalf("vendored path surfaced: %s", s.Diff)
+	}
+	if strings.Contains(s.Diff, "rename ") {
+		t.Fatalf("a move across the exclude boundary was paired: %s", s.Diff)
+	}
+	if !strings.Contains(s.Diff, "deleted file mode") || !strings.Contains(s.Diff, "+var vendored = 1") {
+		t.Fatalf("expected a plain delete of src/in.go and a full add of src/out.go: %s", s.Diff)
+	}
+}
+
+func TestUncommittedMoveCollapses(t *testing.T) {
+	repo := initRepo(t)
+	writeFile(t, repo, "a/f.go", bigFile(80, ""))
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "initial")
+	gitMove(t, repo, "a/f.go", "b/f.go")
+
+	s, err := Build(repo, BuildOpts{UncommittedOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s.Diff, "rename from a/f.go") || countAddedLines(s.Diff) != 0 {
+		t.Fatalf("diff = %s", s.Diff)
+	}
+}
+
+func TestFitBreakdownCountsCollapsedMoves(t *testing.T) {
+	repo := initRepo(t)
+	writeFile(t, repo, "a/f.go", bigFile(80, ""))
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "initial")
+	gitMove(t, repo, "a/f.go", "b/f.go")
+	writeFile(t, repo, "b/f.go", bigFile(80, "var changed = true\n"))
+	gitAdd(t, repo, ".")
+
+	s, err := Build(repo, BuildOpts{StagedOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s.Diff, "rename to b/f.go") {
+		t.Fatalf("move not collapsed: %s", s.Diff)
+	}
+	for _, f := range []string{"a/f.go", "b/f.go"} {
+		if fileDiffBytes(&s, f) == 0 {
+			t.Errorf("fileDiffBytes(%s) = 0 for a collapsed move", f)
+		}
 	}
 }

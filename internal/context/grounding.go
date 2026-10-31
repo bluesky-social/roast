@@ -110,9 +110,10 @@ func NewQuoteGrounder(repo string, tree Tree, diffText, rangeSpec string) func(f
 }
 
 // splitDiffByFile parses a unified diff into whitespace-normalized per-file
-// corpora, keyed by both old and new path (--no-renames holds scope-wide, but
-// keying both is free and covers adds/deletes) so quotes of deleted code key
-// to the finding's file. A section whose paths cannot be parsed even after
+// corpora, keyed by both old and new path so quotes of deleted code key to
+// the finding's file. Most sections name one path on both sides (the scope
+// diffs with --no-renames); a collapsed move names its old and new paths,
+// and keying both lets a quote ground under either. A section whose paths cannot be parsed even after
 // quote-decoding contributes nothing: unattributable content in a shared
 // residual would let real diff content ground a finding cited to any path,
 // and per-file isolation outranks the (git-diff-shouldn't-produce-this) risk
@@ -156,8 +157,8 @@ func splitDiffByFile(diffText string) map[string]string {
 		// Header parsing only outside hunks: a deleted content line reading
 		// `-- a/other.go` renders in a hunk as `--- a/other.go` and must not
 		// key this section to an unrelated path. (A partially-parseable
-		// header pair is fine to accept: --no-renames means old and new name
-		// the same path, so whichever header parses keys correctly.)
+		// header pair is fine to accept: outside collapsed moves old and new
+		// name the same path, and a move's two paths both belong to it.)
 		//
 		// `--- /dev/null` (add) and `+++ /dev/null` (delete) yield no path
 		// and contribute no key, as intended.
