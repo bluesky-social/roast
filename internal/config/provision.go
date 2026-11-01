@@ -7,14 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -397,8 +400,8 @@ func fetchProvision(ctx context.Context, sourceURL string) ([]byte, Config, erro
 
 // ValidateProvisionDocument validates an organization-provided configuration
 // template. Templates may reference credential environment variables, but may
-// not contain secret values or prompt overrides, which name local files whose
-// contents would be sent to the template's endpoints.
+// not contain secret values, control characters, or prompt overrides, which
+// name local files whose contents would be sent to the template's endpoints.
 func ValidateProvisionDocument(raw []byte) (Config, error) {
 	var header struct {
 		Version *int `yaml:"version"`
@@ -412,6 +415,9 @@ func ValidateProvisionDocument(raw []byte) (Config, error) {
 	cfg, err := decode(raw)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse downloaded configuration: %w", err)
+	}
+	if err := rejectControlCharacters(cfg); err != nil {
+		return Config{}, err
 	}
 	cfg, err = normalize(cfg)
 	if err != nil {
@@ -433,6 +439,82 @@ func ValidateProvisionDocument(raw []byte) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// rejectControlCharacters refuses template text containing C0 or C1 control
+// characters, DEL, or invalid UTF-8. The install summary and the upload
+// confirmation print these fields, and an escape sequence in one could repaint
+// what the user is asked to approve. Secret fields and prompt overrides are
+// not checked here because ValidateProvisionDocument rejects them outright.
+func rejectControlCharacters(cfg Config) error {
+	reject := func(where string) error {
+		return fmt.Errorf("downloaded configuration must not contain control characters (in %s)", where)
+	}
+	type field struct{ path, value string }
+	check := func(fields ...field) error {
+		for _, f := range fields {
+			if hasControlCharacter(f.value) {
+				return reject(f.path)
+			}
+		}
+		return nil
+	}
+	for _, name := range slices.Sorted(maps.Keys(cfg.InferenceProfiles)) {
+		if hasControlCharacter(name) {
+			return reject(fmt.Sprintf("inference profile name %q", name))
+		}
+		profile, prefix := cfg.InferenceProfiles[name], "inference_profiles."+name+"."
+		if err := check(
+			field{prefix + "endpoint", profile.BaseURL}, field{prefix + "model", profile.Model},
+			field{prefix + "protocol", profile.Protocol}, field{prefix + "api_key_env", profile.APIKeyEnv},
+		); err != nil {
+			return err
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(cfg.Roles)) {
+		if hasControlCharacter(name) {
+			return reject(fmt.Sprintf("role name %q", name))
+		}
+		role := cfg.Roles[name]
+		if err := check(field{"roles." + name + ".profile", role.Profile}); err != nil {
+			return err
+		}
+		for _, route := range slices.Sorted(maps.Keys(role.AuthorRoutes)) {
+			if hasControlCharacter(route) {
+				return reject(fmt.Sprintf("roles.%s.author_routes key %q", name, route))
+			}
+			if err := check(field{"roles." + name + ".author_routes." + route, role.AuthorRoutes[route]}); err != nil {
+				return err
+			}
+		}
+	}
+	for i, exclude := range cfg.Review.Excludes {
+		if err := check(field{fmt.Sprintf("review.excludes[%d]", i), exclude}); err != nil {
+			return err
+		}
+	}
+	upload := cfg.Upload
+	return check(
+		field{"upload.backend", upload.Backend}, field{"upload.endpoint", upload.Endpoint},
+		field{"upload.bucket", upload.Bucket}, field{"upload.prefix", upload.Prefix},
+		field{"upload.region", upload.Region}, field{"upload.access_key_env", upload.AccessKeyEnv},
+		field{"upload.secret_key_env", upload.SecretKeyEnv}, field{"upload.session_token_env", upload.SessionTokenEnv},
+		field{"upload.token_env", upload.TokenEnv},
+	)
+}
+
+// hasControlCharacter reports whether s holds a C0 control character
+// (including tab and newline), DEL, a C1 control character, or invalid UTF-8.
+func hasControlCharacter(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for _, r := range s {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeAtomic(path string, raw []byte, backupSuffix string) error {

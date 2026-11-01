@@ -199,7 +199,8 @@ from your shell is never sent implicitly to a gateway or a template's endpoint.
 Naming it is explicit, not restricted: a profile, including one installed from
 a template, may pair `endpoint: https://models.example.org/v1` with
 `api_key_env: OPENAI_API_KEY`, and that key then goes to that endpoint; the
-install summary shows every credential variable a template names. When a
+install summary shows the credential variable of each profile that a role or
+author route selects, and the upload credential variables. When a
 protocol override moves a role from one provider's endpoint to another's, the
 profile's credential does not follow it. Environment overrides and
 command-line flags apply these rules identically. `roast doctor` reports which
@@ -289,10 +290,13 @@ defaults and the environment. `roast doctor` reports the path it selected.
 
 An organization can publish a secret-free configuration document for users to
 install with `roast config init --from <https-url>`. When stdin and stderr are
-terminals, `roast review` also offers to install one if no config exists and
-the finder and verifier cannot be resolved from the environment or flags. The document
-must declare `version: 1` and may name credential environment variables, but
-must not contain credentials. A presigned upload broker can serve it (see
+terminals and no `--config` is given, `roast review` and `roast runs sync` also
+offer to install one if the default config file is missing and the finder and
+verifier cannot be resolved from the environment or flags, or if the file is
+unversioned or has Claude profiles using Chat Completions or Responses. The
+document must declare `version: 1` and may name credential environment
+variables, but must not contain credentials or control characters. A presigned
+upload broker can serve it (see
 [Presigned upload broker](#presigned-upload-broker)). To migrate an older
 config, including the opt-in import of its existing credential, see
 [Upgrading from pre-1.1 configurations](docs/upgrading.md).
@@ -338,16 +342,18 @@ keeps the interactive loop regardless of diff size. `--quick` overrides
 On the first interactive review in a repository, Roast asks once whether to
 install its staged-content pre-commit gate. The answer is stored in local Git
 config for that repository; a decline is not prompted again. Non-interactive
-runs never install a hook. Manage the decision explicitly with
-`roast gate enable|status|disable`. Set `ROAST_NO_HOOK=1` to skip this
-first-run check entirely; explicit `roast gate` commands still work.
+runs never install a hook without recorded consent. Manage the decision
+explicitly with `roast gate enable|status|disable`. Set `ROAST_NO_HOOK=1` to
+skip this first-run check entirely; explicit `roast gate` commands still work.
 
 Shared `core.hooksPath` dispatchers still require an opt-in in each repository's
 local Git config. Disabling one repository preserves a custom hooks directory's
 dispatcher for other repositories.
 
 The default scope includes committed changes since the best available main
-branch plus uncommitted and untracked changes. JSON is written to stdout and
+branch plus uncommitted and untracked changes. Untracked files whose names look
+like secrets, such as `.env*`, `*.pem`, `*.key`, and SSH keys like
+`id_ed25519*`, are skipped with a note on stderr. JSON is written to stdout and
 Markdown to stderr; select one with `--format`.
 
 Source code, diffs, prompts, tool schemas, and local tool results are sent to

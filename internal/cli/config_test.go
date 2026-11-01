@@ -364,6 +364,55 @@ func TestConfigInitPrintsTemplateSummaryToStderr(t *testing.T) {
 	}
 }
 
+// TestProvisionSummaryEscapesConfigurationText covers configurations that
+// never pass template validation, such as a local config shown during a
+// protocol update: the summary and the upload question must still print no
+// control characters.
+func TestProvisionSummaryEscapesConfigurationText(t *testing.T) {
+	const repaint = "\x1b[2K\rupload: off"
+	s3 := config.Upload{
+		Enabled: true, Backend: "s3", Endpoint: "https://uploads.example" + repaint,
+		Bucket: "reviews\x1b[8m", Prefix: "runs\a", AccessKeyEnv: "ACCESS\x7f", SecretKeyEnv: "SECRET\u009b",
+	}
+	presigned := config.Upload{Enabled: true, Backend: "presigned", Endpoint: "https://broker.example" + repaint, TokenEnv: "TOKEN\x1b"}
+	cfg := config.Config{
+		InferenceProfiles: map[string]config.InferenceProfile{
+			"finder" + repaint: {BaseURL: "https://models.example/v1\x1b]0;x\a", Model: "m", Protocol: "chat\n", APIKeyEnv: "KEY\x1b"},
+			"route\u009b":      {Model: "m", Protocol: "responses"},
+		},
+		Roles: map[string]config.Role{
+			"finder":   {Profile: "finder" + repaint, AuthorRoutes: map[string]string{"openai" + repaint: "route\u009b"}},
+			"verifier": {Profile: "route\u009b"},
+		},
+		Upload: s3,
+	}
+	var out bytes.Buffer
+	writeProvisionSummary(&out, &config.ProvisionPlan{Path: "config.yaml", Config: cfg, ProtocolUpdates: []string{"claude" + repaint}})
+	for _, upload := range []config.Upload{s3, presigned} {
+		cfg.Upload = upload
+		writeProvisionSummary(&out, &config.ProvisionPlan{Path: "config.yaml", Config: cfg})
+		out.WriteString(uploadQuestion(upload) + "\n")
+	}
+	for _, r := range out.String() {
+		if (r < 0x20 && r != '\n') || (r >= 0x7f && r <= 0x9f) {
+			t.Fatalf("summary contains control character %U:\n%q", r, out.String())
+		}
+	}
+	for _, want := range []string{
+		`roast: the template switches claude\x1b[2K\x0dupload: off to`,
+		`author openai\x1b[2K\x0dupload: off -> profile route\u009b`,
+		`s3 https://uploads.example\x1b[2K\x0dupload: off bucket reviews\x1b[8m prefix runs\x07`,
+		`credentials env ACCESS\x7f, SECRET\u009b`,
+		`presigned broker https://broker.example\x1b[2K\x0dupload: off, token env TOKEN\x1b`,
+		`profile finder\x1b[2K\x0dupload: off, https://models.example/v1\x1b]0;x\x07, protocol chat\n, credential env KEY\x1b`,
+		`to s3 https://uploads.example\x1b[2K\x0dupload: off bucket reviews\x1b[8m prefix runs\x07. Install it?`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("summary missing %s:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestInteractiveInstallRequiresUploadConfirmation(t *testing.T) {
 	forceInteractive(t)
 	source := serveTemplate(t, uploadTemplate)

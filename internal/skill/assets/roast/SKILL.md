@@ -31,8 +31,8 @@ and any detected Claude Code or Polytoken installation. `roast skill status`
 reports whether each installed copy matches the binary. On the first interactive
 review in a repository, Roast asks once whether to install its native pre-commit
 gate and records the answer in local Git config. Non-interactive runs never
-install it. The gate is managed explicitly with `roast gate
-enable|status|disable`.
+install it without recorded consent. The gate is managed explicitly with
+`roast gate enable|status|disable`.
 
 ## When to review
 

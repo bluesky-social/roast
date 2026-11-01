@@ -111,12 +111,13 @@ func TestDenylistCoversCredentialFiles(t *testing.T) {
 		".env.local", "config/.env", "id_ed25519", "id_rsa", "server.pem", "tls.key",
 		".npmrc", ".pypirc", ".netrc", ".git-credentials", "credentials.json",
 		"sub/credentials.json", "creds.txt", "cert.p12", ".ENV", "Config/.Env.Local", "ID_ED25519", "Credentials.JSON",
+		"id_ed25519_github", "id_rsa_work", "ID_ECDSA_deploy", "id_ecdsa_sk", "id_ed25519_sk.pub", "keys/id_xmss_old", "id_dsa.bak",
 	} {
 		if !snapshot.Denylisted(name) {
 			t.Errorf("%s should be denylisted", name)
 		}
 	}
-	for _, name := range []string{"main.go", "credentials.go", "npmrc.go", "README.md", "id_map.go", "internal/id_test.go"} {
+	for _, name := range []string{"main.go", "credentials.go", "npmrc.go", "README.md", "id_map.go", "internal/id_test.go", "identity.go"} {
 		if snapshot.Denylisted(name) {
 			t.Errorf("%s should not be denylisted", name)
 		}
