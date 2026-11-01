@@ -1,11 +1,9 @@
 name: claude-review
 
-# Automatic Claude review on PR creation/update, via Agent Gateway.
-# Self-contained: uses upstream claude-code-action defaults directly rather
-# than the org reusable workflows. This repository requires SHA-pinned
-# actions; Renovate keeps the pins current.
-#
-# Review guidance lives in .github/claude-review-prompt.md.
+# Claude reviews same-repository pull requests opened by people with write
+# access. The workflow, its hardening, and its trust model live in
+# bluesky-social/.github; review guidance stays in
+# .github/claude-review-prompt.md in this repository.
 
 on:
   pull_request:
@@ -15,57 +13,10 @@ permissions: {}
 
 jobs:
   review:
-    # Same-repo branch PRs only: fork PRs must not trigger reviews (no
-    # gateway spend on unvetted code). Branch PRs can only
-    # be created by people with write access, i.e. org members.
-    # Bot-authored PRs (Renovate, release-please) are also skipped.
-    # AGENT_GATEWAY_URL is an org variable visible only to private and internal
-    # repos: on a public repo this job skips instead of exposing the gateway.
-    if: >
-      vars.AGENT_GATEWAY_URL != '' &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.type != 'Bot'
-
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    uses: bluesky-social/.github/.github/workflows/claude-review.yml@v1
     permissions:
       contents: read
       pull-requests: write
       actions: read
-      # Required for claude-code-action's GitHub App token exchange.
-      id-token: write
-
-    concurrency:
-      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          # Keep checkout's credential: claude-code-action fetches the PR head with
-          # it before swapping in its own token (tag mode runs setupBranch before
-          # configureGitAuth), and the fetch fails without it in private repos.
-
-      - name: Claude review
-        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
-        env:
-          ANTHROPIC_BASE_URL: ${{ vars.AGENT_GATEWAY_URL }}
-        with:
-          # Agent Gateway service keys use Authorization: Bearer, the wire
-          # shape emitted by the action's OAuth-token input.
-          claude_code_oauth_token: ${{ secrets.AGENT_GATEWAY_CLAUDE_GH_REVIEW_KEY }}
-          additional_permissions: |
-            actions: read
-          track_progress: true
-          claude_args: |
-            --model claude-opus-5-5:api
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,mcp__github_ci__get_ci_status,mcp__github_ci__download_job_log,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
-            Read .github/claude-review-prompt.md in the checked-out repo
-            and review this pull request following its guidance.
+    secrets:
+      AGENT_GATEWAY_CLAUDE_GH_REVIEW_KEY: ${{ secrets.AGENT_GATEWAY_CLAUDE_GH_REVIEW_KEY }}
