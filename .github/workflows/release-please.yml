@@ -36,9 +36,11 @@ jobs:
     uses: bluesky-social/.github/.github/workflows/release-please.yml@v1
     with:
       component: roast
+    # The public-repo release App: the org-wide release App's credentials are
+    # not readable from public repositories.
     secrets:
-      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
-      RELEASE_APP_KEY: ${{ secrets.RELEASE_APP_KEY }}
+      RELEASE_APP_ID: ${{ secrets.PUBLIC_RELEASE_APP_ID }}
+      RELEASE_APP_KEY: ${{ secrets.PUBLIC_RELEASE_APP_KEY }}
 
   binaries:
     name: Release binaries
