@@ -27,8 +27,9 @@ roast doctor
 ```
 
 Use the URL your organization provides, not the illustrative URL above.
-An interactive review also offers the configuration-URL prompt when the current
-config is missing, unversioned, or has Claude profiles using Chat Completions or
+An interactive review (stdin and stderr are terminals) also offers the
+configuration-URL prompt when the current config is missing and the finder and
+verifier cannot be resolved from the environment or flags, is unversioned, or has Claude profiles using Chat Completions or
 Responses. Compatibility protocols can be intentional; leave the URL blank to
 keep them. For versioned configs, that choice is recorded in a private sibling
 `.protocol-update-ack` file containing only the config's hash, so the prompt does

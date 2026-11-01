@@ -288,8 +288,9 @@ defaults and the environment. `roast doctor` reports the path it selected.
 ### Configuration URLs
 
 An organization can publish a secret-free configuration document for users to
-install with `roast config init --from <https-url>`. Run from a terminal,
-`roast review` also offers to install one when no config exists. The document
+install with `roast config init --from <https-url>`. When stdin and stderr are
+terminals, `roast review` also offers to install one if no config exists and
+the finder and verifier cannot be resolved from the environment or flags. The document
 must declare `version: 1` and may name credential environment variables, but
 must not contain credentials. A presigned upload broker can serve it (see
 [Presigned upload broker](#presigned-upload-broker)). To migrate an older
