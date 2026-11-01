@@ -48,14 +48,14 @@ type Deps struct {
 	Concurrency int
 	// Log receives one-line progress messages. Defaults to no-op.
 	Log func(string)
-	// MaxVerified caps how many findings enter verification this run (§11:
+	// MaxVerified caps how many findings enter verification this run (it
 	// bounds the finding-count × turns × full-price product). Findings past
 	// the cap keep gating with an explicit unverified verdict (fail-open).
 	// 0 means no cap.
 	MaxVerified int
 	// Ledger, when non-nil, is the shared run budget: once exhausted, no
 	// further verifications launch and remaining findings keep gating with
-	// an explicit unverified verdict (fail-open — §12 makes this rare).
+	// an explicit unverified verdict (fail-open).
 	Ledger *llm.Ledger
 }
 
@@ -113,11 +113,11 @@ func Verify(ctx context.Context, verifier llm.Client, result *review.Result, dep
 				var v *review.Verdict
 				switch {
 				case deps.MaxVerified > 0 && j.idx >= deps.MaxVerified:
-					// §11 verifier aggregate cap: findings past the cap keep
+					// Per-run verifier cap: findings past the cap keep
 					// gating unverified, and the report says so.
 					v = unverified(fmt.Sprintf("unverified: over the per-run verifier cap (%d)", deps.MaxVerified))
 				case deps.Ledger.Exhausted():
-					// §11 fail-open: uncertainty must not silently kill a
+					// Fail open: uncertainty must not silently kill a
 					// CRITICAL — the finding gates with the reason attached.
 					v = unverified("unverified: run token budget exhausted before this finding's verification")
 				default:

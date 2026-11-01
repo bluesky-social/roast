@@ -26,7 +26,7 @@ type Report struct {
 	FilesReviewed []string
 	Task          string
 	RunID         string
-	// Budgets is the §11 budget provenance: every ceiling in force this run
+	// Budgets is the run's budget provenance: every ceiling in force this run
 	// (value + default/flag/env source) plus the ledger's reconciled spend,
 	// so eval comparisons cannot silently mix budget regimes.
 	Budgets           map[string]any
@@ -249,7 +249,7 @@ func renderFinding(i int, f review.Finding, dropped bool, prior map[string]strin
 
 	desc := strings.TrimSpace(f.Description)
 	var out []string
-	// Stable alias over ordinal (§14): "R-8d8d19" survives re-runs and
+	// Stable alias over ordinal: "R-8d8d19" survives re-runs and
 	// re-ordering, "finding #2" does not. Ordinal fallback only for findings
 	// predating identity assignment (old run records).
 	handle := f.Alias

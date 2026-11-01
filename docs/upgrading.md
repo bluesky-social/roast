@@ -1,27 +1,21 @@
-# Upgrading from the original Roast
+# Upgrading from pre-1.1 configurations
 
-The review command, durable local runs, optional Git pre-commit gate, and
-automatic opt-in run uploads remain available. Configuration is now
-provider-neutral. Internal login, retrieval, telemetry, and the Claude
-PostToolUse findings hook are not part of the new application. Evaluation and
-replay belong in a separate binary, not the normal Roast install.
+Roast 1.1 introduced a versioned, provider-neutral configuration format
+(`version: 1`). This guide moves an installation configured for an earlier
+release to it. The review command, durable local runs, the optional Git
+pre-commit gate, and opt-in run uploads carry over. External retrieval,
+telemetry, and the Claude PostToolUse findings hook were removed, and replay
+and evaluation are not part of the `roast` command.
 
-## 1. Upgrade when your maintainer announces the cutover
+## 1. Install the current release
 
-Do not use a preview as a signal that the production upgrade is ready.
-Once the maintainer has cut over the existing Homebrew cask:
+Upgrade with the method you originally used to install Roast (see the
+README's [Install](../README.md#install) section), then confirm which binary is
+active:
 
 ```sh
-brew update
-brew upgrade --cask roast
 roast --version
 ```
-
-The tap and cask keep their existing names; no re-tap is needed. A Homebrew
-upgrade replaces a preview manually linked at Homebrew's `roast` executable
-path. Other installation methods should use the release artifacts or build
-instructions in the README. Nothing in this guide requires making a private
-repository public.
 
 ## 2. Initialize configuration
 
@@ -32,7 +26,7 @@ roast config init --from https://config.example/roast
 roast doctor
 ```
 
-Use the URL supplied by your maintainer, not the illustrative URL above.
+Use the URL your organization provides, not the illustrative URL above.
 An interactive review also offers the configuration-URL prompt when the current
 config is missing, unversioned, or has Claude profiles using Chat Completions or
 Responses. Compatibility protocols can be intentional; leave the URL blank to
@@ -50,15 +44,15 @@ presigned-broker authentication locally. It never sends that credential to the
 configuration URL. A template which names credential environment variables does
 not have those sources replaced by the legacy key.
 
-The old config is found under `$XDG_CONFIG_HOME/roast/config.yaml`, or
-`~/.config/roast/config.yaml` when XDG is unset. The new default path uses the
-operating system's user-config directory:
-
-| Platform | New default path |
-| --- | --- |
-| macOS | `~/Library/Application Support/roast/config.yaml` |
-| Linux | `$XDG_CONFIG_HOME/roast/config.yaml`, or `~/.config/roast/config.yaml` |
-| Windows | `%AppData%\roast\config.yaml` |
+Releases before 1.1 read `$XDG_CONFIG_HOME/roast/config.yaml`, or
+`~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset, on every
+platform. Current releases use the operating system's user configuration
+directory instead; the README's
+[Config file location](../README.md#config-file-location) table lists the
+default path for each platform. On macOS and Windows the old and new paths
+differ, and Roast consults the old one only while installing from a
+configuration URL; without a URL, move the file to the new path or pass it with
+`--config`.
 
 `roast doctor` shows the selected config path. In-place legacy replacement keeps
 a `.pre-v1` backup and writes the new file with owner-only permissions on Unix.
@@ -127,10 +121,10 @@ current repository's decline. Check each repository's enrollment with
 ## 5. Optional cleanup of the retired Claude integration
 
 This is cleanup on an existing user's machine, not an integration shipped by
-the new binary. `roast skill install` deliberately does not edit Claude settings
-or delete previously installed hooks.
+current releases. `roast skill install` deliberately does not edit Claude
+settings or delete previously installed hooks.
 
-If you previously used the original `roast install`:
+If you previously used the pre-1.1 `roast install`:
 
 1. Locate your Claude config root, normally `~/.claude`, or the directory named
    by `CLAUDE_CONFIG_DIR`. Make a separate, non-overwriting backup of its

@@ -15,7 +15,7 @@ const compatibilityConfig = `version: 1
 inference_profiles:
   finder:
     endpoint: https://models.example/v1
-    model: claude-opus-5:api
+    model: claude-opus-5
     protocol: chat # keep the comment
     api_key: local-secret
     max_output_tokens: 8192

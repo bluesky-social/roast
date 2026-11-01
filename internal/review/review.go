@@ -233,16 +233,16 @@ type FindInput struct {
 	// disables grounding (see Validate).
 	Ground func(file, quote string) bool
 	// Capture, when non-nil, receives every incrementally-reported finding
-	// the moment it arrives (§11: the CLI wires an append-only disk spill so
+	// the moment it arrives (the CLI wires an append-only disk spill so
 	// no stop path — deadline, exhausted budget, SIGKILL — discards work).
 	Capture func(WireFinding)
-	// Deadline, when non-zero, is the §11 work deadline passed through to
+	// Deadline, when non-zero, is the run's work deadline passed through to
 	// Converse: exploration stops there and a reserved wrap-up turn flushes
 	// whatever the finder has.
 	Deadline time.Time
 }
 
-// findingAccumulator collects incrementally-reported findings (§11):
+// findingAccumulator collects incrementally-reported findings:
 // deduped by similarity fingerprint, last report of a fingerprint wins (the
 // model may refine severity or wording on a re-report), ordered by first
 // appearance. Every accepted report is forwarded to sink immediately.
@@ -343,7 +343,7 @@ func Find(ctx context.Context, client llm.Client, in FindInput) (*Result, error)
 		// Raw context errors keep propagating (pinned by
 		// TestFind_PropagatesClientError); the disk spill preserves the
 		// findings either way. The graceful cutoffs — turn budget and the
-		// §11 work deadline — come back as (wrapped) ErrNoFinalCall.
+		// work deadline — come back as (wrapped) ErrNoFinalCall.
 		if errors.Is(err, llm.ErrNoFinalCall) {
 			stopReason := "budget_exhausted"
 			if errors.Is(err, llm.ErrWorkDeadline) {
@@ -353,7 +353,7 @@ func Find(ctx context.Context, client llm.Client, in FindInput) (*Result, error)
 			}
 			note := fmt.Sprintf("interactive review ended without submit_findings (even after the reserved wrap-up turn); stop reason: %s", stopReason)
 			if n := len(acc.order); n > 0 {
-				// §11's governing invariant: no stop path may discard
+				// The governing invariant: no stop path may discard
 				// accumulated work. The incrementally-reported findings ARE
 				// the result; only the un-reported tail is lost. Validate
 				// leaves the INCOMPLETE assessment in place unless findings

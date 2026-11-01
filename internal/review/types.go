@@ -175,7 +175,7 @@ type Result struct {
 	Assessment string    `json:"assessment"`
 	Notes      []string  `json:"notes"`
 	// Incomplete marks a run whose interactive loop ended without a final
-	// submission (§11 cutoff), independent of Assessment: when incrementally
+	// submission (an early cutoff), independent of Assessment: when incrementally
 	// reported findings survive the cutoff, Assessment is FINDINGS_PRESENT —
 	// but the coverage contract still requires completion/stop_reason to say
 	// the run was cut off, never "converged".

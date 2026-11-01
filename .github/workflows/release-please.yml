@@ -1,8 +1,6 @@
 name: release-please
 
-# Release automation via the org reusable workflow
-# (bluesky-social/.github .github/workflows/release-please.yml; design:
-# dot-github docs/plans/2026-10-27-unattended-dependency-releases.md).
+# Release automation via the org reusable workflow (the `release` job below).
 # Push-to-main maintains a standing Release PR. A range made only of merged
 # Renovate/Dependabot PRs merges itself on weekdays 09-16 PT; anything
 # human-authored waits for a human (label `release:manual` to hold one).

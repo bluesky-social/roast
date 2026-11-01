@@ -53,6 +53,12 @@ Keep changes narrow and include regression tests for behavior changes. Update
 the README whenever a public flag, environment variable, configuration field,
 artifact, data destination, or exit-code behavior changes.
 
+Pull request titles need a conventional `type:` prefix because squash merges
+turn them into release-note entries; see the README's "Pull request titles".
+Branch protection requires the `Test and build` and `Security and licenses`
+CI checks and the PR-title check to pass, and requires a pull request to be up
+to date with `main` before it merges.
+
 ## Preview releases
 
 Maintainers can manually run the `Preview Release` GitHub Actions workflow for
@@ -78,20 +84,25 @@ GoReleaser updates `Casks/roast.rb` on `main` in
 Existing `bluesky-social/tap` installations keep the same package name and
 upgrade with `brew upgrade --cask roast`.
 
-Release automation is the org reusable workflow
-(`bluesky-social/.github` `.github/workflows/release-please.yml`; commit
-rules are in the README's "Releases and commit messages"). The
-`bsky-release-bot` App maintains the Release PR, so its CI runs normally. A
-Release PR auto-merges only when every commit since the last tag came from a
-merged Renovate or Dependabot PR made of that bot's own verified commits, and
-only from the hourly scheduled run on weekdays 09:00-16:00 PT. Required CI
-checks and strict branch protection still apply. Any human-authored change,
-including a `fix:`, waits for a maintainer to merge the Release PR. Renovate
-supplies the dependency aging policy (three days for ordinary updates, no
-delay for advisory-driven updates). Maintainers can run `Release Please`
-manually to queue an eligible release immediately or reconcile a missed tag.
-Once a release is cut, PR-maintenance and gate failures in the same run do
-not block the binaries job.
+The `release-please` workflow runs on every push to `main` and hourly during
+the weekday release window, keeping a standing `chore(main): release X.Y.Z`
+pull request up to date. A GitHub App rather than `GITHUB_TOKEN` maintains that
+Release PR, so its CI runs normally. A Release PR auto-merges only when every
+commit since the last tag came from a merged Renovate or Dependabot PR made of
+that bot's own verified commits, and only from the hourly scheduled run on
+weekdays 09:00-16:00 PT. Required CI checks and strict branch protection still
+apply. Any human-authored change, including a `fix:` or a commit that would
+not release on its own, waits for a maintainer to merge the Release PR.
+Renovate supplies the dependency aging policy (three days for ordinary
+updates, no delay for advisory-driven updates). Maintainers can run the
+workflow manually to queue an eligible release immediately or reconcile a
+missed tag. Once a release is cut, PR-maintenance and gate failures in the
+same run do not block the binaries job.
+
+Renovate opens dependency pull requests according to `renovate.json`. Do not
+push to a Renovate PR or use "Update branch" on one: either adds a
+human-authored commit, so the next release waits for a maintainer. If a
+dependency update needs code changes, make them in a separate pull request.
 
 If release building or uploading fails, fix the cause and use GitHub's **Re-run
 failed jobs** on the original run. That retains the original release outputs
@@ -106,8 +117,7 @@ queued auto-merge (`gh pr merge <number> --disable-auto`). Automation leaves
 that PR for manual review. Removing the label makes it eligible again.
 
 The release workflow requires `TAP_GITHUB_TOKEN`, with contents write access to
-the tap. It checks access before building a stable release. The archive
-repository must not have this credential or publish this cask. Preview releases
+the tap. It checks access before building a stable release. Preview releases
 never update the tap.
 
 Validate packaging locally with the GoReleaser version pinned in the workflows:
@@ -143,6 +153,12 @@ It also extracts the embedded Igneous Systems MIT grant from the selected
 `md5-simd` assembly source into `NOTICE-Igneous-Systems-MIT.txt`; the scanner only
 collects its root Apache license. Generation fails if the expected complete
 grant cannot be found, leaving any previous generated bundle intact.
+Likewise, `golang.org/x/net/publicsuffix` embeds MPL-2.0 Public Suffix List
+data that x/net's BSD license does not cover. The script writes
+`NOTICE-publicsuffix-MPL-2.0.txt` beside x/net's license with the list revision
+named in the selected module source, where to obtain that revision, and the
+verbatim license text from `scripts/notices/MPL-2.0.txt`. It fails if the
+revision cannot be found.
 Generated files live in the ignored
 `THIRD_PARTY_LICENSES/` directory, separate from Roast's own licenses. The script
 refuses to replace a directory it did not generate.

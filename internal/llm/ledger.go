@@ -19,15 +19,14 @@ const (
 	estBytesPerToken = 3
 	// defaultFinalAllowance is the input-equivalent token slice reserved up
 	// front for the final submit, so exhaustion can never leave a run unable
-	// to flush what it found (§11: no stop path may discard accumulated
-	// work).
+	// to flush what it found (no stop path may discard accumulated work).
 	defaultFinalAllowance = 100_000
 	// cachedTokenWeight discounts provider-cache reads at reconciliation
 	// (cache reads bill ~0.1x on both providers).
 	cachedTokenWeight = 0.1
 )
 
-// Ledger is the §11 shared per-run token-reservation ledger: one instance
+// Ledger is the shared per-run token-reservation ledger: one instance
 // spans the finder and verifier clients. Admission reserves a call's WHOLE
 // footprint before it launches — a conservative tokenization of the full
 // serialized request (which on chat replays the whole transcript every turn,

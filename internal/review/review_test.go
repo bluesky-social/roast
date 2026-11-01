@@ -555,7 +555,7 @@ func TestFind_Interactive_IncrementalCaptureSurvivesCutoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Find error: %v", err)
 	}
-	// §11: the reported finding survives the cutoff — and reached the spill.
+	// The reported finding survives the cutoff — and reached the spill.
 	if len(result.Findings) != 1 {
 		t.Fatalf("want 1 retained finding, got %d", len(result.Findings))
 	}

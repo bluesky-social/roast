@@ -18,8 +18,11 @@ user-controlled and may be third-party services. Do not assume they are trusted
 for private source code: inspect the configuration or run `roast doctor`, and
 follow the operator's data-handling policy.
 
-Configure profiles in the user config file shown by `roast doctor`, or initialize
-one with `roast config init`. A profile selects an endpoint, model, wire protocol
+Configure profiles in the user config file shown by `roast doctor`, following
+the profile example in the Configure section of the Roast README
+(https://github.com/bluesky-social/roast#configure). Use
+`roast config init --from <url>` only with a trusted configuration URL that the
+operator supplies. A profile selects an endpoint, model, wire protocol
 (`responses`, `chat`, or `anthropic`), credential environment variable, and
 output limit. The finder and verifier may use different profiles and protocols.
 

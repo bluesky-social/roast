@@ -21,6 +21,9 @@ notice=$(docker cp "$container:/usr/share/licenses/roast/third-party/github.com/
 grep -Fq 'Copyright (c) 2018 Igneous Systems' <<<"$notice"
 grep -Fq 'The above copyright notice and this permission notice shall be included in all' <<<"$notice"
 grep -Fxq '  SOFTWARE.' <<<"$notice"
+psl_notice=$(docker cp "$container:/usr/share/licenses/roast/third-party/golang.org/x/net/NOTICE-publicsuffix-MPL-2.0.txt" - | tar -xOf -)
+grep -Fq 'https://github.com/publicsuffix/list/blob/' <<<"$psl_notice"
+grep -Fxq 'Mozilla Public License Version 2.0' <<<"$psl_notice"
 port=$(docker port "$container" 8080/tcp)
 # The Docker port proxy can accept connections before the server is ready and
 # return an empty reply rather than ECONNREFUSED. This GET is safe to retry.

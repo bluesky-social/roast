@@ -2,9 +2,8 @@
 
 ## Supported versions
 
-Only the latest tagged release receives security fixes. Older releases are not
-supported. Before the first tagged release, fixes may land on `main`, but
-unreleased builds carry no compatibility or support guarantee.
+Only the latest tagged release receives security fixes. Older releases and
+unreleased builds from `main` are not supported.
 
 ## Reporting a vulnerability
 

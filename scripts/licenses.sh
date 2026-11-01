@@ -80,6 +80,61 @@ if ! awk '
   exit 1
 fi
 
+# golang.org/x/net/publicsuffix (linked through minio-go's cookie jar) embeds
+# data generated from the Public Suffix List, which is MPL-2.0 rather than
+# x/net's BSD license. go-licenses collects only the module-root license, so
+# record the list revision named by the selected module source and where to
+# obtain that revision's source. Fail rather than guess when it is not found.
+net_module=$(go list -m -f '{{.Dir}}' golang.org/x/net)
+psl_table="$net_module/publicsuffix/table.go"
+psl_pattern='^const version = "(publicsuffix\.org.s public_suffix_list\.dat, git revision ([0-9a-f]{40}) \([^)]*\))"$'
+psl_version=''
+psl_revision=''
+if [[ -f "$psl_table" ]]; then
+  while IFS= read -r line; do
+    if [[ $line =~ $psl_pattern ]]; then
+      psl_version=${BASH_REMATCH[1]}
+      psl_revision=${BASH_REMATCH[2]}
+      break
+    fi
+  done < "$psl_table"
+fi
+mpl_text=scripts/notices/MPL-2.0.txt
+if [[ -z "$psl_revision" || ! -s "$mpl_text" ]]; then
+  echo 'cannot collect the embedded Public Suffix List MPL-2.0 notice; inspect the selected golang.org/x/net source' >&2
+  exit 1
+fi
+psl_notice="$license_work/bundle/golang.org/x/net/NOTICE-publicsuffix-MPL-2.0.txt"
+mkdir -p "$(dirname "$psl_notice")"
+{
+  cat <<EOF
+Public Suffix List data in golang.org/x/net/publicsuffix
+
+golang.org/x/net/publicsuffix is linked into this program and embeds data
+generated from the Public Suffix List:
+
+  $psl_version
+
+The rest of golang.org/x/net is covered by the LICENSE file in this
+directory. The Public Suffix List is subject to the following notice:
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+The Source Code Form of the list is available from the Public Suffix List
+project at https://publicsuffix.org/list/. The revision used here is:
+
+  https://github.com/publicsuffix/list/blob/$psl_revision/public_suffix_list.dat
+
+The complete text of the Mozilla Public License, v. 2.0 follows.
+
+----------------------------------------------------------------------
+
+EOF
+  cat "$mpl_text"
+} > "$psl_notice"
+
 # The Go runtime and standard library are also part of static binaries.
 go_root=$(go env GOROOT)
 go_license="$go_root/LICENSE"

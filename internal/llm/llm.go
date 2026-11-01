@@ -55,7 +55,7 @@ type ConverseOpts struct {
 	// model is told to wrap up rather than sending an oversized request.
 	// Zero means the implementation default.
 	InputByteCeiling int
-	// WorkDeadline, when non-zero, is the §11 work deadline: once it passes,
+	// WorkDeadline, when non-zero, is the run's work deadline: once it passes,
 	// no further exploration turns run — the loop jumps straight to the
 	// reserved wrap-up turn (final tool only, forced-submit notice) executed
 	// under its own WrapUpWindow timeout derived fresh from the caller's
@@ -76,7 +76,7 @@ type ConverseOpts struct {
 	OnBudgetExhausted func()
 }
 
-// workDeadlineState tracks §11 work-deadline mechanics around the Fantasy agent:
+// workDeadlineState tracks work-deadline mechanics around the Fantasy agent:
 // a latched clock check (never a whole-run context timeout) plus a bounded
 // child context for the wrap-up turn.
 type workDeadlineState struct {

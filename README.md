@@ -33,7 +33,7 @@ brew install --cask bluesky-social/tap/roast
 
 Existing installations from `bluesky-social/tap` upgrade in place with
 `brew upgrade --cask roast`; no re-tap or package rename is needed.
-See [Upgrading from the original Roast](docs/upgrading.md) for configuration
+See [Upgrading from pre-1.1 configurations](docs/upgrading.md) for configuration
 migration and optional cleanup of retired Claude integrations.
 
 Tagged releases provide `roast` archives for macOS, Linux, and Windows on
@@ -48,10 +48,13 @@ go install github.com/bluesky-social/roast/cmd/roast@latest
 ```
 
 Source builds use the command shown above. Run `roast --version` to inspect the
-version, commit, and build date stamped into a release binary.
+version, commit, and build date stamped into a release binary. Other builds
+report what the Go toolchain recorded: the module version for `go install`,
+plus the commit and its date when built from a Git checkout.
 
-Released binaries perform a cached, informational check for newer stable GitHub
-releases. The check never blocks a command or changes its exit status. Network
+Binaries that report a version other than `dev` perform a cached, informational
+check for newer stable GitHub releases. The check never blocks a command or
+changes its exit status. Network
 and cache failures fail open; update with Homebrew or the installation method
 you originally used. Set `ROAST_NO_UPDATE_CHECK=1` to disable the check.
 
@@ -109,22 +112,8 @@ base URLs work for each protocol, so a role can use a hosted provider, gateway,
 or local server that implements the selected wire contract.
 
 Configuration may also be stored in the user config directory at
-`roast/config.yaml`, or supplied with `--config`:
-
-An organization may publish a secret-free configuration template. Install it
-once with `roast config init --from https://config.example/roast`; an
-interactive first run also offers this prompt when no current config exists.
-When upgrading an unversioned pre-public config, Roast carries its existing
-credential into otherwise credential-free inference profiles and presigned
-upload configuration, leaves a `.pre-v1` backup for an in-place migration,
-and never sends that credential to the configuration URL.
-
-Credential import is disabled unless the trusted template explicitly contains:
-
-```yaml
-provisioning:
-  import_legacy_credential: true
-```
+`roast/config.yaml` (see [Config file location](#config-file-location)), or
+supplied with `--config`:
 
 ```yaml
 version: 1
@@ -253,6 +242,42 @@ prompts:
   verifier: /absolute/path/to/verifier.txt
 ```
 
+### Other settings
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `review.excludes` | none | Git pathspecs left out of every review, in addition to any `--exclude` flags. |
+| `review.confidence_floor` | `0.6` | Findings whose finder confidence (0 to 1) is below this value are dropped before verification and listed under `dropped_findings`. `0` selects the default. |
+| `review.quick_confidence_floor` | `0.8` | The same floor for `--quick` reviews, which skip verification. `0` selects the default. |
+| `roles.finder.pin` | `false` | Keep the configured finder even when the author model shares its model family. `author_routes` are not consulted, and Roast warns that the review is less independent. |
+| `upload.token` | none | A literal bearer token for the `presigned` backend, instead of `token_env`. Like `api_key`, it belongs only in the user-owned config; a configuration URL cannot supply it. |
+
+### Config file location
+
+Without `--config`, Roast reads `roast/config.yaml` from the operating
+system's user configuration directory:
+
+| Platform | Default path |
+| --- | --- |
+| macOS | `~/Library/Application Support/roast/config.yaml` |
+| Linux and other Unix | `$XDG_CONFIG_HOME/roast/config.yaml`, or `~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset |
+| Windows | `%AppData%\roast\config.yaml` |
+
+macOS and Windows ignore `XDG_CONFIG_HOME`; where it applies, it must be an
+absolute path. A missing default file is not an error: Roast uses its built-in
+defaults and the environment. `roast doctor` reports the path it selected.
+
+### Configuration URLs
+
+An organization can publish a secret-free configuration document for users to
+install with `roast config init --from <https-url>`. Run from a terminal,
+`roast review` also offers to install one when no config exists. The document
+must declare `version: 1` and may name credential environment variables, but
+must not contain credentials. A presigned upload broker can serve it (see
+[Presigned upload broker](#presigned-upload-broker)). To migrate an older
+config, including the opt-in import of its existing credential, see
+[Upgrading from pre-1.1 configurations](docs/upgrading.md).
+
 ## Use
 
 Run Roast inside a Git repository:
@@ -265,6 +290,7 @@ roast review --quick
 roast review --scope repo
 roast runs
 roast runs show <run-id>
+roast runs checkout <run-id>
 roast runs status
 roast runs sync
 roast doctor
@@ -281,11 +307,21 @@ Roast accepts only a schema-validated tool submission, not free-form text. Missi
 submissions receive bounded reminders within the existing attempt, token, and
 deadline limits; an exhausted run is incomplete, never silently clean.
 
+`--interactive` lets the finder explore the checkout over several turns with
+the repository-navigation tools. A diff of fewer than 80 lines that touches
+fewer than 4 files gets a single structured finder call instead, and Roast says
+so on stderr. `ROAST_INTERACTIVE_MIN_DIFF_LINES` and
+`ROAST_INTERACTIVE_MIN_FILES` change those thresholds; setting either to `0`
+keeps the interactive loop regardless of diff size. `--quick` overrides
+`--interactive` and the thresholds, turning navigation off. A
+`--scope repo` survey always navigates and rejects `--quick`.
+
 On the first interactive review in a repository, Roast asks once whether to
 install its staged-content pre-commit gate. The answer is stored in local Git
 config for that repository; a decline is not prompted again. Non-interactive
 runs never install a hook. Manage the decision explicitly with
-`roast gate enable|status|disable`.
+`roast gate enable|status|disable`. Set `ROAST_NO_HOOK=1` to skip this
+first-run check entirely; explicit `roast gate` commands still work.
 
 Shared `core.hooksPath` dispatchers still require an opt-in in each repository's
 local Git config. Disabling one repository preserves a custom hooks directory's
@@ -319,7 +355,7 @@ operator-controlled:
 
 | Control | Default | Override |
 | --- | ---: | --- |
-| Output tokens per model call | 32,768 | Profile `max_output_tokens` or role flag |
+| Output tokens per model call | 32,768 | Profile `max_output_tokens`, `ROAST_FINDER_MAX_OUTPUT_TOKENS` / `ROAST_VERIFIER_MAX_OUTPUT_TOKENS`, or `--finder-max-output-tokens` / `--verifier-max-output-tokens` |
 | Timeout per inference request | 10 minutes | `--request-timeout` / `ROAST_REQUEST_TIMEOUT`; `0` disables |
 | Interactive finder work deadline | 10 minutes | `--deadline` / `ROAST_DEADLINE`; `0` disables |
 | Repository-survey work deadline | 25 minutes | `--deadline` / `ROAST_DEADLINE`; `0` disables |
@@ -388,6 +424,21 @@ staged reviews they read the captured index; other reviews read the captured
 worktree, including captured non-ignored untracked files. Editing the checkout
 after inference starts does not change finder or verifier context.
 
+Snapshots are Git refs under `refs/roast/snapshots/` in the reviewed
+repository. `roast runs checkout <run-id> [dir]` restores one as a detached
+linked worktree of that repository: `HEAD` is the reviewed commit, the
+captured worktree contents are on disk, and the captured index is staged, so
+`git status` and `git diff` show what was reviewed. Without `dir`, Roast
+creates a temporary directory. It prints the worktree path on stdout and the
+`git worktree remove` command that cleans it up on stderr. Set
+`ROAST_SNAPSHOT=0` to skip snapshot capture; such a run records no snapshot
+ref, notes that it cannot be replayed, and cannot be checked out.
+
+Local run artifacts are retained indefinitely and are never deleted
+automatically. `roast runs prune` only removes snapshot refs in the current
+repository, defaults to refs older than 30 days, and supports `--dry-run`; it
+does not delete run directories or bundles.
+
 Each archive is a `roast-run-bundle` v1 bundle. Its generated
 `bundle-manifest.json` inventories every archived artifact with its byte size
 and SHA-256 digest. Roast verifies both new and reused bundles before accepting
@@ -430,7 +481,7 @@ Static S3-compatible credentials may be supplied with
 IAM/workload-identity credential source. Optional settings include
 `ROAST_BROKER_S3_REGION`, `ROAST_BROKER_S3_PREFIX`,
 `ROAST_BROKER_S3_PATH_STYLE`, `ROAST_BROKER_MAX_BUNDLE_BYTES`, and
-`ROAST_BROKER_LISTEN_ADDRESS`.
+`ROAST_BROKER_LISTEN_ADDRESS` (default `:8080`, all interfaces).
 
 Mounting a validated, secret-free client config and setting
 `ROAST_BROKER_CLIENT_CONFIG_FILE` serves it at `/config/v1`, making the broker
@@ -450,10 +501,7 @@ The version-1 broker protocol is deliberately small:
 Each grant uses a unique object key, so the broker requires no database.
 Operators should configure bucket lifecycle expiration for abandoned uploads.
 
-Local run artifacts are retained indefinitely and are never deleted
-automatically. `roast runs prune` only removes snapshot refs in the current
-repository, defaults to refs older than 30 days, and supports `--dry-run`; it
-does not delete run directories or bundles.
+## Pre-commit gate
 
 The optional local commit gate is explicit:
 
@@ -463,42 +511,27 @@ roast gate status
 roast gate disable
 ```
 
-It reviews staged content and fails open on operational errors. Set
-`ROAST_SKIP=1` to bypass one commit.
+It runs a `--quick` review of the commit's staged content and fails open on
+operational errors: a missing binary, failed inference, empty output, or
+timeout prints a warning and allows the commit. It blocks only when a finding
+meets the severity threshold. The hook reads these variables when it runs:
 
-## Releases and commit messages
+| Variable | Effect |
+| --- | --- |
+| `ROAST_SKIP` | Any non-empty value, conventionally `ROAST_SKIP=1`, bypasses one commit. |
+| `ROAST_BIN` | Path of the `roast` binary to run instead of the one on `PATH`. |
+| `ROAST_GATE_TIMEOUT` | Seconds before an unfinished review is stopped and the commit allowed. Defaults to `180`; `0` disables the watchdog, and a non-numeric value uses the default. |
+| `ROAST_GATE_SEVERITY` | Lowest severity that blocks the commit: `INFO`, `LOW`, `MEDIUM`, `HIGH` (the default), or `CRITICAL`. An invalid value makes the review fail, so the commit is allowed. |
 
-Releases are cut by [release-please](https://github.com/googleapis/release-please)
-through the org release pipeline ([onboarding guide](https://github.com/bluesky-social/.github/blob/main/docs/reference/release-please-onboarding.md)).
+## Pull request titles
 
-**Commit messages need a `type:` prefix, but any word works.** PRs are
-squash-merged, so the PR title becomes the commit, and a required `pr-title`
-check enforces the prefix. release-please drops commits without one. `feat:`
-releases a minor version, a breaking change (`feat!:`, or a `BREAKING CHANGE:`
-footer) a major one (a minor while the version is 0.x), and anything else,
-including subsystem prefixes like `ask:`, a patch. Release notes are built from
-merged PR titles, so write the title as the changelog line you want. Direct
-pushes appear only in the release's compare link.
-
-**How a release happens.** Every push to `main` updates a standing
-`chore(main): release X.Y.Z` PR maintained by `bsky-release-bot`. Merging it
-tags `vX.Y.Z` and builds the release binaries and Homebrew cask (goreleaser).
-
-- If every commit since the last tag came from a merged Renovate or
-  Dependabot PR, the Release PR merges itself on the hourly run, weekdays
-  09:00-16:00 PT. Otherwise a human merges it.
-- Any human-authored commit in that range, even one that doesn't release on
-  its own, means a human merges the next Release PR.
-- Label the Release PR `release:manual` to hold a release.
-
-**Dependencies** come from Renovate with the [org preset](https://github.com/bluesky-social/.github/blob/main/renovate/default.json)
-(`renovate.json`). Don't push to a Renovate PR or click "Update branch" on
-one: that adds a human commit, so the next release needs a human. If a bump
-needs code changes, make them in a separate PR.
-
-**CI.** `main` requires `Test and build`, `Security and licenses` and
-`pr-title / pr-title` to pass, and PRs must be up to date with `main` before
-they merge.
+Pull requests are squash-merged, so each PR title becomes the commit on `main`
+and an entry in the release notes. Titles need a conventional `type:` prefix,
+which a required check enforces; commits without one are left out of the
+release notes. `feat:` releases a minor version, a breaking change (`feat!:`,
+or a `BREAKING CHANGE:` footer) a major version, and any other prefix, such as
+`fix:` or `docs:`, a patch. Write the title as the changelog line you want.
+Maintainer release steps are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
