@@ -23,15 +23,30 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/bluesky-social/roast/internal/llm"
+	"github.com/bluesky-social/roast/internal/scope"
+	"github.com/bluesky-social/roast/internal/snapshot"
 )
 
 const (
-	maxLineBytes = 1_000_000
-	listFilesCap = 500
-	grepMatchCap = 200
+	// toolOutputCap is the hard ceiling on the content one exploration tool
+	// returns, whatever window the model asks for. Repository content is
+	// attacker-controlled, and an unbounded result is both a memory cost here
+	// and a prompt the provider bills for.
+	toolOutputCap = 64 * 1024
+	// maxLineBytes caps one served line below toolOutputCap, so a read_file
+	// window always holds at least one whole numbered line.
+	maxLineBytes = 32 * 1024
+	// readFileLineLimit is the most lines one read_file window may request.
+	readFileLineLimit = 2000
+	// grepLineBytes caps one grep_repo match line; a minified file's single
+	// line can otherwise be megabytes long.
+	grepLineBytes = 2 * 1024
+	listFilesCap  = 500
+	grepMatchCap  = 200
 	// gitDiffByteCap is the hard server-side ceiling on one git_diff window,
 	// enforced regardless of the model's offset/limit args. An unbounded
 	// git_diff on one generated/huge file would re-import the multi-MB blob
@@ -42,7 +57,8 @@ const (
 )
 
 // ResolveUnderRepo is the single chokepoint for model-supplied paths: rejects
-// empty, absolute, and anything that escapes repo after symlink resolution.
+// empty, absolute, anything that escapes repo after symlink resolution, and
+// anything inside a .git directory before or after symlink resolution.
 // Returns the resolved absolute path and true, or ("", false) on rejection.
 func ResolveUnderRepo(repo, userPath string) (string, bool) {
 	if userPath == "" {
@@ -63,7 +79,91 @@ func ResolveUnderRepo(repo, userPath string) (string, bool) {
 		resolved != root {
 		return "", false
 	}
+	if inGitDir(root, candidate) || inGitDir(root, resolved) {
+		return "", false
+	}
 	return candidate, true
+}
+
+// inGitDir reports whether abs, taken relative to root, has a ".git" segment.
+// The comparison ignores case because macOS and Windows file systems do, so
+// ".GIT/config" opens the repository's own config there.
+func inGitDir(root, abs string) bool {
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return true
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if strings.EqualFold(seg, ".git") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveLive confines a model-supplied path for a live working-tree read. A
+// pinned tree holds only tracked files and untracked, non-ignored,
+// non-denylisted files, and no .git directory, by construction. The live tree
+// holds everything on disk, so the same corpus rules are enforced here: on
+// the path as given and on its symlink target, since reading a file follows
+// the link.
+func resolveLive(repo, userPath string) (string, bool) {
+	p, ok := ResolveUnderRepo(repo, userPath)
+	if !ok {
+		return "", false
+	}
+	root, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		root = repo
+	}
+	targets := []string{p}
+	if target := resolveDeepest(p); target != p {
+		targets = append(targets, target)
+	}
+	for _, abs := range targets {
+		rel, err := filepath.Rel(root, abs)
+		if err != nil {
+			return "", false
+		}
+		if !liveCorpusAllows(repo, filepath.ToSlash(rel)) {
+			return "", false
+		}
+	}
+	return p, true
+}
+
+// liveCorpusAllows reports whether rel belongs to the corpus a review serves:
+// not ignored by Git, and not an untracked file matching the secret denylist.
+// It fails closed when Git cannot answer.
+func liveCorpusAllows(repo, rel string) bool {
+	if rel == "." {
+		return true
+	}
+	if snapshot.Denylisted(rel) && !gitTracked(repo, rel) {
+		return false
+	}
+	// check-ignore refuses literal-pathspec mode, so the "./" prefix is what
+	// keeps a leading ':' from being read as pathspec magic.
+	cmd := exec.Command("git", "-C", repo, "check-ignore", "-q", "--", "./"+rel)
+	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=0")
+	err := cmd.Run()
+	var ee *exec.ExitError
+	// check-ignore exits 1 for "not ignored"; 0 means ignored, and anything
+	// else is an error. Tracked files are never reported as ignored.
+	return errors.As(err, &ee) && ee.ExitCode() == 1
+}
+
+func gitTracked(repo, rel string) bool {
+	out, err := literalGit(repo, "ls-files", "-z", "--cached", "--", rel).Output()
+	return err == nil && len(out) > 0
+}
+
+// literalGit builds a git command whose path arguments are never read as
+// pathspec magic.
+func literalGit(repo string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
+	return cmd
 }
 
 // resolveDeepest resolves symlinks on the deepest existing ancestor of path.
@@ -217,7 +317,7 @@ func NumberedSnippet(repo, relpath string, maxBytes int, tree Tree) string {
 		if !StagedPathCanonical(relpath) {
 			return fmt.Sprintf("### %s\n(path is outside the repository or invalid)\n", relpath)
 		}
-	} else if _, ok := ResolveUnderRepo(repo, relpath); !ok {
+	} else if _, ok := resolveLive(repo, relpath); !ok {
 		return fmt.Sprintf("### %s\n(path is outside the repository or invalid)\n", relpath)
 	}
 
@@ -377,9 +477,9 @@ func BuildFileContext(repo string, files []string, budget int, tree Tree) string
 // assumes the working tree, which in staged scope is not what it is being
 // shown.
 func ExplorationTools(repo string, tree Tree) []llm.Tool {
-	readCorpus := "Reads the working tree of this checkout."
+	readCorpus := "Reads the working tree of this checkout (tracked plus untracked, non-ignored files; never .git)."
 	grepCorpus := "Search the working tree of this checkout (tracked plus untracked, non-ignored files) for a pattern."
-	listCorpus := "Lists files in the working tree of this checkout."
+	listCorpus := "Lists tracked plus untracked, non-ignored files in the working tree of this checkout."
 	staged := tree.Staged()
 	if staged {
 		readCorpus = "This review covers STAGED content, so this reads the git index blob — exactly what the commit would contain — NOT the working tree: unstaged edits and untracked files are invisible here, and a path staged for deletion reads as absent from the index."
@@ -399,7 +499,7 @@ func ExplorationTools(repo string, tree Tree) []llm.Tool {
 				"properties": map[string]any{
 					"path":   map[string]any{"type": "string", "description": "Repo-relative path."},
 					"offset": map[string]any{"type": "integer", "description": "1-indexed starting line."},
-					"limit":  map[string]any{"type": "integer", "description": "Max lines to return (default 500)."},
+					"limit":  map[string]any{"type": "integer", "description": fmt.Sprintf("Max lines to return (default 500, at most %d; output is capped at %d bytes).", readFileLineLimit, toolOutputCap)},
 				},
 				"required": []string{"path"},
 			},
@@ -472,7 +572,7 @@ func GitDiffTool(repo, rangeSpec string, allowed []string) llm.Tool {
 
 // --- tool implementations ---------------------------------------------------
 
-// gitDiffTool runs `git -C repo diff --no-renames <rangeSpec> -- <path>` for a
+// gitDiffTool runs `git -C repo diff --no-renames <PatchFlags> <rangeSpec> -- <path>` for a
 // single manifest file and returns a windowed slice of the output. rangeSpec
 // is caller-bound; only path and the window come from the model. allowed is
 // the manifest's file set — the only paths the model may request.
@@ -520,7 +620,8 @@ func gitDiffTool(ctx context.Context, repo, rangeSpec string, allowed map[string
 
 	// rangeSpec is a caller-bound OID range; `--` separates it from the path
 	// so a filename can never be reinterpreted as a revision.
-	cmd := exec.CommandContext(ctx, "git", "-C", repo, "diff", "--no-renames", rangeSpec, "--", path)
+	diffArgs := append(append([]string{"-C", repo, "diff", "--no-renames"}, scope.PatchFlags...), rangeSpec, "--", path)
+	cmd := exec.CommandContext(ctx, "git", diffArgs...)
 	stdout, perr := cmd.StdoutPipe()
 	if perr != nil {
 		return errResult("git diff failed: %v", perr)
@@ -666,7 +767,7 @@ func readFileTool(repo string, args map[string]any, tree Tree) map[string]any {
 		}
 	} else {
 		var ok bool
-		p, ok = ResolveUnderRepo(repo, path)
+		p, ok = resolveLive(repo, path)
 		if !ok {
 			return errResult("path '%s' is outside the repository or invalid", path)
 		}
@@ -707,6 +808,7 @@ func readFileTool(repo string, args map[string]any, tree Tree) map[string]any {
 	if err != nil {
 		return errResult("offset and limit must be integers")
 	}
+	limit = min(limit, readFileLineLimit)
 	end := offset + limit // first line NOT in the window
 
 	var src io.Reader
@@ -731,41 +833,42 @@ func readFileTool(repo string, args map[string]any, tree Tree) map[string]any {
 		src = f
 	}
 
-	var sliced []string
+	var body strings.Builder
 	lineNo := 0
 	moreBelow := false
+	outputCapped := false
 	var truncatedLines []int
 	r := bufio.NewReaderSize(src, 64*1024)
 
 	for {
-		line, err := readLineCapped(r, maxLineBytes)
+		line, cut, err := readLineCapped(r, maxLineBytes)
 		if len(line) == 0 && err != nil {
 			break
 		}
 		lineNo++
-		// Detect pathological lines — readLineCapped stops AT the cap rather
-		// than at the delimiter, so a line that hits maxLineBytes without a
-		// newline needs draining.
-		if len(line) >= maxLineBytes && !strings.HasSuffix(line, "\n") {
+		line = strings.TrimSuffix(line, "\n")
+		if cut {
 			truncatedLines = append(truncatedLines, lineNo)
-			// Drain to the newline WITHOUT accumulating: ReadSlice returns the
-			// internal buffer, so a 40 MB single-line blob costs one buffer,
-			// not 40 MB.
-			for {
-				_, e := r.ReadSlice('\n')
-				if e == nil || !errors.Is(e, bufio.ErrBufferFull) {
-					break
-				}
-			}
-			line = strings.TrimRight(line, "\n") + fmt.Sprintf("  ... (line truncated at %d bytes)", maxLineBytes)
-		} else {
-			line = strings.TrimRight(line, "\n")
+			line += fmt.Sprintf("  ... (line truncated at %d bytes)", maxLineBytes)
 		}
-		if offset <= lineNo && lineNo < end {
-			sliced = append(sliced, line)
-		} else if lineNo >= end {
+		if lineNo >= end {
 			moreBelow = true
 			break
+		}
+		if offset <= lineNo {
+			numbered := fmt.Sprintf("%5d  %s", lineNo, line)
+			if body.Len() > 0 {
+				numbered = "\n" + numbered
+			}
+			// maxLineBytes leaves room for one numbered line, so the window
+			// always serves at least one line before this cap stops it.
+			if body.Len()+len(numbered) > toolOutputCap {
+				end = lineNo
+				moreBelow = true
+				outputCapped = true
+				break
+			}
+			body.WriteString(numbered)
 		}
 		if err != nil {
 			break
@@ -783,22 +886,18 @@ func readFileTool(repo string, args map[string]any, tree Tree) map[string]any {
 		_ = stagedCmd.Wait()
 	}
 
-	var bodyLines []string
-	for i, l := range sliced {
-		bodyLines = append(bodyLines, fmt.Sprintf("%5d  %s", offset+i, l))
-	}
-	body := strings.Join(bodyLines, "\n")
-
 	switch {
+	case outputCapped:
+		fmt.Fprintf(&body, "\n... (output capped at %d bytes; more lines below; request offset>=%d to continue)", toolOutputCap, end)
 	case moreBelow:
-		body += fmt.Sprintf("\n... (more lines below; request offset>=%d to continue)", end)
+		fmt.Fprintf(&body, "\n... (more lines below; request offset>=%d to continue)", end)
 	case lineNo == 0:
-		body += "\n(file is empty)"
+		body.WriteString("\n(file is empty)")
 	case offset > lineNo:
-		body += fmt.Sprintf("\n(offset %d is past EOF — file has %d lines)", offset, lineNo)
+		fmt.Fprintf(&body, "\n(offset %d is past EOF — file has %d lines)", offset, lineNo)
 	}
 	if len(truncatedLines) > 0 {
-		body += fmt.Sprintf("\n(lines truncated at %d bytes: %v)", maxLineBytes, truncatedLines)
+		fmt.Fprintf(&body, "\n(lines truncated at %d bytes: %v)", maxLineBytes, truncatedLines)
 	}
 
 	retEnd := end - 1
@@ -809,7 +908,7 @@ func readFileTool(repo string, args map[string]any, tree Tree) map[string]any {
 		"path":           path,
 		"returned_range": []int{offset, retEnd},
 		"more_below":     moreBelow,
-		"content":        body,
+		"content":        body.String(),
 	}
 }
 
@@ -821,38 +920,32 @@ func readFileTool(repo string, args map[string]any, tree Tree) map[string]any {
 // ReadSlice returns the internal buffer instead, so the cost is bounded by the
 // reader's buffer size no matter how long the line is.
 //
-// The returned line keeps its trailing newline when it had one, matching
-// ReadString, so callers can still distinguish "line ended" from "hit the cap".
-// err is the first read error encountered; a line ending exactly at the cap
-// returns a nil error and the caller detects the missing newline.
-func readLineCapped(r *bufio.Reader, cap int) (string, error) {
+// It always consumes the whole line, through its newline: content past cap
+// is read and discarded, never accumulated, and cut reports that some was.
+// Leaving that drain to callers lost the following line whenever the cut line
+// and its newline arrived in one buffered chunk. The returned line keeps its
+// trailing newline when it had one, matching ReadString; err is the first
+// read error encountered.
+func readLineCapped(r *bufio.Reader, cap int) (line string, cut bool, err error) {
 	var sb strings.Builder
 	for {
 		chunk, err := r.ReadSlice('\n')
-		if len(chunk) > 0 {
-			room := cap - sb.Len()
-			if room > 0 {
-				if len(chunk) <= room {
-					sb.Write(chunk)
-				} else {
-					sb.Write(chunk[:room])
-				}
-			}
+		ended := err == nil // chunk ends with the newline
+		content := chunk
+		if ended {
+			content = chunk[:len(chunk)-1]
 		}
-		switch {
-		case err == nil:
-			// Found the delimiter. If the cap swallowed it, report the line as
-			// capped (no trailing newline) so the caller drains the remainder.
-			return sb.String(), nil
-		case errors.Is(err, bufio.ErrBufferFull):
-			if sb.Len() >= cap {
-				// At the cap with no newline seen: the caller drains.
-				return sb.String(), nil
-			}
+		if room := cap - sb.Len(); len(content) > room {
+			content, cut = content[:max(room, 0)], true
+		}
+		sb.Write(content)
+		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
-		default:
-			return sb.String(), err
 		}
+		if ended {
+			sb.WriteByte('\n')
+		}
+		return sb.String(), cut, err
 	}
 }
 
@@ -875,7 +968,16 @@ func listFilesTool(repo string, args map[string]any, tree Tree) map[string]any {
 		}
 		return listPinnedFilesTool(repo, directory, pattern, tree)
 	}
-	base, ok := ResolveUnderRepo(repo, directory)
+	return listLiveFilesTool(repo, directory, pattern)
+}
+
+// listLiveFilesTool lists the live working tree from Git's own view of it —
+// tracked plus untracked, non-ignored files — rather than walking the disk,
+// so ignored build output and secrets never surface even by name. Untracked
+// files matching the secret denylist are dropped, mirroring the captured
+// worktree.
+func listLiveFilesTool(repo, directory, pattern string) map[string]any {
+	base, ok := resolveLive(repo, directory)
 	if !ok {
 		return errResult("directory '%s' is outside the repository or invalid", directory)
 	}
@@ -888,47 +990,97 @@ func listFilesTool(repo string, args map[string]any, tree Tree) map[string]any {
 	if r, err := filepath.EvalSymlinks(repo); err == nil {
 		root = r
 	}
-
-	var matches []string
-	err = filepath.Walk(base, func(path string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !fi.Mode().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		// Skip hidden path segments (.git, .venv, etc.)
-		for _, seg := range strings.Split(rel, "/") {
-			if strings.HasPrefix(seg, ".") {
-				return nil
-			}
-		}
-		name := fi.Name()
-		relMatch := globstarMatch(pattern, rel)
-		nameMatch := !strings.Contains(pattern, "/") && globstarMatch(pattern, name)
-		if relMatch || nameMatch {
-			matches = append(matches, rel)
-		}
-		if len(matches) >= listFilesCap {
-			matches = append(matches, fmt.Sprintf("... (truncated at %d matches)", listFilesCap))
-			return io.EOF // stop walk
-		}
-		return nil
-	})
-	if err != nil && err != io.EOF {
-		return errResult("walk error: %v", err)
+	relDir, err := filepath.Rel(root, base)
+	if err != nil {
+		return errResult("directory '%s' is outside the repository or invalid", directory)
+	}
+	args := []string{"ls-files", "-z", "--cached", "--others", "--exclude-standard"}
+	if relDir = filepath.ToSlash(relDir); relDir != "." {
+		args = append(args, "--", relDir)
+	}
+	out, err := literalGit(repo, args...).Output()
+	if err != nil {
+		return errResult("list working tree failed: %v", err)
+	}
+	denied, err := snapshot.DenylistedUntracked(repo)
+	if err != nil {
+		return errResult("list working tree failed: %v", err)
+	}
+	deniedSet := make(map[string]struct{}, len(denied))
+	for _, p := range denied {
+		deniedSet[p] = struct{}{}
 	}
 
+	var rels []string
+	seen := make(map[string]struct{})
+	for _, raw := range bytes.Split(out, []byte{0}) {
+		rel := string(raw)
+		if rel == "" || hiddenPath(rel) {
+			continue
+		}
+		// An unmerged path is listed once per conflict stage.
+		if _, dup := seen[rel]; dup {
+			continue
+		}
+		seen[rel] = struct{}{}
+		if _, deny := deniedSet[rel]; deny {
+			continue
+		}
+		if !globstarMatch(pattern, rel) && (strings.Contains(pattern, "/") || !globstarMatch(pattern, path.Base(rel))) {
+			continue
+		}
+		// Regular files only, as the disk walk this replaced served: an
+		// index entry deleted from disk, a symlink, or a submodule is not.
+		if fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel))); err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	var matches listMatches
+	for _, rel := range rels {
+		if !matches.add(rel) {
+			break
+		}
+	}
 	return map[string]any{
 		"directory": directory,
 		"pattern":   pattern,
-		"matches":   matches,
+		"matches":   matches.items,
 	}
+}
+
+// hiddenPath reports whether any segment of rel starts with "." (.git, .venv,
+// .env and the like), which list_files has never listed.
+func hiddenPath(rel string) bool {
+	for _, seg := range strings.Split(rel, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+// listMatches accumulates list_files results up to listFilesCap entries and
+// toolOutputCap bytes, ending with a truncation marker when either cap stops
+// it.
+type listMatches struct {
+	items []string
+	bytes int
+}
+
+func (m *listMatches) add(rel string) bool {
+	switch {
+	case len(m.items) >= listFilesCap:
+		m.items = append(m.items, fmt.Sprintf("... (truncated at %d matches)", listFilesCap))
+		return false
+	case m.bytes+len(rel)+1 > toolOutputCap:
+		m.items = append(m.items, fmt.Sprintf("... (truncated at %d bytes after %d matches)", toolOutputCap, len(m.items)))
+		return false
+	}
+	m.items = append(m.items, rel)
+	m.bytes += len(rel) + 1
+	return true
 }
 
 func pinnedDirectoryCanonical(directory string) bool {
@@ -951,7 +1103,7 @@ func listPinnedFilesTool(repo, directory, pattern string, tree Tree) map[string]
 	if prefix != "" {
 		prefix += "/"
 	}
-	var matches []string
+	var matches listMatches
 	for _, raw := range bytes.Split(out, []byte{0}) {
 		if len(raw) == 0 {
 			continue
@@ -968,28 +1120,17 @@ func listPinnedFilesTool(repo, directory, pattern string, tree Tree) map[string]
 		if prefix != "" && !strings.HasPrefix(rel, prefix) {
 			continue
 		}
-		hidden := false
-		for _, seg := range strings.Split(rel, "/") {
-			if strings.HasPrefix(seg, ".") {
-				hidden = true
-				break
-			}
-		}
-		if hidden {
+		if hiddenPath(rel) {
 			continue
 		}
 		name := path.Base(rel)
 		relMatch := globstarMatch(pattern, rel)
 		nameMatch := !strings.Contains(pattern, "/") && globstarMatch(pattern, name)
-		if relMatch || nameMatch {
-			matches = append(matches, rel)
-		}
-		if len(matches) >= listFilesCap {
-			matches = append(matches, fmt.Sprintf("... (truncated at %d matches)", listFilesCap))
+		if (relMatch || nameMatch) && !matches.add(rel) {
 			break
 		}
 	}
-	return map[string]any{"directory": directory, "pattern": pattern, "matches": matches}
+	return map[string]any{"directory": directory, "pattern": pattern, "matches": matches.items}
 }
 
 // globstarMatch matches slash-separated paths with standard path.Match
@@ -1064,22 +1205,46 @@ func grepRepoTool(repo string, args map[string]any, tree Tree) map[string]any {
 	if pathGlob != "" {
 		gitArgs = append(gitArgs, pathGlob)
 	}
-
-	cmd := exec.Command("git", gitArgs...)
-	out, err := cmd.Output()
-	if err != nil {
-		// git grep exits 1 when there are no matches — that's not an error.
-		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
-			return noGrepMatches(pattern, pathGlob, tree)
+	if !pinned {
+		// The captured worktree leaves out untracked files matching the
+		// secret denylist; the live tree has to be told to.
+		denied, err := snapshot.DenylistedUntracked(repo)
+		if err != nil {
+			return errResult("grep failed: %v", err)
 		}
-		return errResult("grep failed: %v", err)
+		if len(denied) > 0 && pathGlob == "" {
+			gitArgs = append(gitArgs, ".")
+		}
+		for _, p := range denied {
+			gitArgs = append(gitArgs, ":(exclude,literal)"+p)
+		}
 	}
 
-	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	// Streamed, not buffered: a pattern that matches every line of a large
+	// repository, or one minified line megabytes long, must cost one capped
+	// window rather than the whole output.
+	cmd := exec.Command("git", gitArgs...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return errResult("grep failed: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return errResult("grep failed: %v", err)
+	}
+	prefix := ""
+	if pinned {
+		prefix = tree.OID + ":"
+	}
+	r := bufio.NewReaderSize(stdout, 64*1024)
 	var matches []string
-	for _, l := range lines {
-		if l == "" {
-			continue
+	used := 0
+	capped := false
+	for {
+		raw, cut, rerr := readLineCapped(r, len(prefix)+grepLineBytes)
+		if len(raw) == 0 && rerr != nil {
+			break
 		}
 		// `git grep <tree>` prefixes every match with the tree-ish it searched
 		// ("<OID>:a.go:2:func Foo(){}"), which `git grep --cached` does not.
@@ -1090,12 +1255,37 @@ func grepRepoTool(repo string, args map[string]any, tree Tree) map[string]any {
 		// guard. Strip it so the staged and worktree corpora present matches in
 		// ONE shape, which is the same reason readFileTool funnels both trees
 		// through a single line loop.
-		l = strings.TrimPrefix(l, tree.OID+":")
-		matches = append(matches, l)
-		if len(matches) >= grepMatchCap {
-			matches = append(matches, fmt.Sprintf("... (truncated at %d matching lines)", grepMatchCap))
+		l := strings.TrimPrefix(strings.TrimSuffix(raw, "\n"), prefix)
+		if cut || len(l) > grepLineBytes {
+			l = l[:min(len(l), grepLineBytes)] + " ... (line truncated)"
+		}
+		if l != "" {
+			if len(matches) >= grepMatchCap {
+				matches = append(matches, fmt.Sprintf("... (truncated at %d matching lines)", grepMatchCap))
+				capped = true
+				break
+			}
+			if used+len(l)+1 > toolOutputCap {
+				matches = append(matches, fmt.Sprintf("... (truncated at %d bytes after %d matching lines)", toolOutputCap, len(matches)))
+				capped = true
+				break
+			}
+			matches = append(matches, l)
+			used += len(l) + 1
+		}
+		if rerr != nil {
 			break
 		}
+	}
+	if capped {
+		_ = cmd.Process.Kill()
+	}
+	if err := cmd.Wait(); err != nil && !capped {
+		// git grep exits 1 when there are no matches — that's not an error.
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return noGrepMatches(pattern, pathGlob, tree)
+		}
+		return errResult("grep failed: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	if len(matches) == 0 {
 		// Exit 0 with nothing usable: same epistemic situation as exit 1, so it
@@ -1201,5 +1391,8 @@ func parseOffsetLimit(args map[string]any) (offset, limit int, err error) {
 			limit = 1
 		}
 	}
-	return offset, limit, nil
+	// Model-supplied: keep offset+limit far from overflow so a huge request
+	// cannot wrap the window end negative.
+	const maxWindow = 1 << 30
+	return min(offset, maxWindow), min(limit, maxWindow), nil
 }

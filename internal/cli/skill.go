@@ -17,6 +17,7 @@ func newSkillCommand(stdout io.Writer) *cobra.Command {
 		Args:          noArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		RunE:          showHelp,
 	}
 	cmd.AddCommand(newSkillInstallCommand(stdout), newSkillStatusCommand(stdout))
 	return cmd

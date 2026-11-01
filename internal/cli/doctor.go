@@ -113,13 +113,18 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			}
 			role = flip.Role
 		}
+		credential := doctorResult{name + "-credential", doctorPass, role.Credential.String()}
+		if strings.TrimSpace(role.APIKey) == "" {
+			credential.Status = doctorFail
+		}
+		results = append(results, credential)
 		if validateErr := config.ValidateRole(name, role); validateErr != nil {
 			results = append(results, doctorResult{name + "-profile", doctorFail, validateErr.Error()})
 			continue
 		}
 		results = append(results, doctorResult{
 			Name: name + "-profile", Status: doctorPass,
-			Detail: fmt.Sprintf("%s: %s via %s at %s", role.Profile, role.Model, role.Protocol, role.BaseURL),
+			Detail: fmt.Sprintf("%s: %s via %s at %s with credential %s", role.Profile, role.Model, role.Protocol, role.BaseURL, role.Credential),
 		})
 		results = append(results, doctorEndpointCheck(ctx, client, name, role))
 		results = append(results, doctorRoundtripCheck(ctx, name, role))

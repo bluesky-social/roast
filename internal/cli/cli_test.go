@@ -95,6 +95,7 @@ func TestJSONErrorOutput(t *testing.T) {
 }
 
 func TestInvalidResourceOverridesAreUsageErrors(t *testing.T) {
+	isolateUserConfig(t)
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
 	t.Setenv("ROAST_FINDER_MODEL", "finder-test")
 	t.Setenv("ROAST_FINDER_API_KEY", "test-key")
@@ -117,6 +118,8 @@ func TestInvalidResourceOverridesAreUsageErrors(t *testing.T) {
 		{name: "zero attempts environment", env: "ROAST_MAX_ATTEMPTS", value: "0"},
 		{name: "zero attempts flag", args: []string{"--max-attempts=0"}},
 		{name: "negative timeout flag", args: []string{"--request-timeout=-1s"}},
+		{name: "malformed finder output tokens", env: "ROAST_FINDER_MAX_OUTPUT_TOKENS", value: "lots"},
+		{name: "zero verifier output tokens", env: "ROAST_VERIFIER_MAX_OUTPUT_TOKENS", value: "0"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -127,6 +130,9 @@ func TestInvalidResourceOverridesAreUsageErrors(t *testing.T) {
 			code, runErr := ExecuteContext(t.Context(), args, io.Discard, io.Discard)
 			if code != ExitUsage || runErr == nil || ErrorCategoryFor(code, runErr) != ErrorUsage {
 				t.Fatalf("code=%d category=%q err=%v", code, ErrorCategoryFor(code, runErr), runErr)
+			}
+			if test.env != "" && !strings.Contains(runErr.Error(), test.env) {
+				t.Fatalf("error does not name %s: %v", test.env, runErr)
 			}
 		})
 	}
@@ -178,6 +184,49 @@ func TestPublicCommandSurface(t *testing.T) {
 	}
 }
 
+func TestCommandUsageErrorsExitWithUsageCode(t *testing.T) {
+	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
+	for _, args := range [][]string{
+		{"gate", "bogus"}, {"config", "bogus"}, {"skill", "bogus"},
+		{"runs", "show"}, {"runs", "show", "one", "two"},
+		{"runs", "checkout"}, {"runs", "checkout", "one", "two", "three"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			code, err := ExecuteContext(t.Context(), args, &stdout, io.Discard)
+			if code != ExitUsage || ErrorCategoryFor(code, err) != ErrorUsage {
+				t.Fatalf("code=%d err=%v", code, err)
+			}
+		})
+	}
+	for _, group := range []string{"gate", "config", "skill"} {
+		var stdout bytes.Buffer
+		code, err := ExecuteContext(t.Context(), []string{group}, &stdout, io.Discard)
+		if code != ExitClean || err != nil || !strings.Contains(stdout.String(), "Available Commands") {
+			t.Fatalf("%s without a subcommand: code=%d err=%v output=%s", group, code, err, stdout.String())
+		}
+	}
+}
+
+func TestReviewHelpShowsEffectiveDefaults(t *testing.T) {
+	var stdout bytes.Buffer
+	code, err := ExecuteContext(t.Context(), []string{"review", "--help"}, &stdout, io.Discard)
+	if err != nil || code != ExitClean {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	help := stdout.String()
+	for _, want := range []string{
+		"interactive finder work deadline (default 10m, 25m with --scope repo; 0 disables)",
+		"shared finder/verifier token ceiling (default 3000000; 0 disables)",
+		"maximum interactive finder turns (40 with --scope repo) (default 16)",
+		"timeout for each inference request (default 10m; 0 disables)",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help missing %q", want)
+		}
+	}
+}
+
 func TestBareCommandOutsideGitShowsHelp(t *testing.T) {
 	old, err := os.Getwd()
 	if err != nil {
@@ -222,35 +271,115 @@ func TestExplicitReviewOutsideGitStillFails(t *testing.T) {
 	}
 }
 
+// resolveFinder resolves the finder role from a config document whose last
+// section is inference_profiles.
+func resolveFinder(t *testing.T, document string) config.ResolvedRole {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(document+"  verifier:\n    model: v\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role, err := cfg.ResolveRole("finder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return role
+}
+
 func TestProtocolFlagMovesAnUnmodifiedDefaultEndpoint(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-key")
 	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
-	role := config.ResolvedRole{BaseURL: config.DefaultBaseURL("responses"), Protocol: "responses", APIKey: "openai-key"}
+	t.Setenv("GATEWAY_KEY", "gateway-key")
+	role := resolveFinder(t, "version: 1\ninference_profiles:\n  finder:\n    model: m\n")
+	if role.APIKey != "openai-key" {
+		t.Fatalf("API key = %q", role.APIKey)
+	}
 	changed := func(name string) bool { return name == "finder-protocol" }
 	got := applyRoleFlags(changed, "finder", role, roleFlags{protocol: "anthropic"})
 	if got.BaseURL != config.DefaultBaseURL("anthropic") {
 		t.Fatalf("base URL = %q", got.BaseURL)
 	}
-	if got.APIKey != "anthropic-key" {
-		t.Fatalf("API key = %q", got.APIKey)
+	if got.APIKey != "anthropic-key" || got.Credential.Env != "ANTHROPIC_API_KEY" {
+		t.Fatalf("API key = %q from %v", got.APIKey, got.Credential)
 	}
 
-	role.BaseURL = "https://gateway.example/v1"
+	role = resolveFinder(t, "version: 1\ninference_profiles:\n  finder:\n    model: m\n    endpoint: https://gateway.example/v1\n    api_key_env: GATEWAY_KEY\n")
 	got = applyRoleFlags(changed, "finder", role, roleFlags{protocol: "anthropic"})
-	if got.BaseURL != role.BaseURL || got.APIKey != role.APIKey {
+	if got.BaseURL != role.BaseURL || got.APIKey != "gateway-key" {
 		t.Fatalf("custom role changed to %#v", got)
 	}
 }
 
 func TestProtocolFlagClearsWrongProviderCredential(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-key")
-	role := config.ResolvedRole{
-		BaseURL: config.DefaultBaseURL("responses"), APIKey: "openai-key", Protocol: "responses",
+	t.Setenv("OPENAI_PROFILE_KEY", "profile-key")
+	for _, document := range []string{
+		"version: 1\ninference_profiles:\n  finder:\n    model: m\n",
+		"version: 1\ninference_profiles:\n  finder:\n    model: m\n    api_key_env: OPENAI_PROFILE_KEY\n",
+	} {
+		role := resolveFinder(t, document)
+		changed := func(name string) bool { return name == "finder-protocol" }
+		got := applyRoleFlags(changed, "finder", role, roleFlags{protocol: "anthropic"})
+		if got.APIKey != "" {
+			t.Fatalf("stale credential retained: %q from %v", got.APIKey, got.Credential)
+		}
 	}
+}
+
+func TestProtocolFlagMatchesEnvironmentForUnsetEndpoint(t *testing.T) {
+	const gateway = "https://gateway.example/v1"
+	t.Setenv("MY_OPENAI", "openai-profile-key")
+	t.Setenv("ANTHROPIC_BASE_URL", gateway)
+	t.Setenv("ANTHROPIC_API_KEY", "gateway-key")
+	const document = "version: 1\ninference_profiles:\n  finder:\n    model: m\n    protocol: responses\n    api_key_env: MY_OPENAI\n"
+
+	t.Setenv("ROAST_FINDER_PROTOCOL", "anthropic")
+	fromEnv := resolveFinder(t, document)
+	t.Setenv("ROAST_FINDER_PROTOCOL", "")
 	changed := func(name string) bool { return name == "finder-protocol" }
-	got := applyRoleFlags(changed, "finder", role, roleFlags{protocol: "anthropic"})
-	if got.APIKey != "" {
-		t.Fatalf("stale credential retained: %q", got.APIKey)
+	fromFlag := applyRoleFlags(changed, "finder", resolveFinder(t, document), roleFlags{protocol: "anthropic"})
+
+	for path, role := range map[string]config.ResolvedRole{"ROAST_FINDER_PROTOCOL": fromEnv, "--finder-protocol": fromFlag} {
+		if role.BaseURL != gateway || role.Protocol != "anthropic" || role.APIKey != "gateway-key" || role.Credential.Env != "ANTHROPIC_API_KEY" {
+			t.Errorf("%s: endpoint=%q protocol=%q key=%q source=%v", path, role.BaseURL, role.Protocol, role.APIKey, role.Credential)
+		}
+	}
+}
+
+func TestBaseURLFlagDoesNotCarryAmbientProviderKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	t.Setenv("PROFILE_KEY", "profile-key")
+	t.Setenv("ROAST_FINDER_API_KEY", "")
+	changed := func(name string) bool { return name == "finder-base-url" }
+	flags := roleFlags{baseURL: "https://elsewhere.example/v1"}
+
+	ambient := applyRoleFlags(changed, "finder", resolveFinder(t, "version: 1\ninference_profiles:\n  finder:\n    model: m\n"), flags)
+	if ambient.APIKey != "" || ambient.Credential.Withheld != "OPENAI_API_KEY" {
+		t.Fatalf("ambient key followed --finder-base-url: key=%q source=%v", ambient.APIKey, ambient.Credential)
+	}
+	if err := config.ValidateRole("finder", ambient); err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY is not sent") {
+		t.Fatalf("missing-credential error does not explain the withheld key: %v", err)
+	}
+
+	profile := applyRoleFlags(changed, "finder", resolveFinder(t, "version: 1\ninference_profiles:\n  finder:\n    model: m\n    api_key_env: PROFILE_KEY\n"), flags)
+	if profile.APIKey != "profile-key" || profile.BaseURL != flags.baseURL {
+		t.Fatalf("explicit profile credential did not follow the explicit flag: %#v", profile)
+	}
+
+	t.Setenv("ROAST_FINDER_API_KEY", "role-key")
+	role := applyRoleFlags(changed, "finder", resolveFinder(t, "version: 1\ninference_profiles:\n  finder:\n    model: m\n"), flags)
+	if role.APIKey != "role-key" || role.Credential.Kind != config.CredentialRoleEnv {
+		t.Fatalf("role-scoped key not used: %#v", role)
+	}
+
+	t.Setenv("ROAST_FINDER_API_KEY", "")
+	back := applyRoleFlags(changed, "finder", resolveFinder(t, "version: 1\ninference_profiles:\n  finder:\n    model: m\n    endpoint: https://custom.example/v1\n"), roleFlags{baseURL: config.DefaultBaseURL("responses")})
+	if back.APIKey != "openai-key" {
+		t.Fatalf("ambient key not used at the provider default endpoint: %#v", back)
 	}
 }
 

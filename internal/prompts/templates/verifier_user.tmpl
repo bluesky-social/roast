@@ -1,21 +1,25 @@
 ## The claim under adjudication
 
-Severity: {{.Severity}} (finder confidence {{printf "%.2f" .Confidence}})
-File: {{.File}} lines {{.Lines}}
-Description: {{.Description}}
+<claim>
+Severity: {{data .Severity}} (finder confidence {{printf "%.2f" .Confidence}})
+File: {{data .File}} lines {{data .Lines}}
+Description: {{data .Description}}
 
 The code the finder quoted:
-```
-{{.CodeQuote}}
-```
+<code_quote>
+{{data .CodeQuote}}
+</code_quote>
 
 The fix the finder proposed:
-```
-{{.FixedCode}}
-```
+<fixed_code>
+{{data .FixedCode}}
+</fixed_code>
+</claim>
 
-## Current contents of {{.File}} (line-numbered)
+## Current contents of the cited file (line-numbered)
 
-{{.FileSnippet}}
+<file_contents>
+{{data .FileSnippet}}
+</file_contents>
 
 Adjudicate: is the claimed defect real, as described? Ground your verdict in the code.

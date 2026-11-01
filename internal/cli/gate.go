@@ -14,7 +14,7 @@ func newGateCommand(stdout io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "gate", Short: "Manage the native Git pre-commit review gate",
 		Long: "The gate reviews exactly the staged commit. Findings at HIGH or above block; operational failures fail open with a warning.",
-		Args: noArgs, SilenceUsage: true, SilenceErrors: true,
+		Args: noArgs, SilenceUsage: true, SilenceErrors: true, RunE: showHelp,
 	}
 	cmd.AddCommand(newGateStatusCommand(stdout), newGateEnableCommand(stdout), newGateDisableCommand(stdout))
 	return cmd

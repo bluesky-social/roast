@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,12 +19,15 @@ import (
 )
 
 func TestConfigInitRejectsBlankInteractiveURL(t *testing.T) {
-	var stdout bytes.Buffer
-	cmd := newConfigInitCommand(&stdout)
+	var stdout, stderr bytes.Buffer
+	cmd := newConfigInitCommand(&stdout, &stderr)
 	cmd.SetIn(strings.NewReader("   \n"))
 	err := cmd.Execute()
 	if err == nil || err.Error() != "configuration URL is required" {
 		t.Fatalf("expected required URL error, got %v", err)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "Configuration URL: ") {
+		t.Fatalf("URL prompt must go to stderr: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
@@ -88,7 +92,7 @@ upload:
 			}))
 			defer configuration.Close()
 			var output bytes.Buffer
-			cmd := newConfigInitCommand(&output)
+			cmd := newConfigInitCommand(&output, &output)
 			cmd.SetContext(t.Context())
 			if entrypoint == "enrollment" {
 				if err := offerProvision(cmd, path, path, strings.NewReader(configuration.URL+"\n"), &output); err != nil {
@@ -147,7 +151,7 @@ func TestProtocolUpdateDeclineAndNoninteractiveLeaveConfigAlone(t *testing.T) {
 				t.Fatal(err)
 			}
 			var output bytes.Buffer
-			cmd := newConfigInitCommand(&output)
+			cmd := newConfigInitCommand(&output, &output)
 			cmd.SetIn(strings.NewReader("\n"))
 			if mode == "decline" {
 				err = offerProvision(cmd, path, path, cmd.InOrStdin(), &output)
@@ -156,7 +160,7 @@ func TestProtocolUpdateDeclineAndNoninteractiveLeaveConfigAlone(t *testing.T) {
 				if mode == "explicit config" {
 					explicit = path
 				}
-				err = maybeProvision(cmd, explicit, &output)
+				err = maybeProvision(cmd, explicit, &output, func() bool { return false })
 				if output.Len() != 0 {
 					t.Fatal("unexpected enrollment prompt")
 				}
@@ -171,6 +175,273 @@ func TestProtocolUpdateDeclineAndNoninteractiveLeaveConfigAlone(t *testing.T) {
 			needs, err := config.NeedsProvision(path)
 			if err != nil || needs != (mode != "decline") {
 				t.Fatalf("decline/noninteractive acknowledgement: needs=%v error=%v", needs, err)
+			}
+		})
+	}
+}
+
+// isolateUserConfig points the user config and legacy config locations at a
+// fresh directory and returns the user config path.
+func isolateUserConfig(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, name := range []string{"HOME", "APPDATA", "XDG_CONFIG_HOME"} {
+		t.Setenv(name, root)
+	}
+	path, err := config.UserPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// forceInteractive makes prompts behave as if stdin and stderr were terminals.
+func forceInteractive(t *testing.T) {
+	t.Helper()
+	previous := interactive
+	interactive = func(any, any) bool { return true }
+	t.Cleanup(func() { interactive = previous })
+}
+
+// pipeInput returns an *os.File stdin that yields input and then EOF.
+func pipeInput(t *testing.T, input string) *os.File {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.WriteString(input); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	return reader
+}
+
+func serveTemplate(t *testing.T, body string) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, body) }))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+const uploadTemplate = `version: 1
+inference_profiles:
+  claude:
+    endpoint: https://models.example/v1
+    model: claude-model
+    protocol: anthropic
+    api_key_env: TEMPLATE_MODEL_KEY
+  verifier:
+    model: verifier-model
+  independent:
+    endpoint: https://independent.example/v1
+    model: other-model
+    protocol: chat
+roles:
+  finder:
+    profile: claude
+    author_routes:
+      anthropic: independent
+  verifier:
+    profile: verifier
+upload:
+  enabled: true
+  backend: presigned
+  endpoint: https://uploads.example
+  token_env: TEMPLATE_UPLOAD_TOKEN
+`
+
+func TestDevNullIsNotInteractive(t *testing.T) {
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	if isTerminal(devNull) {
+		t.Fatal("a character device that is not a terminal was treated as interactive")
+	}
+}
+
+func TestFirstRunPromptSkipsResolvedRolesAndUsesStderr(t *testing.T) {
+	forceInteractive(t)
+	for _, resolves := range []bool{true, false} {
+		t.Run(fmt.Sprintf("roles resolve=%v", resolves), func(t *testing.T) {
+			path := isolateUserConfig(t)
+			var stdout, stderr bytes.Buffer
+			cmd := newConfigInitCommand(&stdout, &stderr)
+			cmd.SetIn(pipeInput(t, "\n"))
+			if err := maybeProvision(cmd, "", &stderr, func() bool { return resolves }); err != nil {
+				t.Fatal(err)
+			}
+			prompted := strings.Contains(stderr.String(), "Configuration URL")
+			if prompted == resolves || stdout.Len() != 0 {
+				t.Fatalf("prompted=%v with roles resolving=%v: stdout=%q stderr=%q", prompted, resolves, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("a blank answer wrote a config: %v", err)
+			}
+		})
+	}
+}
+
+func TestRolesResolveFromEnvironmentAndFlags(t *testing.T) {
+	isolateUserConfig(t)
+	t.Setenv("OPENAI_API_KEY", "key")
+	if rolesResolve(noFlagsChanged, roleFlags{}, roleFlags{}) {
+		t.Fatal("roles without models resolved")
+	}
+	changed := func(name string) bool { return name == "finder-model" || name == "verifier-model" }
+	if !rolesResolve(changed, roleFlags{model: "f"}, roleFlags{model: "v"}) {
+		t.Fatal("role flags were not considered")
+	}
+	t.Setenv("ROAST_FINDER_MODEL", "f")
+	t.Setenv("ROAST_VERIFIER_MODEL", "v")
+	if !rolesResolve(noFlagsChanged, roleFlags{}, roleFlags{}) {
+		t.Fatal("environment-only roles did not resolve")
+	}
+}
+
+func TestReviewWithDevNullStdinKeepsStdoutClean(t *testing.T) {
+	isolateUserConfig(t)
+	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
+	t.Setenv("ROAST_NO_HOOK", "1")
+	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+
+	var stdout, stderr bytes.Buffer
+	root := newRootCommand(&stdout, &stderr)
+	root.SetIn(devNull)
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"review", "--format", "json"})
+	err = root.ExecuteContext(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "model is not configured") {
+		t.Fatalf("unconfigured review: %v", err)
+	}
+	if stdout.Len() != 0 || strings.Contains(stderr.String(), "Configuration URL") {
+		t.Fatalf("non-interactive review prompted: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestConfigInitPrintsTemplateSummaryToStderr(t *testing.T) {
+	isolateUserConfig(t)
+	destination := filepath.Join(t.TempDir(), "config.yaml")
+	var stdout, stderr bytes.Buffer
+	code, err := ExecuteContext(t.Context(), []string{"config", "init", "--from", serveTemplate(t, uploadTemplate), "--output", destination}, &stdout, &stderr)
+	if err != nil || code != ExitClean {
+		t.Fatalf("code=%d err=%v stderr=%s", code, err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "installed configuration at "+destination) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	summary := stderr.String()
+	for _, want := range []string{
+		"finder:", "profile claude, https://models.example/v1, protocol anthropic, credential env TEMPLATE_MODEL_KEY",
+		"author anthropic -> profile independent, https://independent.example/v1, protocol chat, credential none named; set ROAST_FINDER_API_KEY",
+		"verifier:", "profile verifier, https://api.openai.com/v1 (default, or OPENAI_BASE_URL), protocol responses, credential none named; OPENAI_API_KEY",
+		"upload:", "ON, after every review, to presigned broker https://uploads.example, token env TEMPLATE_UPLOAD_TOKEN",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestInteractiveInstallRequiresUploadConfirmation(t *testing.T) {
+	forceInteractive(t)
+	source := serveTemplate(t, uploadTemplate)
+	for _, test := range []struct {
+		name, answer string
+		installed    bool
+	}{
+		{"default declines", "\n", false},
+		{"explicit no", "n\n", false},
+		{"end of input declines", "", false},
+		{"explicit yes", "y\n", true},
+	} {
+		for _, entrypoint := range []string{"first run", "config init"} {
+			t.Run(entrypoint+"/"+test.name, func(t *testing.T) {
+				path := isolateUserConfig(t)
+				var stdout, stderr bytes.Buffer
+				cmd := newConfigInitCommand(&stdout, &stderr)
+				cmd.SetContext(t.Context())
+				var err error
+				if entrypoint == "first run" {
+					cmd.SetIn(pipeInput(t, source+"\n"+test.answer))
+					err = maybeProvision(cmd, "", &stderr, func() bool { return false })
+				} else {
+					cmd.SetIn(pipeInput(t, test.answer))
+					cmd.SetArgs([]string{"--from", source})
+					err = cmd.Execute()
+				}
+				_, statErr := os.Stat(path)
+				if test.installed != (err == nil) || test.installed != (statErr == nil) {
+					t.Fatalf("err=%v installed=%v stderr=%s", err, statErr == nil, stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "[y/N]") || !strings.Contains(stderr.String(), "presigned broker https://uploads.example") {
+					t.Fatalf("missing upload confirmation: %s", stderr.String())
+				}
+				if entrypoint == "first run" && stdout.Len() != 0 {
+					t.Fatalf("first-run install wrote to stdout: %q", stdout.String())
+				}
+			})
+		}
+	}
+}
+
+func TestNonInteractiveInstallDoesNotAskForUploadConfirmation(t *testing.T) {
+	path := isolateUserConfig(t)
+	var stdout, stderr bytes.Buffer
+	cmd := newConfigInitCommand(&stdout, &stderr)
+	cmd.SetContext(t.Context())
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs([]string{"--from", serveTemplate(t, uploadTemplate)})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil || strings.Contains(stderr.String(), "[y/N]") || !strings.Contains(stderr.String(), "upload:") {
+		t.Fatalf("err=%v stderr=%s", err, stderr.String())
+	}
+}
+
+func TestConfigInitExitCodes(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "down", http.StatusServiceUnavailable) }))
+	defer failing.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	for name, test := range map[string]struct {
+		url      string
+		code     int
+		category ErrorCategory
+	}{
+		"network failure":  {closedURL, ExitPartial, ErrorEndpoint},
+		"http failure":     {failing.URL, ExitPartial, ErrorEndpoint},
+		"plaintext remote": {"http://config.example/roast", ExitUsage, ErrorUsage},
+		"prompt override":  {serveTemplate(t, uploadTemplate+"prompts:\n  verifier: /etc/hosts\n"), ExitUsage, ErrorUsage},
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateUserConfig(t)
+			code, err := ExecuteContext(t.Context(), []string{"config", "init", "--from", test.url, "--output", filepath.Join(t.TempDir(), "config.yaml")}, io.Discard, io.Discard)
+			if code != test.code || ErrorCategoryFor(code, err) != test.category {
+				t.Fatalf("code=%d category=%s err=%v", code, ErrorCategoryFor(code, err), err)
 			}
 		})
 	}

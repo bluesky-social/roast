@@ -78,10 +78,11 @@ func (s *s3Store) Put(ctx context.Context, _ string, body io.Reader, size int64,
 }
 
 type presignedStore struct {
-	endpoint string
-	token    string
-	control  *http.Client
-	data     *http.Client
+	endpoint      string
+	token         string
+	allowInsecure bool
+	control       *http.Client
+	data          *http.Client
 }
 
 type uploadGrant struct {
@@ -101,9 +102,44 @@ func newPresignedStore(cfg config.ResolvedUpload) (objectStore, error) {
 	}
 	noRedirect := func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	return &presignedStore{
-		endpoint: strings.TrimSuffix(cfg.Endpoint, "/"), token: cfg.Token,
+		endpoint: strings.TrimSuffix(cfg.Endpoint, "/"), token: cfg.Token, allowInsecure: cfg.AllowInsecureHTTP,
 		control: &http.Client{CheckRedirect: noRedirect}, data: &http.Client{CheckRedirect: noRedirect},
 	}, nil
+}
+
+// checkUploadURL requires a broker-issued upload URL to use HTTPS unless it
+// is on loopback or the operator allowed plaintext HTTP for the broker.
+func (s *presignedStore) checkUploadURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return errors.New("request presigned upload: broker returned an invalid upload URL")
+	}
+	switch {
+	case u.Scheme == "https":
+		return nil
+	case u.Scheme == "http" && (config.IsLoopbackHost(u.Hostname()) || s.allowInsecure):
+		return nil
+	case u.Scheme == "http":
+		return fmt.Errorf("request presigned upload: broker returned a plaintext upload URL for %s; upload URLs must use https outside loopback unless upload.allow_insecure_http is set", u.Host)
+	default:
+		return fmt.Errorf("request presigned upload: broker returned an upload URL with unsupported scheme %q", u.Scheme)
+	}
+}
+
+// redactURLError removes the query string and fragment, which carry the
+// presigned signature, from a URL embedded in err.
+func redactURLError(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err
+	}
+	if u, parseErr := url.Parse(urlErr.URL); parseErr == nil {
+		u.RawQuery, u.Fragment, u.User = "", "", nil
+		urlErr.URL = u.String()
+	} else {
+		urlErr.URL = "<upload URL>"
+	}
+	return err
 }
 
 func (s *presignedStore) Destination() string { return s.endpoint }
@@ -118,7 +154,7 @@ func (s *presignedStore) Put(ctx context.Context, runID string, body io.Reader, 
 	// (notably the run bundle's *os.File), breaking the caller's final Close.
 	req, err := http.NewRequestWithContext(ctx, grant.Method, grant.UploadURL, io.NopCloser(body))
 	if err != nil {
-		return uploadResult{}, fmt.Errorf("build presigned upload request: %w", err)
+		return uploadResult{}, fmt.Errorf("build presigned upload request: %w", redactURLError(err))
 	}
 	req.ContentLength = size
 	for name, value := range grant.RequiredHeaders {
@@ -126,7 +162,7 @@ func (s *presignedStore) Put(ctx context.Context, runID string, body io.Reader, 
 	}
 	resp, err := s.data.Do(req)
 	if err != nil {
-		return uploadResult{}, fmt.Errorf("put presigned bundle: %w", err)
+		return uploadResult{}, fmt.Errorf("put presigned bundle: %w", redactURLError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -147,6 +183,9 @@ func (s *presignedStore) create(ctx context.Context, runID string, size int64, d
 	}
 	if grant.AttemptID == "" || grant.ObjectKey == "" || grant.UploadURL == "" || !strings.EqualFold(grant.Method, http.MethodPut) {
 		return uploadGrant{}, errors.New("request presigned upload: broker returned an incomplete grant")
+	}
+	if err := s.checkUploadURL(grant.UploadURL); err != nil {
+		return uploadGrant{}, err
 	}
 	return grant, nil
 }

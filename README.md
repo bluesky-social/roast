@@ -191,12 +191,30 @@ wire protocol or credential boundary from the model name.
 `api_key_env` names an environment variable; its value is resolved only when
 the profile is selected. A literal `api_key` is also supported in the
 user-owned config, but environment references are preferable. Role-specific
-`ROAST_*` variables override profiles, and command-line role flags override
-both. Roast does not read repository-local configuration, so a checkout cannot
-redirect inference or supply credentials.
-`OPENAI_API_KEY` and `OPENAI_BASE_URL` apply only to `chat` and `responses`;
-`ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` apply only to `anthropic`.
-Role-specific `ROAST_FINDER_*` and `ROAST_VERIFIER_*` values override them.
+`ROAST_FINDER_*` and `ROAST_VERIFIER_*` variables override profiles, and
+command-line role flags override both. Roast does not read repository-local
+configuration, so a checkout cannot redirect inference or supply credentials.
+
+Provider variables are a fallback, never an override. `OPENAI_API_KEY` and
+`OPENAI_BASE_URL` apply only to `chat` and `responses`; `ANTHROPIC_API_KEY` and
+`ANTHROPIC_BASE_URL` apply only to `anthropic`. A provider `*_BASE_URL` applies
+only to a profile that sets no `endpoint`. A role's credential is the first of:
+
+1. `ROAST_FINDER_API_KEY` or `ROAST_VERIFIER_API_KEY`;
+2. the profile's `api_key_env` or `api_key`;
+3. the provider `*_API_KEY`, only when the role's endpoint is that provider's
+   default endpoint or the same provider's `*_BASE_URL`.
+
+A profile with any other endpoint must name its credential, so a provider key
+from your shell is never sent implicitly to a gateway or a template's endpoint.
+Naming it is explicit, not restricted: a profile, including one installed from
+a template, may pair `endpoint: https://models.example.org/v1` with
+`api_key_env: OPENAI_API_KEY`, and that key then goes to that endpoint; the
+install summary shows every credential variable a template names. When a
+protocol override moves a role from one provider's endpoint to another's, the
+profile's credential does not follow it. Environment overrides and
+command-line flags apply these rules identically. `roast doctor` reports which
+source each role used.
 
 For the `s3` backend, upload credentials are resolved only from the environment variables named by
 `access_key_env`, `secret_key_env`, and optional `session_token_env`. Roast
@@ -326,7 +344,7 @@ operator-controlled:
 | Provider/structured-output attempts | 4 | `--max-attempts` / `ROAST_MAX_ATTEMPTS` |
 | Shared finder/verifier token budget | 3,000,000 | `--max-tokens-total` / `ROAST_MAX_TOTAL_TOKENS`; `0` disables |
 | Findings sent to the verifier | 25 | `--max-verified` / `ROAST_MAX_VERIFIED`; `0` disables |
-| Diff bytes in a normal/quick prompt | 1,000,000 / 200,000 | `ROAST_MAX_DIFF_BYTES` |
+| Diff bytes in a normal/quick prompt (also caps each file's section) | 1,000,000 / 200,000 | `ROAST_MAX_DIFF_BYTES` |
 | File-context bytes in a normal/quick prompt | 400,000 / 100,000 | `ROAST_MAX_FILE_CTX_BYTES` |
 | Initial finder prompt bytes | 8,000,000 | `ROAST_MAX_PROMPT_BYTES` |
 
@@ -338,8 +356,10 @@ window so the deadline does not discard work already found.
 
 Some defensive caps are intentionally not configurable: one captured provider
 response may be at most 16 MiB; one `git_diff` tool window is at most 64 KiB;
-`read_file` truncates pathological individual lines at 1 MB; and `list_files`
-and `grep_repo` return at most 500 paths and 200 matching lines respectively.
+`read_file` truncates individual lines at 32 KiB and serves at most 2,000 lines
+per window; `grep_repo` truncates each matching line at 2 KiB; `list_files` and
+`grep_repo` return at most 500 paths and 200 matching lines respectively; and
+every `read_file`, `grep_repo`, and `list_files` result is capped at 64 KiB.
 These caps protect memory, prompts, and run artifacts rather than expressing a
 provider's context-window limit.
 

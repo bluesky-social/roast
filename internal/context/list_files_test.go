@@ -8,7 +8,8 @@ import (
 )
 
 func TestListFilesGlobstarMatchesEveryDepth(t *testing.T) {
-	repo := t.TempDir()
+	// A repository, because the live corpus is Git's view of the working tree.
+	repo := initRepo(t)
 	for _, name := range []string{"root_test.go", "one/one_test.go", "one/two/two_test.go", "one/two/code.go"} {
 		full := filepath.Join(repo, name)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
