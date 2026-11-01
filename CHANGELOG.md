@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.1 (2026-11-01)
+
+## What's Changed
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/104
+* fix: harden review engine against untrusted repository content by @amckinley in https://github.com/bluesky-social/roast/pull/110
+* fix: keep configured credentials bound to their endpoints by @amckinley in https://github.com/bluesky-social/roast/pull/109
+* fix: keep provider SDKs from forwarding ambient credentials and headers by @amckinley in https://github.com/bluesky-social/roast/pull/111
+* docs: prepare public documentation and notices by @amckinley in https://github.com/bluesky-social/roast/pull/108
+* ci: use the shared hardened Claude review workflows by @amckinley in https://github.com/bluesky-social/roast/pull/112
+* ci: mint release tokens from the public-repo release App by @amckinley in https://github.com/bluesky-social/roast/pull/113
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.2.0...v1.2.1
+
 ## 1.2.0 (2026-11-01)
 
 ## What's Changed
