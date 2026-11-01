@@ -21,10 +21,10 @@ import (
 // surface through, an excluded path.
 //
 // ref and spec are the revision and pathspec arguments diffText was built
-// with. It returns the new diff and the number of pairs collapsed; on any git
-// error it returns the input unchanged, since the uncompacted diff is still
-// correct.
-func compactRenames(repo string, ref, spec []string, diffText string) (string, int) {
+// with, and maxSection its per-file ceiling. It returns the new diff and the
+// number of pairs collapsed; on any git error it returns the input
+// unchanged, since the uncompacted diff is still correct.
+func compactRenames(repo string, ref, spec []string, diffText string, maxSection int) (string, int) {
 	sections := splitSections(diffText)
 	var deleted, added []string
 	for _, s := range sections {
@@ -39,7 +39,7 @@ func compactRenames(repo string, ref, spec []string, diffText string) (string, i
 		return diffText, 0
 	}
 	args := func(extra ...string) []string {
-		a := append(append([]string{"diff", "-M"}, extra...), ref...)
+		a := append(append(append([]string{"diff", "-M"}, PatchFlags...), extra...), ref...)
 		return append(a, spec...)
 	}
 	status, err := gitOut(repo, args("--name-status", "-z")...)
@@ -78,7 +78,7 @@ func compactRenames(repo string, ref, spec []string, diffText string) (string, i
 	if len(accepted) == 0 {
 		return diffText, 0
 	}
-	full, err := gitOut(repo, args()...)
+	full, _, err := gitPatchOut(repo, maxSection, args()...)
 	if err != nil {
 		return diffText, 0
 	}

@@ -344,7 +344,7 @@ operator-controlled:
 | Provider/structured-output attempts | 4 | `--max-attempts` / `ROAST_MAX_ATTEMPTS` |
 | Shared finder/verifier token budget | 3,000,000 | `--max-tokens-total` / `ROAST_MAX_TOTAL_TOKENS`; `0` disables |
 | Findings sent to the verifier | 25 | `--max-verified` / `ROAST_MAX_VERIFIED`; `0` disables |
-| Diff bytes in a normal/quick prompt | 1,000,000 / 200,000 | `ROAST_MAX_DIFF_BYTES` |
+| Diff bytes in a normal/quick prompt (also caps each file's section) | 1,000,000 / 200,000 | `ROAST_MAX_DIFF_BYTES` |
 | File-context bytes in a normal/quick prompt | 400,000 / 100,000 | `ROAST_MAX_FILE_CTX_BYTES` |
 | Initial finder prompt bytes | 8,000,000 | `ROAST_MAX_PROMPT_BYTES` |
 
@@ -356,8 +356,10 @@ window so the deadline does not discard work already found.
 
 Some defensive caps are intentionally not configurable: one captured provider
 response may be at most 16 MiB; one `git_diff` tool window is at most 64 KiB;
-`read_file` truncates pathological individual lines at 1 MB; and `list_files`
-and `grep_repo` return at most 500 paths and 200 matching lines respectively.
+`read_file` truncates individual lines at 32 KiB and serves at most 2,000 lines
+per window; `grep_repo` truncates each matching line at 2 KiB; `list_files` and
+`grep_repo` return at most 500 paths and 200 matching lines respectively; and
+every `read_file`, `grep_repo`, and `list_files` result is capped at 64 KiB.
 These caps protect memory, prompts, and run artifacts rather than expressing a
 provider's context-window limit.
 

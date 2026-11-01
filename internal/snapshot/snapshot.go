@@ -42,12 +42,29 @@ import (
 const RefPrefix = "refs/roast/snapshots/"
 
 // DefaultDenylist are the untracked-non-ignored path shapes never captured
-// into the worktree tree. `git add -A` already
+// into the worktree tree, never folded into a review diff, and never served
+// from the live working tree. `git add -A` already
 // respects .gitignore, which is where secrets normally live; this denylist
 // covers the one residual class — "dropped creds.json and forgot to gitignore
 // it". Patterns are matched against the basename AND the full repo-relative
 // path with filepath.Match semantics (`*` does not cross `/`).
-var DefaultDenylist = []string{".env*", "*.pem", "*_rsa", "id_*", "*.key", "creds*"}
+var DefaultDenylist = []string{
+	".env*", "*.pem", "*_rsa", "*.key", "creds*",
+	"id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss",
+	"credentials.json", ".npmrc", ".pypirc", ".netrc", "_netrc", ".pgpass",
+	".git-credentials", "*.p12", "*.pfx",
+}
+
+// Denylisted reports whether path matches DefaultDenylist.
+func Denylisted(path string) bool {
+	return matchesAny(path, DefaultDenylist)
+}
+
+// DenylistedUntracked returns the untracked, non-ignored paths that match
+// DefaultDenylist, sorted.
+func DenylistedUntracked(repo string) ([]string, error) {
+	return denylisted(repo, nil)
+}
 
 // DefaultRefRetention is how long snapshot refs live by default. Tighter than
 // the artifact retention because this one lives in the user's own repo.
@@ -76,6 +93,17 @@ type Options struct {
 	// point of pinning: recording and review must provably see the same
 	// tree. Empty falls back to Capture's own copy+write-tree, as before.
 	IndexTree string
+	// Worktree, when its Tree is set, is the corpus PinWorktree already
+	// pinned for this review. Capture records it verbatim, for the same
+	// reason as IndexTree: the recorded tree must be the reviewed tree.
+	Worktree Pin
+}
+
+// Pin is a working-tree state written as an immutable Git tree object.
+type Pin struct {
+	Tree string
+	// Excluded lists untracked-non-ignored paths skipped by the denylist.
+	Excluded []string
 }
 
 // Snapshot is a captured (or loaded) snapshot's object identity.
@@ -93,7 +121,9 @@ type Snapshot struct {
 }
 
 // Enabled reports whether snapshot capture is on. Default-on; ROAST_SNAPSHOT=0
-// (or "false"/"no") disables it, and a run then writes nothing into .git.
+// (or "false"/"no") disables it, and a run then records no ref or commit. The
+// review corpus is still pinned with PinWorktree, whose tree objects stay
+// unreferenced and are left for git gc.
 func Enabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("ROAST_SNAPSHOT"))) {
 	case "0", "false", "no", "off":
@@ -132,29 +162,10 @@ func Capture(repo string, opts Options) (Snapshot, error) {
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 
-	// GIT_INDEX_FILE wins when set. Under the native pre-commit gate git
-	// points it at the temporary index holding exactly the commit's content,
-	// which is what `--staged` reviews — so capturing gitDir/index instead
-	// would snapshot a DIFFERENT state than the one reviewed, and every
-	// path-scoped gate run would fail its own replay digest check. The check
-	// would fail loudly (it misleads no one), but the run would be
-	// unreplayable for no reason.
-	live := os.Getenv("GIT_INDEX_FILE")
-	if live == "" {
-		live = filepath.Join(gitDir, "index")
-	} else if !filepath.IsAbs(live) {
-		// git may hand it over relative to the repo root.
-		live = filepath.Join(repo, live)
-	}
-	wtCopy := filepath.Join(tmp, "worktree")
-	if err := copyIndex(live, wtCopy); err != nil {
-		return Snapshot{}, err
-	}
-
 	indexTree := opts.IndexTree
 	if indexTree == "" {
 		idxCopy := filepath.Join(tmp, "index")
-		if err := copyIndex(live, idxCopy); err != nil {
+		if err := copyIndex(liveIndex(repo, gitDir), idxCopy); err != nil {
 			return Snapshot{}, err
 		}
 		indexTree, err = out(repo, indexEnv(idxCopy), "write-tree")
@@ -163,28 +174,14 @@ func Capture(repo string, opts Options) (Snapshot, error) {
 		}
 	}
 
-	excluded, err := denylisted(repo, opts.Denylist)
-	if err != nil {
-		return Snapshot{}, err
+	pin := opts.Worktree
+	if pin.Tree == "" {
+		pin, err = pinWorktree(repo, gitDir, tmp, opts.Denylist)
+		if err != nil {
+			return Snapshot{}, err
+		}
 	}
-
-	// `.` is the whole repo because every git invocation here runs with
-	// -C <repo toplevel>. A positive pathspec is required: an exclude-only
-	// pathspec matches nothing and makes `git add` error.
-	addArgs := []string{"add", "-A", "--", "."}
-	for _, p := range excluded {
-		// :(literal) so a pathspec metacharacter in a filename cannot widen
-		// the exclusion to unrelated files — the same guard internal/scope
-		// applies to linguist excludes.
-		addArgs = append(addArgs, ":(exclude,literal)"+p)
-	}
-	if _, err := out(repo, indexEnv(wtCopy), addArgs...); err != nil {
-		return Snapshot{}, fmt.Errorf("git add -A (snapshot index): %w", err)
-	}
-	worktreeTree, err := out(repo, indexEnv(wtCopy), "write-tree")
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("write-tree (worktree): %w", err)
-	}
+	worktreeTree, excluded := pin.Tree, pin.Excluded
 
 	composite, err := mktree(repo, indexTree, worktreeTree)
 	if err != nil {
@@ -215,6 +212,78 @@ func Capture(repo string, opts Options) (Snapshot, error) {
 		Head: opts.HeadOID, Base: opts.BaseOID,
 		Excluded: excluded,
 	}, nil
+}
+
+// PinWorktree writes repo's working tree, as a review sees it, into an
+// immutable tree object: tracked files plus untracked, non-ignored files,
+// minus untracked paths matching denylist (nil means DefaultDenylist). It is
+// the worktree half of Capture, kept separate so a review is pinned even when
+// no replayable snapshot can be recorded: it needs no HEAD, touches no ref
+// or commit, and starts from a private copy of the index, so an unmerged
+// live index is resolved by `git add -A` in the copy rather than refused.
+// The live index is never written. The objects it writes are unreferenced
+// until Capture anchors them, so git gc can collect them.
+func PinWorktree(repo string, denylist []string) (Pin, error) {
+	gitDir, err := out(repo, nil, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return Pin{}, fmt.Errorf("resolve git dir: %w", err)
+	}
+	tmp, err := os.MkdirTemp("", "roast-pin-")
+	if err != nil {
+		return Pin{}, fmt.Errorf("temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	return pinWorktree(repo, gitDir, tmp, denylist)
+}
+
+func pinWorktree(repo, gitDir, tmp string, denylist []string) (Pin, error) {
+	wtCopy := filepath.Join(tmp, "worktree")
+	if err := copyIndex(liveIndex(repo, gitDir), wtCopy); err != nil {
+		return Pin{}, err
+	}
+
+	excluded, err := denylisted(repo, denylist)
+	if err != nil {
+		return Pin{}, err
+	}
+
+	// `.` is the whole repo because every git invocation here runs with
+	// -C <repo toplevel>. A positive pathspec is required: an exclude-only
+	// pathspec matches nothing and makes `git add` error.
+	addArgs := []string{"add", "-A", "--", "."}
+	for _, p := range excluded {
+		// :(literal) so a pathspec metacharacter in a filename cannot widen
+		// the exclusion to unrelated files — the same guard internal/scope
+		// applies to linguist excludes.
+		addArgs = append(addArgs, ":(exclude,literal)"+p)
+	}
+	if _, err := out(repo, indexEnv(wtCopy), addArgs...); err != nil {
+		return Pin{}, fmt.Errorf("git add -A (snapshot index): %w", err)
+	}
+	tree, err := out(repo, indexEnv(wtCopy), "write-tree")
+	if err != nil {
+		return Pin{}, fmt.Errorf("write-tree (worktree): %w", err)
+	}
+	return Pin{Tree: tree, Excluded: excluded}, nil
+}
+
+// liveIndex returns the index file this review reads. GIT_INDEX_FILE wins
+// when set. Under the native pre-commit gate git points it at the temporary
+// index holding exactly the commit's content, which is what `--staged`
+// reviews — so capturing gitDir/index instead would snapshot a DIFFERENT
+// state than the one reviewed, and every path-scoped gate run would fail its
+// own replay digest check. The check would fail loudly (it misleads no one),
+// but the run would be unreplayable for no reason.
+func liveIndex(repo, gitDir string) string {
+	live := os.Getenv("GIT_INDEX_FILE")
+	if live == "" {
+		return filepath.Join(gitDir, "index")
+	}
+	if !filepath.IsAbs(live) {
+		// git may hand it over relative to the repo root.
+		return filepath.Join(repo, live)
+	}
+	return live
 }
 
 // Load reads a captured snapshot's identity back out of the ref. The snapshot
@@ -423,8 +492,13 @@ func denylisted(repo string, patterns []string) ([]string, error) {
 // the basename (so `.env*` catches `config/.env.local`) and the full
 // repo-relative path (so a caller can pass a path-shaped pattern).
 func matchesAny(path string, patterns []string) bool {
+	// Fold case: on case-insensitive filesystems (APFS, NTFS) `.ENV` opens
+	// `.env`, so a case-sensitive match would let a requested spelling slip
+	// past the denylist.
+	path = strings.ToLower(path)
 	base := filepath.Base(path)
 	for _, pat := range patterns {
+		pat = strings.ToLower(pat)
 		if ok, err := filepath.Match(pat, base); err == nil && ok {
 			return true
 		}

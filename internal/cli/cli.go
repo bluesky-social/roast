@@ -30,6 +30,7 @@ import (
 	"github.com/bluesky-social/roast/internal/runupload"
 	"github.com/bluesky-social/roast/internal/scope"
 	"github.com/bluesky-social/roast/internal/snapshot"
+	"github.com/bluesky-social/roast/internal/textsafe"
 	"github.com/bluesky-social/roast/internal/updatecheck"
 	"github.com/bluesky-social/roast/internal/verify"
 )
@@ -111,7 +112,8 @@ func WriteError(w io.Writer, code int, err error) {
 		}{category, err.Error(), code})
 		return
 	}
-	fmt.Fprintf(w, "roast: %v\n", err)
+	// Errors can carry git stderr naming repository paths.
+	fmt.Fprintf(w, "roast: %s\n", textsafe.Text(err.Error()))
 }
 
 type gateExit struct{ code int }
@@ -502,6 +504,14 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		return &usageError{msg: err.Error()}
 	}
 	excludes := append(append([]string{}, cfg.Review.Excludes...), f.excludes...)
+	maxDiffDefault, maxFileContextDefault := defaultMaxDiffBytes, defaultMaxFileCtxBytes
+	if f.quick {
+		maxDiffDefault, maxFileContextDefault = defaultQuickDiffBytes, defaultQuickFileCtxBytes
+	}
+	maxDiff, err := envIntAtLeast("ROAST_MAX_DIFF_BYTES", maxDiffDefault, 1)
+	if err != nil {
+		return &usageError{msg: err.Error()}
+	}
 	build := scope.BuildOpts{
 		Base:            f.base,
 		UncommittedOnly: f.uncommittedOnly,
@@ -510,6 +520,9 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		Excludes:        excludes,
 		IncludeVendored: f.includeVendored,
 		Scope:           f.scope,
+		// No one file's diff can be shown past the whole-diff budget, so
+		// Build need not hold more of it than that.
+		MaxFileDiffBytes: maxDiff,
 	}
 	tree := rcontext.Tree{}
 	if f.staged {
@@ -537,7 +550,22 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		inputKind, reviewedInput = "manifest", sc.Manifest
 	}
 	runID := record.NewRunID()
-	snapshotMeta, snapshotCaveats := captureSnapshot(repo, runID, sc, tree)
+	// Pin the reviewed corpus whether or not a replayable snapshot can be
+	// recorded (snapshots are refused without a HEAD, with an unmerged index,
+	// or under ROAST_SNAPSHOT=0). Only when Git cannot write the tree at all
+	// do readers fall back to the live tree, which context guards separately.
+	var pin snapshot.Pin
+	indexTree := tree.OID
+	if !sc.Staged {
+		var pinErr error
+		pin, pinErr = snapshot.PinWorktree(repo, nil)
+		if pinErr != nil {
+			logf(stderr, "could not pin the working tree (%v); reading it live with .git, ignored, and denylisted paths blocked", pinErr)
+		} else {
+			tree = rcontext.PinnedWorktree(pin.Tree)
+		}
+	}
+	snapshotMeta, snapshotCaveats := captureSnapshot(repo, runID, sc, indexTree, pin)
 	snapshotDurable := false
 	if snapshotMeta.Captured {
 		defer func() {
@@ -545,21 +573,10 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 				_ = snapshot.Delete(repo, runID)
 			}
 		}()
-		if !sc.Staged {
-			tree = rcontext.PinnedWorktree(snapshotMeta.WorktreeTree)
-		}
 	}
 
 	ground := rcontext.NewQuoteGrounder(repo, tree, sc.Diff, "")
 	originalDiffBytes := len(sc.Diff)
-	maxDiffDefault, maxFileContextDefault := defaultMaxDiffBytes, defaultMaxFileCtxBytes
-	if f.quick {
-		maxDiffDefault, maxFileContextDefault = defaultQuickDiffBytes, defaultQuickFileCtxBytes
-	}
-	maxDiff, err := envIntAtLeast("ROAST_MAX_DIFF_BYTES", maxDiffDefault, 1)
-	if err != nil {
-		return &usageError{msg: err.Error()}
-	}
 	maxFileContext, err := envIntAtLeast("ROAST_MAX_FILE_CTX_BYTES", maxFileContextDefault, 1)
 	if err != nil {
 		return &usageError{msg: err.Error()}
@@ -843,7 +860,7 @@ func roleMeta(role config.ResolvedRole, systemPrompt string) record.RoleMeta {
 	}
 }
 
-func captureSnapshot(repo, runID string, sc scope.Scope, tree rcontext.Tree) (record.SnapshotMeta, []string) {
+func captureSnapshot(repo, runID string, sc scope.Scope, indexTree string, pin snapshot.Pin) (record.SnapshotMeta, []string) {
 	if !snapshot.Enabled() {
 		return record.SnapshotMeta{Reason: "disabled by ROAST_SNAPSHOT"}, []string{"Git snapshot capture was disabled; this run cannot be replayed."}
 	}
@@ -855,7 +872,7 @@ func captureSnapshot(repo, runID string, sc scope.Scope, tree rcontext.Tree) (re
 	if base == "" && sc.Base != "" {
 		base = snapshot.RevOID(repo, sc.Base)
 	}
-	snap, err := snapshot.Capture(repo, snapshot.Options{RunID: runID, HeadOID: head, BaseOID: base, IndexTree: tree.OID})
+	snap, err := snapshot.Capture(repo, snapshot.Options{RunID: runID, HeadOID: head, BaseOID: base, IndexTree: indexTree, Worktree: pin})
 	if err != nil {
 		return record.SnapshotMeta{Reason: err.Error(), Head: head, Base: base}, []string{"Git snapshot capture failed: " + err.Error()}
 	}
@@ -1087,5 +1104,5 @@ func toRenderEntries(in []scope.SizeEntry) []render.SizeEntry {
 }
 
 func logf(w io.Writer, format string, args ...any) {
-	fmt.Fprintf(w, "roast: "+format+"\n", args...)
+	fmt.Fprintf(w, "roast: %s\n", textsafe.Text(fmt.Sprintf(format, args...)))
 }

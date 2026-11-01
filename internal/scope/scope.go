@@ -15,6 +15,7 @@ package scope
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/bluesky-social/roast/internal/snapshot"
 )
 
 // DEFAULT_IGNORES are reviewed only with IncludeVendored. Applied as git
@@ -42,6 +47,14 @@ var DefaultIgnores = []string{
 	"*.min.js",
 	"*.min.css",
 }
+
+// PatchFlags go on every git invocation that produces a patch. A reviewed
+// repository's .gitattributes can route any path to a diff driver by name,
+// and the user's own config decides what that driver runs; neither the
+// textconv program nor an external diff may run on, or rewrite, reviewed
+// content. Color and prefix settings in user config would otherwise change
+// the text roast parses (`+`/`-` sides, `a/`/`b/` paths).
+var PatchFlags = []string{"--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"}
 
 // BaseCandidates are tried in order when no explicit base is requested.
 var BaseCandidates = []string{"origin/main", "origin/master", "main", "master", "HEAD~1"}
@@ -109,6 +122,11 @@ type BuildOpts struct {
 	// context readers that resolve against the same pinned OID. Empty falls
 	// back to today's `--cached` behavior.
 	StagedTreeOID string
+	// MaxFileDiffBytes caps each file's section of the diff (diff scope);
+	// zero means DefaultMaxFileDiffBytes. A cut section ends in a marker
+	// line the finder sees, and Notes names the files. Callers pass their
+	// whole-diff budget, since no single file can be shown beyond it anyway.
+	MaxFileDiffBytes int
 }
 
 // Build produces the diff under review.
@@ -119,6 +137,11 @@ type BuildOpts struct {
 // noise; this is the pre-commit gate's scope.
 func Build(repo string, opts BuildOpts) (Scope, error) {
 	var notes []string
+	maxSection := opts.MaxFileDiffBytes
+	if maxSection <= 0 {
+		maxSection = DefaultMaxFileDiffBytes
+	}
+	var cutSections []string
 	allExcludes := append([]string{}, opts.Excludes...)
 	// linguistExcludes are resolved literal file paths (not globs) — kept
 	// separate from allExcludes so pathspecArgs can emit them with :(literal)
@@ -151,7 +174,7 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 	}
 	spec := pathspecArgs(opts.Paths, allExcludes, linguistExcludes)
 	// --no-renames on every diff invocation; see package doc.
-	diffFlags := []string{"--no-renames"}
+	diffFlags := append([]string{"--no-renames"}, PatchFlags...)
 
 	switch opts.Scope {
 	case "branch":
@@ -187,11 +210,12 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 		diffArgs := append([]string{"diff"}, diffFlags...)
 		diffArgs = append(diffArgs, stagedRef...)
 		diffArgs = append(diffArgs, spec...)
-		diff, err := gitOut(repo, diffArgs...)
+		diff, cut, err := gitPatchOut(repo, maxSection, diffArgs...)
 		if err != nil {
 			return Scope{}, fmt.Errorf("git diff (staged): %w", err)
 		}
-		diff, renamed := compactRenames(repo, stagedRef, spec, diff)
+		notes = truncationNote(notes, cut, maxSection)
+		diff, renamed := compactRenames(repo, stagedRef, spec, diff, maxSection)
 		notes = renameNote(notes, renamed)
 
 		nameArgs := append([]string{"diff"}, diffFlags...)
@@ -228,12 +252,14 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 			args := append([]string{"diff"}, diffFlags...)
 			args = append(args, rangeArgs...)
 			args = append(args, spec...)
-			committed, err = gitOut(repo, args...)
+			var cut []string
+			committed, cut, err = gitPatchOut(repo, maxSection, args...)
 			if err != nil {
 				return Scope{}, fmt.Errorf("git diff (committed): %w", err)
 			}
+			cutSections = append(cutSections, cut...)
 			var renamed int
-			committed, renamed = compactRenames(repo, rangeArgs, spec, committed)
+			committed, renamed = compactRenames(repo, rangeArgs, spec, committed, maxSection)
 			notes = renameNote(notes, renamed)
 
 			nameArgs := append([]string{"diff"}, diffFlags...)
@@ -250,11 +276,12 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 	uncommittedArgs := append([]string{"diff"}, diffFlags...)
 	uncommittedArgs = append(uncommittedArgs, head)
 	uncommittedArgs = append(uncommittedArgs, spec...)
-	uncommitted, err := gitOut(repo, uncommittedArgs...)
+	uncommitted, cut, err := gitPatchOut(repo, maxSection, uncommittedArgs...)
 	if err != nil {
 		return Scope{}, fmt.Errorf("git diff (uncommitted): %w", err)
 	}
-	uncommitted, renamedUncommitted := compactRenames(repo, []string{head}, spec, uncommitted)
+	cutSections = append(cutSections, cut...)
+	uncommitted, renamedUncommitted := compactRenames(repo, []string{head}, spec, uncommitted, maxSection)
 	notes = renameNote(notes, renamedUncommitted)
 
 	uncommittedNameArgs := append([]string{"diff"}, diffFlags...)
@@ -284,12 +311,23 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 	if err != nil {
 		return Scope{}, fmt.Errorf("git ls-files --others: %w", err)
 	}
-	// Untracked candidates that survive the pathspec-style exclude filter.
-	var untrackedCandidates []string
+	// Untracked candidates that survive the pathspec-style exclude filter and
+	// the secret denylist. The denylist is the snapshot's: a credential file
+	// nobody gitignored must not be sent to a provider any more than it is
+	// captured. Unlike DefaultIgnores, it applies even with --include-vendored.
+	var untrackedCandidates, denied []string
 	for _, u := range nonEmptyLines(untrackedOut) {
-		if untrackedPasses(u, opts.Paths, allExcludes) {
-			untrackedCandidates = append(untrackedCandidates, u)
+		if !untrackedPasses(u, opts.Paths, allExcludes) {
+			continue
 		}
+		if snapshot.Denylisted(u) {
+			denied = append(denied, u)
+			continue
+		}
+		untrackedCandidates = append(untrackedCandidates, u)
+	}
+	if len(denied) > 0 {
+		notes = append(notes, fmt.Sprintf("skipped %d untracked file(s) matching the secret denylist: %s", len(denied), listSome(denied, 10)))
 	}
 	// linguist-generated/-vendored markers apply to untracked paths too (git
 	// check-attr resolves .gitattributes for any path), matching how
@@ -317,13 +355,17 @@ func Build(repo string, opts BuildOpts) (Scope, error) {
 	}
 	var synthBlocks []string
 	for _, u := range untrackedCandidates {
-		block := synthesizeNewFileDiff(repo, u)
+		block, wasCut := synthesizeNewFileDiff(repo, u, maxSection)
 		if block == "" {
 			continue
+		}
+		if wasCut {
+			cutSections = append(cutSections, u)
 		}
 		synthBlocks = append(synthBlocks, block)
 		fileSet[u] = struct{}{}
 	}
+	notes = truncationNote(notes, cutSections, maxSection)
 	if len(synthBlocks) > 0 {
 		if strings.TrimSpace(diff) != "" {
 			diff += "\n\n### Untracked files (treated as new-file additions) ###\n"
@@ -389,7 +431,7 @@ func buildSurveyBranch(repo string, opts BuildOpts, spec, allExcludes []string, 
 	}
 	mergeBaseOID = strings.TrimSpace(mergeBaseOID)
 
-	diffFlags := []string{"--no-renames"}
+	diffFlags := append([]string{"--no-renames"}, PatchFlags...)
 	// Pin the range to the captured headOID, not the mutable "HEAD" ref: a
 	// concurrent commit/checkout between the rev-parse above and these git
 	// invocations would otherwise make the manifest describe a different
@@ -413,7 +455,7 @@ func buildSurveyBranch(repo string, opts BuildOpts, spec, allExcludes []string, 
 		return Scope{}, fmt.Errorf("git diff --name-status: %w", err)
 	}
 
-	logOut, err := gitOut(repo, "log", "--oneline", rangeSpec)
+	logOut, err := gitOut(repo, "log", "--oneline", "--no-color", "--no-show-signature", rangeSpec)
 	if err != nil {
 		return Scope{}, fmt.Errorf("git log --oneline: %w", err)
 	}
@@ -548,7 +590,7 @@ func buildSurveyRepo(repo string, opts BuildOpts, allExcludes, linguistExcludes 
 
 	var headLine string
 	if headOID != "" {
-		out, lerr := gitOut(repo, "log", "--oneline", "-1")
+		out, lerr := gitOut(repo, "log", "--oneline", "--no-color", "--no-show-signature", "-1")
 		if lerr == nil {
 			headLine = strings.TrimSpace(out)
 		}
@@ -568,22 +610,35 @@ func buildSurveyRepo(repo string, opts BuildOpts, allExcludes, linguistExcludes 
 	}
 	sort.Strings(dirOrder)
 
+	// Every name and the commit subject below are repository content, and
+	// the finder reads this inside <manifest> tags. A raw path holding a
+	// newline could end the tag and append text that reads as instructions,
+	// so any name that could is written Go-quoted instead.
+	quoted := false
+	line := func(s string) string {
+		q, changed := manifestQuote(s)
+		quoted = quoted || changed
+		return q
+	}
 	var sb strings.Builder
 	sb.WriteString("### Repository snapshot ###\n")
 	if headLine != "" {
-		sb.WriteString("HEAD: " + headLine + "\n")
+		sb.WriteString("HEAD: " + line(headLine) + "\n")
 	} else {
 		sb.WriteString("HEAD: (no commits)\n")
 	}
 	_, _ = fmt.Fprintf(&sb, "%d tracked file(s) across %d top-level director(ies)\n\n", len(files), len(dirOrder))
 	sb.WriteString("### Files by top-level directory ###\n")
 	for _, d := range dirOrder {
-		_, _ = fmt.Fprintf(&sb, "%s (%d)\n", d, counts[d])
+		_, _ = fmt.Fprintf(&sb, "%s (%d)\n", line(d), counts[d])
 	}
 	sb.WriteString("\n### Tracked files ###\n")
 	for _, f := range files {
-		sb.WriteString(f)
+		sb.WriteString(line(f))
 		sb.WriteByte('\n')
+	}
+	if quoted {
+		sb.WriteString("\n(Names in double quotes contain control or markup characters and are Go-escaped; unescape one before passing it to a tool.)\n")
 	}
 
 	return Scope{
@@ -593,6 +648,25 @@ func buildSurveyRepo(repo string, opts BuildOpts, allExcludes, linguistExcludes 
 		HeadOID:  headOID,
 		Notes:    notes,
 	}, nil
+}
+
+// manifestQuote returns s unchanged when it is safe on one manifest line, or
+// Go-quoted with '<' and '>' escaped when it holds anything unicode.IsPrint
+// rejects (controls, line separators, invisible format characters), invalid
+// UTF-8, a quote or backslash (which would make quoting ambiguous), or angle
+// brackets (which could spell the manifest's closing tag).
+func manifestQuote(s string) (string, bool) {
+	safe := utf8.ValidString(s) && !strings.ContainsAny(s, "\"\\<>")
+	for _, r := range s {
+		if !safe {
+			break
+		}
+		safe = unicode.IsPrint(r)
+	}
+	if safe {
+		return s, false
+	}
+	return strings.NewReplacer("<", `\x3c`, ">", `\x3e`).Replace(strconv.Quote(s)), true
 }
 
 // resolveBranchBase resolves the branch-scope base ref: an explicit request,
@@ -736,7 +810,7 @@ func linguistIgnores(repo string, cached bool, treeOID string) []string {
 	// needed in cached mode (staged-only); best-effort, and check-attr --cached
 	// still resolves the index attributes for a path no longer on disk.
 	if cached {
-		if changed, cerr := gitEnvOut(repo, env, "diff", "--cached", "--name-only", "-z"); cerr == nil {
+		if changed, cerr := gitEnvOut(repo, env, append(append([]string{"diff"}, PatchFlags...), "--cached", "--name-only", "-z")...); cerr == nil {
 			paths = append(paths, splitNUL(changed)...)
 		}
 	}
@@ -972,7 +1046,10 @@ func untrackedPasses(path string, paths []string, excludes []string) bool {
 	return false
 }
 
-func synthesizeNewFileDiff(repo, relpath string) string {
+// synthesizeNewFileDiff renders an untracked file as a new-file diff section
+// of at most about maxSection bytes. Content beyond that is never read; cut
+// reports that the section ends in sectionOmittedMarker instead.
+func synthesizeNewFileDiff(repo, relpath string, maxSection int) (block string, cut bool) {
 	full := filepath.Join(repo, relpath)
 	// Lstat + IsRegular: an untracked symlink (leak -> /etc/passwd) must
 	// not pull its target's contents into the review prompt — os.ReadFile
@@ -980,29 +1057,45 @@ func synthesizeNewFileDiff(repo, relpath string) string {
 	// about the target.
 	info, err := os.Lstat(full)
 	if err != nil || !info.Mode().IsRegular() {
-		return ""
+		return "", false
 	}
-	data, err := os.ReadFile(full)
+	f, err := os.Open(full)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	content := string(data)
-	lines := strings.Split(content, "\n")
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxSection)+1))
+	if err != nil {
+		return "", false
+	}
+	cut = len(data) > maxSection
+	lines := strings.Split(string(data), "\n")
 	// splitLines removes a trailing empty element from a trailing newline
 	// to match Python's str.splitlines() behaviour.
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	var sb strings.Builder
-	_, _ = fmt.Fprintf(&sb, "diff --git a/%s b/%s\n", relpath, relpath)
-	_, _ = fmt.Fprintf(&sb, "new file mode 100644\n")
-	_, _ = fmt.Fprintf(&sb, "--- /dev/null\n")
-	_, _ = fmt.Fprintf(&sb, "+++ b/%s\n", relpath)
-	_, _ = fmt.Fprintf(&sb, "@@ -0,0 +1,%d @@\n", len(lines))
+	header := fmt.Sprintf("diff --git a/%s b/%s\nnew file mode 100644\n--- /dev/null\n+++ b/%s\n", relpath, relpath, relpath)
+	var body strings.Builder
+	n := 0
 	for _, line := range lines {
-		_, _ = fmt.Fprintf(&sb, "+%s\n", line)
+		if len(header)+body.Len()+len(line)+2 > maxSection {
+			cut = true
+			break
+		}
+		body.WriteByte('+')
+		body.WriteString(line)
+		body.WriteByte('\n')
+		n++
 	}
-	return sb.String()
+	var sb strings.Builder
+	sb.WriteString(header)
+	_, _ = fmt.Fprintf(&sb, "@@ -0,0 +1,%d @@\n", n)
+	sb.WriteString(body.String())
+	if cut {
+		_, _ = fmt.Fprintf(&sb, sectionOmittedMarker, maxSection)
+	}
+	return sb.String(), cut
 }
 
 func resolveBase(repo, requested string) (string, error) {
