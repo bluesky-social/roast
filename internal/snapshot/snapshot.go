@@ -49,7 +49,8 @@ const RefPrefix = "refs/roast/snapshots/"
 // it". Patterns are matched against the basename AND the full repo-relative
 // path with filepath.Match semantics (`*` does not cross `/`).
 var DefaultDenylist = []string{
-	".env*", "*.pem", "*_rsa", "id_*", "*.key", "creds*",
+	".env*", "*.pem", "*_rsa", "*.key", "creds*",
+	"id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss",
 	"credentials.json", ".npmrc", ".pypirc", ".netrc", "_netrc", ".pgpass",
 	".git-credentials", "*.p12", "*.pfx",
 }

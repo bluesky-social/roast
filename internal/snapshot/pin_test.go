@@ -116,7 +116,7 @@ func TestDenylistCoversCredentialFiles(t *testing.T) {
 			t.Errorf("%s should be denylisted", name)
 		}
 	}
-	for _, name := range []string{"main.go", "credentials.go", "npmrc.go", "README.md"} {
+	for _, name := range []string{"main.go", "credentials.go", "npmrc.go", "README.md", "id_map.go", "internal/id_test.go"} {
 		if snapshot.Denylisted(name) {
 			t.Errorf("%s should not be denylisted", name)
 		}
