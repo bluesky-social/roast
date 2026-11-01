@@ -492,8 +492,13 @@ func denylisted(repo string, patterns []string) ([]string, error) {
 // the basename (so `.env*` catches `config/.env.local`) and the full
 // repo-relative path (so a caller can pass a path-shaped pattern).
 func matchesAny(path string, patterns []string) bool {
+	// Fold case: on case-insensitive filesystems (APFS, NTFS) `.ENV` opens
+	// `.env`, so a case-sensitive match would let a requested spelling slip
+	// past the denylist.
+	path = strings.ToLower(path)
 	base := filepath.Base(path)
 	for _, pat := range patterns {
+		pat = strings.ToLower(pat)
 		if ok, err := filepath.Match(pat, base); err == nil && ok {
 			return true
 		}
