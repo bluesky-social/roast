@@ -316,6 +316,106 @@ roles:
 	}
 }
 
+// TestEndpointOverridesMatchAcrossEnvironmentAndFlags checks that a command-line
+// protocol or endpoint override lands on the same endpoint with the same
+// credential as the equivalent ROAST_<ROLE>_* variable.
+func TestEndpointOverridesMatchAcrossEnvironmentAndFlags(t *testing.T) {
+	const gateway = "https://gateway.example/v1"
+	for name, test := range map[string]struct {
+		profile      string
+		env          map[string]string
+		protocol     string
+		baseURL      string
+		wantEndpoint string
+		wantKey      string
+	}{
+		"unset endpoint follows the new provider's base URL": {
+			profile:      "    model: m\n    api_key_env: MY_OPENAI\n",
+			env:          map[string]string{"MY_OPENAI": "openai-profile", "ANTHROPIC_BASE_URL": gateway, "ANTHROPIC_API_KEY": "gateway-key"},
+			protocol:     "anthropic",
+			wantEndpoint: gateway, wantKey: "gateway-key",
+		},
+		"unset endpoint without a base URL goes to the provider default": {
+			profile:      "    model: m\n    api_key_env: MY_OPENAI\n",
+			env:          map[string]string{"MY_OPENAI": "openai-profile", "ANTHROPIC_API_KEY": "anthropic-key"},
+			protocol:     "anthropic",
+			wantEndpoint: DefaultBaseURL("anthropic"), wantKey: "anthropic-key",
+		},
+		"unset endpoint leaves the previous provider's base URL": {
+			profile:      "    model: m\n",
+			env:          map[string]string{"OPENAI_BASE_URL": gateway, "OPENAI_API_KEY": "openai-key", "ANTHROPIC_API_KEY": "anthropic-key"},
+			protocol:     "anthropic",
+			wantEndpoint: DefaultBaseURL("anthropic"), wantKey: "anthropic-key",
+		},
+		"explicit default endpoint with a trailing slash moves": {
+			profile:      "    model: m\n    endpoint: " + DefaultBaseURL("responses") + "/\n    api_key_env: MY_OPENAI\n",
+			env:          map[string]string{"MY_OPENAI": "openai-profile", "ANTHROPIC_BASE_URL": gateway, "ANTHROPIC_API_KEY": "anthropic-key"},
+			protocol:     "anthropic",
+			wantEndpoint: DefaultBaseURL("anthropic"), wantKey: "anthropic-key",
+		},
+		"explicit custom endpoint stays with its credential": {
+			profile:      "    model: m\n    endpoint: " + customEndpoint + "\n    api_key_env: MY_GATEWAY\n",
+			env:          map[string]string{"MY_GATEWAY": "gateway-profile", "ANTHROPIC_BASE_URL": gateway, "ANTHROPIC_API_KEY": "anthropic-key"},
+			protocol:     "anthropic",
+			wantEndpoint: customEndpoint, wantKey: "gateway-profile",
+		},
+		"same provider protocol keeps the profile credential": {
+			profile:      "    model: m\n    api_key_env: MY_OPENAI\n",
+			env:          map[string]string{"MY_OPENAI": "openai-profile", "OPENAI_BASE_URL": gateway, "OPENAI_API_KEY": "openai-key"},
+			protocol:     "chat",
+			wantEndpoint: gateway, wantKey: "openai-profile",
+		},
+		"endpoint override with a protocol override keeps the profile credential": {
+			profile:  "    model: m\n    api_key_env: MY_OPENAI\n",
+			env:      map[string]string{"MY_OPENAI": "openai-profile", "ANTHROPIC_API_KEY": "anthropic-key"},
+			protocol: "anthropic", baseURL: "https://chosen.example/v1",
+			wantEndpoint: "https://chosen.example/v1", wantKey: "openai-profile",
+		},
+		"endpoint override never carries an ambient key": {
+			profile:      "    model: m\n",
+			env:          map[string]string{"OPENAI_API_KEY": "openai-key"},
+			baseURL:      "https://chosen.example/v1",
+			wantEndpoint: "https://chosen.example/v1", wantKey: "",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolve := func(path string) ResolvedRole {
+				clearProviderEnv(t)
+				for key, value := range test.env {
+					t.Setenv(key, value)
+				}
+				var baseURL, protocol *string
+				if test.protocol != "" {
+					protocol = &test.protocol
+				}
+				if test.baseURL != "" {
+					baseURL = &test.baseURL
+				}
+				if path == "environment" {
+					if protocol != nil {
+						t.Setenv("ROAST_FINDER_PROTOCOL", *protocol)
+					}
+					if baseURL != nil {
+						t.Setenv("ROAST_FINDER_BASE_URL", *baseURL)
+					}
+					return resolveFinderProfile(t, test.profile)
+				}
+				return OverrideEndpoint("finder", resolveFinderProfile(t, test.profile), baseURL, protocol)
+			}
+			fromEnv, fromFlags := resolve("environment"), resolve("flags")
+			for path, role := range map[string]ResolvedRole{"environment": fromEnv, "flags": fromFlags} {
+				if role.BaseURL != test.wantEndpoint || role.APIKey != test.wantKey {
+					t.Errorf("%s: endpoint=%q key=%q source=%v, want endpoint=%q key=%q", path, role.BaseURL, role.APIKey, role.Credential, test.wantEndpoint, test.wantKey)
+				}
+			}
+			if fromEnv.BaseURL != fromFlags.BaseURL || fromEnv.Protocol != fromFlags.Protocol || fromEnv.APIKey != fromFlags.APIKey ||
+				fromEnv.Credential != fromFlags.Credential || fromEnv.ExplicitEndpoint != fromFlags.ExplicitEndpoint {
+				t.Fatalf("environment and flag overrides diverged:\n env:   %+v\n flags: %+v", fromEnv, fromFlags)
+			}
+		})
+	}
+}
+
 func TestRebindCredential(t *testing.T) {
 	clearProviderEnv(t)
 	t.Setenv("OPENAI_API_KEY", "openai")
@@ -339,7 +439,7 @@ func TestRebindCredential(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			role := test.role
 			role.BaseURL, role.Protocol = test.endpoint, test.protocol
-			if got := RebindCredential("finder", role, test.crossed); got.APIKey != test.wantKey {
+			if got := rebindCredential("finder", role, test.crossed); got.APIKey != test.wantKey {
 				t.Fatalf("key = %q from %v, want %q", got.APIKey, got.Credential, test.wantKey)
 			}
 		})

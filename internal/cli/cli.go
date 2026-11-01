@@ -992,27 +992,22 @@ func parseNonNegativeDuration(name, raw string) (time.Duration, error) {
 	return value, nil
 }
 
+// applyRoleFlags applies command-line role overrides. Endpoint and protocol
+// flags follow the same rules as their ROAST_<ROLE>_* variables, including
+// which credential may follow the role to its new endpoint.
 func applyRoleFlags(changed func(string) bool, name string, role config.ResolvedRole, flags roleFlags) config.ResolvedRole {
-	previousProtocol := role.Protocol
-	crossedProvider := false
+	var baseURL, protocol *string
 	if changed(name + "-base-url") {
-		role.BaseURL = flags.baseURL
+		baseURL = &flags.baseURL
+	}
+	if changed(name + "-protocol") {
+		protocol = &flags.protocol
+	}
+	if baseURL != nil || protocol != nil {
+		role = config.OverrideEndpoint(name, role, baseURL, protocol)
 	}
 	if changed(name + "-model") {
 		role.Model = flags.model
-	}
-	if changed(name + "-protocol") {
-		role.Protocol = flags.protocol
-		if !changed(name+"-base-url") && role.BaseURL == config.DefaultBaseURL(previousProtocol) {
-			role.BaseURL = config.DefaultBaseURL(role.Protocol)
-			// The endpoint moved between public providers. Do not carry a
-			// credential resolved for the previous provider across that trust
-			// boundary.
-			crossedProvider = role.BaseURL != config.DefaultBaseURL(previousProtocol)
-		}
-	}
-	if changed(name+"-base-url") || changed(name+"-protocol") {
-		role = config.RebindCredential(name, role, crossedProvider)
 	}
 	if changed(name + "-max-output-tokens") {
 		role.MaxOutputTokens = flags.maxOutputTokens

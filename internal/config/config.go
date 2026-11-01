@@ -68,6 +68,10 @@ type ResolvedRole struct {
 	AuthorRoutes    map[string]string
 	// Credential names where APIKey came from. It never holds a secret.
 	Credential CredentialSource
+	// ExplicitEndpoint reports that the profile or a role override chose
+	// BaseURL. Otherwise BaseURL is the protocol default or the ambient
+	// provider base URL, and follows a protocol change.
+	ExplicitEndpoint bool
 }
 
 // Credential source kinds, in resolution order.
@@ -569,11 +573,14 @@ func (c Config) resolveProfile(roleName, profileName string, selection Role) (Re
 		return ResolvedRole{}, fmt.Errorf("role %s references unknown inference profile %q", roleName, profileName)
 	}
 	role := ResolvedRole{
-		Profile: profileName, BaseURL: profile.Endpoint(),
+		Profile: profileName, BaseURL: profile.BaseURL, ExplicitEndpoint: profile.BaseURL != "",
 		Model: profile.Model, Protocol: profile.Protocol, MaxOutputTokens: profile.MaxOutputTokens,
 		Pin: selection.Pin, AuthorRoutes: selection.AuthorRoutes,
 	}
-	crossedProvider, err := applyRoleEnv(roleName, &role, profile.BaseURL != "")
+	if !role.ExplicitEndpoint {
+		role.BaseURL = implicitEndpoint(role.Protocol)
+	}
+	crossedProvider, err := applyRoleEnv(roleName, &role)
 	if err != nil {
 		return ResolvedRole{}, err
 	}
@@ -581,28 +588,18 @@ func (c Config) resolveProfile(roleName, profileName string, selection Role) (Re
 	return role, nil
 }
 
-// applyRoleEnv applies role-specific overrides and, for a profile without its
-// own endpoint, the ambient provider base URL. It reports whether a protocol
-// override moved the role from one provider's default endpoint to another's.
-func applyRoleEnv(name string, role *ResolvedRole, endpointConfigured bool) (bool, error) {
+// applyRoleEnv applies role-specific overrides. It reports whether a protocol
+// override moved the role between providers' endpoints.
+func applyRoleEnv(name string, role *ResolvedRole) (bool, error) {
 	prefix := roleEnvPrefix(name)
-	crossedProvider := false
+	var protocol, baseURL *string
 	if value := os.Getenv(prefix + "PROTOCOL"); value != "" {
-		previous := DefaultBaseURL(role.Protocol)
-		role.Protocol = value
-		if sameEndpoint(role.BaseURL, previous) && DefaultBaseURL(value) != previous {
-			role.BaseURL = DefaultBaseURL(value)
-			crossedProvider = true
-		}
-	}
-	if !endpointConfigured {
-		if value := os.Getenv(providerBaseURLEnv(role.Protocol)); value != "" {
-			role.BaseURL = value
-		}
+		protocol = &value
 	}
 	if value := os.Getenv(prefix + "BASE_URL"); value != "" {
-		role.BaseURL = value
+		baseURL = &value
 	}
+	crossedProvider := applyEndpointOverrides(role, baseURL, protocol)
 	if value := os.Getenv(prefix + "MODEL"); value != "" {
 		role.Model = value
 	}
@@ -652,13 +649,58 @@ func ambientCredential(protocol, endpoint string) (string, CredentialSource) {
 	return "", CredentialSource{Kind: CredentialNone, Withheld: keyVar}
 }
 
-// RebindCredential re-resolves a role's credential after a command-line
-// override changed its endpoint or protocol. A role-scoped key or the
-// profile's own credential follows an explicit endpoint override, as it does
-// for ROAST_<ROLE>_BASE_URL. An ambient provider key is checked again against
-// the new endpoint and protocol. When crossedProvider is true, the profile's
-// credential stays with the provider it was configured for.
-func RebindCredential(roleName string, role ResolvedRole, crossedProvider bool) ResolvedRole {
+// implicitEndpoint is the endpoint of a role that chose none: the ambient
+// provider base URL for protocol, or the protocol's public default.
+func implicitEndpoint(protocol string) string {
+	if value := os.Getenv(providerBaseURLEnv(protocol)); value != "" {
+		return value
+	}
+	return DefaultBaseURL(protocol)
+}
+
+// applyEndpointOverrides applies a role's protocol and endpoint overrides, in
+// that order, and reports whether the protocol override moved the role from
+// one provider's endpoint to another's. An implicit endpoint follows the new
+// protocol to its default or ambient base URL; an explicit endpoint moves only
+// when it is the previous protocol's public default. An endpoint override
+// makes the endpoint explicit, so the role is no longer on a provider's
+// endpoint that it did not choose.
+func applyEndpointOverrides(role *ResolvedRole, baseURL, protocol *string) bool {
+	crossedProvider := false
+	if protocol != nil {
+		previous := DefaultBaseURL(role.Protocol)
+		role.Protocol = *protocol
+		if next := DefaultBaseURL(*protocol); next != previous {
+			switch {
+			case !role.ExplicitEndpoint:
+				role.BaseURL = implicitEndpoint(*protocol)
+				crossedProvider = true
+			case sameEndpoint(role.BaseURL, previous):
+				role.BaseURL = next
+				crossedProvider = true
+			}
+		}
+	}
+	if baseURL != nil {
+		role.BaseURL, role.ExplicitEndpoint = *baseURL, true
+		crossedProvider = false
+	}
+	return crossedProvider
+}
+
+// OverrideEndpoint applies command-line endpoint and protocol overrides with
+// the same rules as ROAST_<ROLE>_BASE_URL and ROAST_<ROLE>_PROTOCOL, then
+// re-resolves the credential. A nil override is unset.
+func OverrideEndpoint(roleName string, role ResolvedRole, baseURL, protocol *string) ResolvedRole {
+	return rebindCredential(roleName, role, applyEndpointOverrides(&role, baseURL, protocol))
+}
+
+// rebindCredential re-resolves a role's credential after its endpoint or
+// protocol changed. A role-scoped key or the profile's own credential follows
+// an explicit endpoint override. An ambient provider key is checked again
+// against the new endpoint and protocol. When crossedProvider is true, the
+// profile's credential stays with the provider it was configured for.
+func rebindCredential(roleName string, role ResolvedRole, crossedProvider bool) ResolvedRole {
 	switch role.Credential.Kind {
 	case CredentialRoleEnv:
 		return role

@@ -68,19 +68,30 @@ override:
 - `ROAST_FINDER_*` and `ROAST_VERIFIER_*` variables override the selected
   profile's fields, and command-line role flags override both.
 - `OPENAI_BASE_URL` (for `chat` and `responses`) or `ANTHROPIC_BASE_URL` (for
-  `anthropic`) applies only to a profile that sets no `endpoint`.
+  `anthropic`) applies only to a profile that sets no `endpoint`, including
+  after a protocol override moves that profile to another provider.
 - A role's credential is the first of: `ROAST_FINDER_API_KEY` or
   `ROAST_VERIFIER_API_KEY`; the profile's `api_key_env` or `api_key`; or the
   provider's `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, but only when the role's
   endpoint is that provider's default endpoint or the same provider's
   `*_BASE_URL`.
-- When a protocol override moves a role from one provider's default endpoint
-  to another's, the profile's credential does not follow it.
+- When a protocol override moves a role from one provider's endpoint to
+  another's, the profile's credential does not follow it.
+- An endpoint override (`ROAST_<ROLE>_BASE_URL` or `--<role>-base-url`)
+  carries the role key or the profile's own credential to the endpoint it
+  names, but never a provider key from the shell.
+- `ROAST_<ROLE>_*` variables and the matching command-line flags apply these
+  rules identically.
 
-A provider key in the user's shell is therefore never sent to a profile's
-custom endpoint, such as a gateway or a template's endpoint; that profile must
-name its own credential. `roast doctor` reports which source each role used,
-and names a provider key it withheld.
+A provider key in the user's shell is therefore never sent implicitly to a
+profile's custom endpoint, such as a gateway or a template's endpoint. A
+profile with such an endpoint must name its credential, and the name is not
+restricted: a profile, including one installed from a template, may set
+`endpoint: https://models.example.org/v1` with `api_key_env: OPENAI_API_KEY`,
+and that key is then sent to that endpoint. The install summary lists every
+credential variable a template names, so review it before relying on a
+template. `roast doctor` reports which source each role used, and names a
+provider key it withheld.
 
 ## Network disclosure
 

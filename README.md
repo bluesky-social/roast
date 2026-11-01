@@ -205,11 +205,16 @@ only to a profile that sets no `endpoint`. A role's credential is the first of:
 3. the provider `*_API_KEY`, only when the role's endpoint is that provider's
    default endpoint or the same provider's `*_BASE_URL`.
 
-A profile with any other endpoint must name its own credential, so a provider
-key from your shell is never sent to a gateway or a template's endpoint. When
-a protocol override moves a role from one provider's default endpoint to
-another's, the profile's credential does not follow it. `roast doctor` reports
-which source each role used.
+A profile with any other endpoint must name its credential, so a provider key
+from your shell is never sent implicitly to a gateway or a template's endpoint.
+Naming it is explicit, not restricted: a profile, including one installed from
+a template, may pair `endpoint: https://models.example.org/v1` with
+`api_key_env: OPENAI_API_KEY`, and that key then goes to that endpoint; the
+install summary shows every credential variable a template names. When a
+protocol override moves a role from one provider's endpoint to another's, the
+profile's credential does not follow it. Environment overrides and
+command-line flags apply these rules identically. `roast doctor` reports which
+source each role used.
 
 For the `s3` backend, upload credentials are resolved only from the environment variables named by
 `access_key_env`, `secret_key_env`, and optional `session_token_env`. Roast

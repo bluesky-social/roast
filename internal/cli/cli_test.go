@@ -330,6 +330,26 @@ func TestProtocolFlagClearsWrongProviderCredential(t *testing.T) {
 	}
 }
 
+func TestProtocolFlagMatchesEnvironmentForUnsetEndpoint(t *testing.T) {
+	const gateway = "https://gateway.example/v1"
+	t.Setenv("MY_OPENAI", "openai-profile-key")
+	t.Setenv("ANTHROPIC_BASE_URL", gateway)
+	t.Setenv("ANTHROPIC_API_KEY", "gateway-key")
+	const document = "version: 1\ninference_profiles:\n  finder:\n    model: m\n    protocol: responses\n    api_key_env: MY_OPENAI\n"
+
+	t.Setenv("ROAST_FINDER_PROTOCOL", "anthropic")
+	fromEnv := resolveFinder(t, document)
+	t.Setenv("ROAST_FINDER_PROTOCOL", "")
+	changed := func(name string) bool { return name == "finder-protocol" }
+	fromFlag := applyRoleFlags(changed, "finder", resolveFinder(t, document), roleFlags{protocol: "anthropic"})
+
+	for path, role := range map[string]config.ResolvedRole{"ROAST_FINDER_PROTOCOL": fromEnv, "--finder-protocol": fromFlag} {
+		if role.BaseURL != gateway || role.Protocol != "anthropic" || role.APIKey != "gateway-key" || role.Credential.Env != "ANTHROPIC_API_KEY" {
+			t.Errorf("%s: endpoint=%q protocol=%q key=%q source=%v", path, role.BaseURL, role.Protocol, role.APIKey, role.Credential)
+		}
+	}
+}
+
 func TestBaseURLFlagDoesNotCarryAmbientProviderKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-key")
 	t.Setenv("PROFILE_KEY", "profile-key")
