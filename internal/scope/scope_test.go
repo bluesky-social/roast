@@ -1037,3 +1037,28 @@ func TestFitBreakdownCountsCollapsedMoves(t *testing.T) {
 		}
 	}
 }
+
+// The rename parser walks --name-status -z records, not fields: a path that
+// starts with "R" (README.md sorts before lowercase paths) must not be read
+// as a rename status and knock the following move out of step.
+func TestMoveCollapsesAfterPathStartingWithR(t *testing.T) {
+	repo := initRepo(t)
+	writeFile(t, repo, "README.md", "# readme\n")
+	writeFile(t, repo, "src/x.go", bigFile(50, ""))
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "initial")
+	writeFile(t, repo, "README.md", "# readme\n\nedited\n")
+	gitMove(t, repo, "src/x.go", "lib/x.go")
+	gitAdd(t, repo, ".")
+
+	s, err := Build(repo, BuildOpts{StagedOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s.Diff, "rename from src/x.go") || strings.Contains(s.Diff, "deleted file mode") {
+		t.Fatalf("move after README.md was not collapsed:\n%s", s.Diff)
+	}
+	if !strings.Contains(s.Diff, "+edited") {
+		t.Fatalf("README.md edit missing:\n%s", s.Diff)
+	}
+}

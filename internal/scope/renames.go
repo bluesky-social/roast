@@ -49,16 +49,24 @@ func compactRenames(repo string, ref, spec []string, diffText string) (string, i
 	isDeleted, isAdded := toSet(deleted), toSet(added)
 	paired := make(map[string]struct{})
 	accepted := make(map[[2]string]struct{})
+	// Walk whole records: a status field, then two paths for a rename or copy
+	// (R<score>, C<score>) and one path otherwise. Matching "R" on any field
+	// would read a path such as README.md as a status.
 	fields := splitNUL(status)
-	for i := 0; i < len(fields); i++ {
-		if !strings.HasPrefix(fields[i], "R") {
+	for i := 0; i < len(fields); {
+		code := fields[i]
+		if !strings.HasPrefix(code, "R") && !strings.HasPrefix(code, "C") {
+			i += 2
 			continue
 		}
 		if i+2 >= len(fields) {
 			break
 		}
 		from, to := fields[i+1], fields[i+2]
-		i += 2
+		i += 3
+		if !strings.HasPrefix(code, "R") {
+			continue
+		}
 		if _, ok := isDeleted[from]; !ok {
 			continue
 		}
