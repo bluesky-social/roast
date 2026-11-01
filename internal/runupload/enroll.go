@@ -56,7 +56,7 @@ func ensureEnrolled(recordDir, currentRun string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(recordDir, 0o755); err != nil {
+	if err := os.MkdirAll(recordDir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(recordDir, ".upload-enrolled-*.tmp")

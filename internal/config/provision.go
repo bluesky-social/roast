@@ -119,46 +119,101 @@ func compatibilityProfiles(cfg Config) []string {
 // it at path. The remote document may contain endpoint and model policy but no
 // inline secrets.
 func Provision(ctx context.Context, sourceURL, path, legacyPath string) error {
+	plan, err := PlanProvision(ctx, sourceURL, path, legacyPath)
+	if err != nil {
+		return err
+	}
+	return plan.Install()
+}
+
+// ProvisionPlan is a downloaded, validated configuration template and the
+// exact configuration it would install. Nothing is written until Install, so
+// a caller can show the plan and ask for confirmation first.
+type ProvisionPlan struct {
+	Path string
+	// Config is the normalized configuration in effect after Install.
+	Config Config
+	// ProtocolUpdates names existing profiles the template switches to native
+	// Anthropic Messages. It is non-empty only when Install updates an existing
+	// versioned config in place; such an update changes no other setting.
+	ProtocolUpdates []string
+	// ImportedLegacyCredential reports that profiles without a credential
+	// source received the credential from a legacy config.
+	ImportedLegacyCredential bool
+
+	raw          []byte
+	backupSuffix string
+	// existing holds the bytes at Path the plan was computed from; nil when
+	// Path did not exist.
+	existing []byte
+}
+
+// TemplateUpload reports whether Install applies the template's upload
+// settings with uploads enabled. A protocol update never changes uploads.
+func (p *ProvisionPlan) TemplateUpload() bool {
+	return len(p.ProtocolUpdates) == 0 && p.Config.Upload.Enabled
+}
+
+// PlanProvision downloads and validates a configuration template and computes
+// what Install would write at path, without modifying any file.
+func PlanProvision(ctx context.Context, sourceURL, path, legacyPath string) (*ProvisionPlan, error) {
 	if path == "" {
 		var err error
 		path, err = UserPath()
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	raw, cfg, err := fetchProvision(ctx, sourceURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	plan := &ProvisionPlan{Path: path}
 	if existing, readErr := os.ReadFile(path); readErr == nil {
+		plan.existing = existing
 		var header struct {
 			Version *int `yaml:"version"`
 		}
 		if err := decodeKnown(existing, &header, false); err != nil {
-			return err
+			return nil, err
 		}
 		if header.Version != nil {
 			updated, err := updateProtocols(existing, cfg)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			if err := writeAtomic(path, updated, ".pre-protocol-update"); err != nil {
-				return err
+			before, err := decode(existing)
+			if err != nil {
+				return nil, err
 			}
-			return AcknowledgeProtocolUpdate(path)
+			after, err := decode(updated)
+			if err != nil {
+				return nil, err
+			}
+			for name, profile := range after.InferenceProfiles {
+				if before.InferenceProfiles[name].Protocol != profile.Protocol {
+					plan.ProtocolUpdates = append(plan.ProtocolUpdates, name)
+				}
+			}
+			sort.Strings(plan.ProtocolUpdates)
+			if plan.Config, err = normalize(after); err != nil {
+				return nil, err
+			}
+			plan.raw, plan.backupSuffix = updated, ".pre-protocol-update"
+			return plan, nil
 		}
 	} else if !errors.Is(readErr, os.ErrNotExist) {
-		return readErr
+		return nil, readErr
 	}
 	if legacyPath != "" {
 		legacyRaw, readErr := os.ReadFile(legacyPath)
 		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return fmt.Errorf("read legacy config: %w", readErr)
+			return nil, fmt.Errorf("read legacy config: %w", readErr)
 		}
 		if readErr == nil {
 			var legacy legacyConfig
 			if err := decodeKnown(legacyRaw, &legacy, true); err != nil {
-				return fmt.Errorf("parse legacy config: %w", err)
+				return nil, fmt.Errorf("parse legacy config: %w", err)
 			}
 			if legacy.Gateway.APIKey != "" && cfg.Provisioning != nil && cfg.Provisioning.ImportLegacyCredential {
 				for name, profile := range cfg.InferenceProfiles {
@@ -173,16 +228,43 @@ func Provision(ctx context.Context, sourceURL, path, legacyPath string) error {
 				cfg.Provisioning = nil
 				raw, err = yaml.Marshal(cfg)
 				if err != nil {
-					return fmt.Errorf("encode migrated config: %w", err)
+					return nil, fmt.Errorf("encode migrated config: %w", err)
 				}
+				plan.ImportedLegacyCredential = true
 			}
 		}
 	}
-	backupSuffix := ""
 	if legacyPath != "" && filepath.Clean(path) == filepath.Clean(legacyPath) {
-		backupSuffix = ".pre-v1"
+		plan.backupSuffix = ".pre-v1"
 	}
-	return writeAtomic(path, raw, backupSuffix)
+	if plan.existing != nil && plan.backupSuffix == "" {
+		return nil, fmt.Errorf("config already exists at %s", path)
+	}
+	plan.Config, plan.raw = cfg, raw
+	return plan, nil
+}
+
+// Install writes the planned configuration. It refuses to proceed when the
+// file at Path changed after the plan was computed.
+func (p *ProvisionPlan) Install() error {
+	current, err := os.ReadFile(p.Path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if p.existing != nil {
+			return fmt.Errorf("config at %s was removed while installing; run the command again", p.Path)
+		}
+	case err != nil:
+		return err
+	case p.existing == nil || !bytes.Equal(current, p.existing):
+		return fmt.Errorf("config at %s changed while installing; run the command again", p.Path)
+	}
+	if err := writeAtomic(p.Path, p.raw, p.backupSuffix); err != nil {
+		return err
+	}
+	if len(p.ProtocolUpdates) > 0 {
+		return AcknowledgeProtocolUpdate(p.Path)
+	}
+	return nil
 }
 
 // updateProtocols uses an explicitly supplied template as the authority for
@@ -197,7 +279,7 @@ func updateProtocols(raw []byte, template Config) ([]byte, error) {
 	for _, name := range compatibilityProfiles(cfg) {
 		profile := cfg.InferenceProfiles[name]
 		for _, target := range template.InferenceProfiles {
-			if profile.BaseURL != "" && strings.TrimRight(profile.BaseURL, "/") == strings.TrimRight(target.BaseURL, "/") &&
+			if profile.BaseURL != "" && strings.TrimRight(profile.BaseURL, "/") == strings.TrimRight(target.Endpoint(), "/") &&
 				InferFamily(target.Model) == "anthropic" && target.Protocol == "anthropic" {
 				updates = append(updates, name)
 				profile.Protocol = "anthropic"
@@ -255,9 +337,19 @@ func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
+// FetchError reports that a configuration URL could not be retrieved because
+// of a transport failure or a non-success HTTP status, as opposed to an
+// invalid URL or template.
+type FetchError struct{ Err error }
+
+func (e *FetchError) Error() string { return e.Err.Error() }
+func (e *FetchError) Unwrap() error { return e.Err }
+
+var errCrossOriginRedirect = errors.New("configuration URL redirected to another origin")
+
 func fetchProvision(ctx context.Context, sourceURL string) ([]byte, Config, error) {
 	u, err := url.Parse(strings.TrimSpace(sourceURL))
-	if err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && loopbackHost(u.Hostname()))) || u.User != nil || u.Fragment != "" {
+	if err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && IsLoopbackHost(u.Hostname()))) || u.User != nil || u.Fragment != "" {
 		return nil, Config{}, errors.New("configuration URL must be HTTPS, or HTTP on loopback, without credentials or a fragment")
 	}
 	originScheme, originHost := u.Scheme, u.Host
@@ -268,7 +360,7 @@ func fetchProvision(ctx context.Context, sourceURL string) ([]byte, Config, erro
 				return errors.New("configuration URL redirected too many times")
 			}
 			if next.URL.Scheme != originScheme || next.URL.Host != originHost || next.URL.User != nil || next.URL.Fragment != "" {
-				return errors.New("configuration URL redirected to another origin")
+				return errCrossOriginRedirect
 			}
 			return nil
 		},
@@ -279,15 +371,19 @@ func fetchProvision(ctx context.Context, sourceURL string) ([]byte, Config, erro
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, Config{}, fmt.Errorf("fetch configuration: %w", err)
+		err = fmt.Errorf("fetch configuration: %w", err)
+		if errors.Is(err, errCrossOriginRedirect) {
+			return nil, Config{}, err
+		}
+		return nil, Config{}, &FetchError{Err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, Config{}, fmt.Errorf("fetch configuration: HTTP %d", resp.StatusCode)
+		return nil, Config{}, &FetchError{Err: fmt.Errorf("fetch configuration: HTTP %d", resp.StatusCode)}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxProvisionBytes+1))
 	if err != nil {
-		return nil, Config{}, fmt.Errorf("read configuration: %w", err)
+		return nil, Config{}, &FetchError{Err: fmt.Errorf("read configuration: %w", err)}
 	}
 	if len(raw) > maxProvisionBytes {
 		return nil, Config{}, fmt.Errorf("configuration exceeds %d bytes", maxProvisionBytes)
@@ -301,7 +397,8 @@ func fetchProvision(ctx context.Context, sourceURL string) ([]byte, Config, erro
 
 // ValidateProvisionDocument validates an organization-provided configuration
 // template. Templates may reference credential environment variables, but may
-// not contain secret values.
+// not contain secret values or prompt overrides, which name local files whose
+// contents would be sent to the template's endpoints.
 func ValidateProvisionDocument(raw []byte) (Config, error) {
 	var header struct {
 		Version *int `yaml:"version"`
@@ -327,6 +424,13 @@ func ValidateProvisionDocument(raw []byte) (Config, error) {
 	}
 	if cfg.Upload.Token != "" {
 		return Config{}, errors.New("downloaded configuration must not contain upload.token")
+	}
+	for _, prompt := range []struct{ field, value string }{
+		{"finder_code", cfg.Prompts.FinderCode}, {"finder_prose", cfg.Prompts.FinderProse}, {"verifier", cfg.Prompts.Verifier},
+	} {
+		if prompt.value != "" {
+			return Config{}, fmt.Errorf("downloaded configuration must not contain prompts.%s; prompt overrides belong only in the user's own config", prompt.field)
+		}
 	}
 	return cfg, nil
 }

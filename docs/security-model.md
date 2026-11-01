@@ -12,10 +12,75 @@ does not load repository-local configuration. A checked-out repository therefore
 cannot select a network destination or credential merely by adding a config
 file.
 
-Configuration templates installed with `roast config init --from` are trusted
-input. Review and host those templates with the same care as other organization
-configuration. The URL must use HTTPS, and Roast validates the complete result
-before replacing the user's configuration.
+## Configuration templates
+
+An organization can publish a configuration template at a URL. A template is
+installed by `roast config init --from <url>`, by `roast config init` with the
+URL typed at its prompt, or by entering the URL at the interactive first-run
+prompt that `roast review` and `roast runs sync` show when no configuration
+exists. Templates are trusted input: review and host them with the same care as
+other organization configuration.
+
+The configuration URL must use HTTPS, or plain HTTP to a loopback address, and
+must not embed credentials or a fragment. Redirects must stay on the same
+origin, and the document is limited to 1 MiB. Roast validates the complete
+template before writing anything, installs it atomically with owner-only
+(`0600`) permissions, and never sends a local credential to the configuration
+URL. A template that only switches existing Claude profiles to the native
+`anthropic` protocol changes nothing else in an existing configuration, and the
+previous file is kept as a backup.
+
+A template may set:
+
+- inference profiles: model, endpoint, protocol, output-token limit, and the
+  name of the environment variable that holds each profile's credential
+  (`api_key_env`);
+- role selection and author routes;
+- review defaults;
+- upload settings, including enabling automatic uploads, the destination, and
+  the names of the environment variables that hold upload credentials
+  (`access_key_env`, `secret_key_env`, `session_token_env`, `token_env`).
+
+A template may not contain a literal `api_key` or upload `token`, and may not
+set `prompts.*`: prompt overrides name local files whose contents would be sent
+to the template's endpoints, so they belong only in the user's own config.
+
+Because a template can name any environment variable as a credential source and
+can direct reviewed code and uploads to any endpoint, Roast prints a summary to
+stderr whenever it installs one: for each role (and author route), the profile,
+endpoint, protocol, and credential variable, plus whether uploads are on and
+where they go. When a template enables uploads during an interactive install,
+Roast installs it only after an explicit `y` answer to a `[y/N]` question.
+Non-interactive installs print the summary and proceed, since the command
+itself names the URL.
+
+The first-run prompt appears only when both stdin and stderr are terminals, and
+only when no configuration exists and the finder and verifier cannot already
+be resolved from the environment and command-line flags. Its prompts go to
+stderr, so redirected review output is never mixed with them.
+
+## Credentials and endpoints
+
+Each inference profile binds a model, endpoint, protocol, and credential
+source as one unit. Provider environment variables are a fallback, never an
+override:
+
+- `ROAST_FINDER_*` and `ROAST_VERIFIER_*` variables override the selected
+  profile's fields, and command-line role flags override both.
+- `OPENAI_BASE_URL` (for `chat` and `responses`) or `ANTHROPIC_BASE_URL` (for
+  `anthropic`) applies only to a profile that sets no `endpoint`.
+- A role's credential is the first of: `ROAST_FINDER_API_KEY` or
+  `ROAST_VERIFIER_API_KEY`; the profile's `api_key_env` or `api_key`; or the
+  provider's `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, but only when the role's
+  endpoint is that provider's default endpoint or the same provider's
+  `*_BASE_URL`.
+- When a protocol override moves a role from one provider's default endpoint
+  to another's, the profile's credential does not follow it.
+
+A provider key in the user's shell is therefore never sent to a profile's
+custom endpoint, such as a gateway or a template's endpoint; that profile must
+name its own credential. `roast doctor` reports which source each role used,
+and names a provider key it withheld.
 
 ## Network disclosure
 
@@ -32,9 +97,19 @@ training, and access-control policies before reviewing sensitive repositories.
 
 Run uploads are disabled by default. When enabled, Roast sends a deterministic
 bundle containing the complete local run record to the configured S3-compatible
-endpoint or presigned-upload broker. The bundled broker expects authentication
-to be enforced by a trusted reverse proxy; it must not be exposed directly to
-untrusted clients.
+endpoint or presigned-upload broker. Upload endpoints, and the presigned URLs a
+broker returns, must use HTTPS unless they are on loopback or
+`upload.allow_insecure_http` is set. Failed uploads record the destination
+without a presigned URL's signed query string. The bundled broker expects
+authentication to be enforced by a trusted reverse proxy; it must not be
+exposed directly to untrusted clients.
+
+Released binaries check GitHub for a newer stable release by sending an
+unauthenticated `GET` to the repository's latest-release API endpoint, with
+Roast's version in the `User-Agent` header. The check sends no review data,
+repository content, or credentials. Commands reuse a cached result for up to a
+day, `roast doctor` checks on each run, development builds skip the check, and
+`ROAST_NO_UPDATE_CHECK=1` disables it.
 
 ## Local sensitive data
 

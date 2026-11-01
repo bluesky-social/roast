@@ -197,6 +197,131 @@ func TestCopyExclusiveRemovesPartialDestination(t *testing.T) {
 	}
 }
 
+func TestProvisionRejectsTemplatePromptOverrides(t *testing.T) {
+	for _, field := range []string{"finder_code", "finder_prose", "verifier"} {
+		t.Run(field, func(t *testing.T) {
+			body := provisionTemplate + "prompts:\n  " + field + ": /etc/hosts\n"
+			if _, err := ValidateProvisionDocument([]byte(body)); err == nil || !strings.Contains(err.Error(), "prompts."+field) {
+				t.Fatalf("template prompt override accepted: %v", err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+			defer server.Close()
+			destination := filepath.Join(t.TempDir(), "config.yaml")
+			if err := Provision(t.Context(), server.URL, destination, ""); err == nil {
+				t.Fatal("template with prompt overrides was installed")
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected template wrote a config: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlanProvisionWritesNothingUntilInstall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(provisionTemplate)) }))
+	defer server.Close()
+	destination := filepath.Join(t.TempDir(), "roast", "config.yaml")
+	plan, err := PlanProvision(t.Context(), server.URL, destination, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("planning wrote the config: %v", err)
+	}
+	if !plan.TemplateUpload() || plan.Config.Upload.Endpoint != "https://uploads.example" || len(plan.ProtocolUpdates) != 0 {
+		t.Fatalf("plan = %#v", plan)
+	}
+	if err := plan.Install(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(destination); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInstallRefusesConfigChangedAfterPlanning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(nativeTemplate())) }))
+	defer server.Close()
+	for name, change := range map[string]func(path string) error{
+		"edited":  func(path string) error { return os.WriteFile(path, []byte(compatibilityConfig+"# edit\n"), 0o600) },
+		"removed": os.Remove,
+		"created": func(string) error { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if name != "created" {
+				if err := os.WriteFile(path, []byte(compatibilityConfig), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plan, err := PlanProvision(t.Context(), server.URL, path, "")
+			if name == "created" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err != nil || len(plan.ProtocolUpdates) != 2 || plan.TemplateUpload() {
+					t.Fatalf("protocol update plan = %#v, err=%v", plan, err)
+				}
+				if err := change(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := plan.Install(); err == nil {
+				t.Fatal("install overwrote a config that changed after planning")
+			}
+		})
+	}
+}
+
+func TestProvisionFetchFailuresAreFetchErrors(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "down", http.StatusBadGateway) }))
+	defer failing.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(provisionTemplate)) }))
+	defer other.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, other.URL, http.StatusFound) }))
+	defer redirect.Close()
+	invalid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("version: 1\nunknown: true\n")) }))
+	defer invalid.Close()
+	for name, test := range map[string]struct {
+		url   string
+		fetch bool
+	}{
+		"http status":        {failing.URL, true},
+		"connection refused": {closedURL, true},
+		"plaintext remote":   {"http://config.example/roast", false},
+		"cross-origin":       {redirect.URL, false},
+		"invalid template":   {invalid.URL, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := PlanProvision(t.Context(), test.url, filepath.Join(t.TempDir(), "config.yaml"), "")
+			var fetch *FetchError
+			if err == nil || errors.As(err, &fetch) != test.fetch {
+				t.Fatalf("err=%v, fetch error=%v, want %v", err, errors.As(err, &fetch), test.fetch)
+			}
+		})
+	}
+}
+
+func TestProvisionKeepsUnsetTemplateEndpointsUnset(t *testing.T) {
+	template := "version: 1\ninference_profiles:\n  finder:\n    model: m\n  verifier:\n    model: v\n    protocol: anthropic\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(template)) }))
+	defer server.Close()
+	plan, err := PlanProvision(t.Context(), server.URL, filepath.Join(t.TempDir(), "config.yaml"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Config.InferenceProfiles["finder"].BaseURL != "" || plan.Config.InferenceProfiles["verifier"].Endpoint() != DefaultBaseURL("anthropic") {
+		t.Fatalf("profiles = %#v", plan.Config.InferenceProfiles)
+	}
+}
+
 func TestProvisionRejectsUnversionedOrSecretRemoteConfig(t *testing.T) {
 	for name, body := range map[string]string{
 		"unversioned": strings.Replace(provisionTemplate, "version: 1\n", "", 1),

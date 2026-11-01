@@ -191,12 +191,25 @@ wire protocol or credential boundary from the model name.
 `api_key_env` names an environment variable; its value is resolved only when
 the profile is selected. A literal `api_key` is also supported in the
 user-owned config, but environment references are preferable. Role-specific
-`ROAST_*` variables override profiles, and command-line role flags override
-both. Roast does not read repository-local configuration, so a checkout cannot
-redirect inference or supply credentials.
-`OPENAI_API_KEY` and `OPENAI_BASE_URL` apply only to `chat` and `responses`;
-`ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` apply only to `anthropic`.
-Role-specific `ROAST_FINDER_*` and `ROAST_VERIFIER_*` values override them.
+`ROAST_FINDER_*` and `ROAST_VERIFIER_*` variables override profiles, and
+command-line role flags override both. Roast does not read repository-local
+configuration, so a checkout cannot redirect inference or supply credentials.
+
+Provider variables are a fallback, never an override. `OPENAI_API_KEY` and
+`OPENAI_BASE_URL` apply only to `chat` and `responses`; `ANTHROPIC_API_KEY` and
+`ANTHROPIC_BASE_URL` apply only to `anthropic`. A provider `*_BASE_URL` applies
+only to a profile that sets no `endpoint`. A role's credential is the first of:
+
+1. `ROAST_FINDER_API_KEY` or `ROAST_VERIFIER_API_KEY`;
+2. the profile's `api_key_env` or `api_key`;
+3. the provider `*_API_KEY`, only when the role's endpoint is that provider's
+   default endpoint or the same provider's `*_BASE_URL`.
+
+A profile with any other endpoint must name its own credential, so a provider
+key from your shell is never sent to a gateway or a template's endpoint. When
+a protocol override moves a role from one provider's default endpoint to
+another's, the profile's credential does not follow it. `roast doctor` reports
+which source each role used.
 
 For the `s3` backend, upload credentials are resolved only from the environment variables named by
 `access_key_env`, `secret_key_env`, and optional `session_token_env`. Roast
