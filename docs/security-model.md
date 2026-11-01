@@ -25,6 +25,13 @@ findings and the code needed to adjudicate them are sent to the configured
 verifier endpoint. `roast doctor` makes a small tool-submission inference request to
 each configured role in addition to querying its model-listing endpoint.
 
+Each inference request carries only the credential, base URL, and headers from
+Roast's resolved configuration. Roast ignores the provider SDKs' ambient
+defaults, such as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, Anthropic
+profile files, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, and
+`OPENAI_CUSTOM_HEADERS`; `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the
+`*_BASE_URL` variables apply only as inputs to Roast's own configuration.
+
 Roast does not infer trust from a model name. An OpenAI-compatible gateway,
 hosted provider, and local server are all treated as the operator-configured
 destination. Operators are responsible for checking those services' retention,
