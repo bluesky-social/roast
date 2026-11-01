@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 (2026-11-01)
+
+## What's Changed
+* fix(deps): update golang:1.27.3 docker digest to 2920bb1 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/103
+* feat: collapse moved files to git's rename form in diff reviews by @amckinley in https://github.com/bluesky-social/roast/pull/106
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.1.30...v1.2.0
+
 ## 1.1.30 (2026-10-30)
 
 ## What's Changed
