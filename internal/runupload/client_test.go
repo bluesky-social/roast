@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -117,5 +118,106 @@ func TestPresignedStoreUsesBearerOnlyForControlPlane(t *testing.T) {
 	}
 	if !complete || dataAuthorization != "" || result.Key != "runs/run-1/bundle.tar.zst" || result.VersionID != "v1" {
 		t.Fatalf("complete=%v data auth=%q result=%#v", complete, dataAuthorization, result)
+	}
+}
+
+// grantingBroker returns a broker that issues uploadURL for every run.
+func grantingBroker(t *testing.T, uploadURL string) string {
+	t.Helper()
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/roast/runs" {
+			_ = json.NewEncoder(w).Encode(uploadGrant{
+				RunID: "run-1", AttemptID: "attempt", ObjectKey: "runs/run-1/bundle.tar.zst",
+				Method: http.MethodPut, UploadURL: uploadURL,
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(control.Close)
+	return control.URL
+}
+
+func TestPresignedUploadFailureDoesNotRecordSignedQuery(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	signedURL := closed.URL + "/bucket/run.tar.zst?X-Amz-Credential=cred&X-Amz-Signature=signature-secret#frag"
+	closed.Close()
+	store, err := NewStore(config.ResolvedUpload{Backend: "presigned", Endpoint: grantingBroker(t, signedURL), Token: "broker-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, putErr := store.Put(t.Context(), "run-1", strings.NewReader("bundle"), 6, strings.Repeat("a", 64))
+	if putErr == nil || strings.Contains(putErr.Error(), "signature-secret") || strings.Contains(putErr.Error(), "X-Amz") || !strings.Contains(putErr.Error(), "/bucket/run.tar.zst") {
+		t.Fatalf("put error = %v", putErr)
+	}
+
+	recordDir := t.TempDir()
+	if err := EnsureEnrolled(recordDir); err != nil {
+		t.Fatal(err)
+	}
+	runID := "20260920T120000Z-1234abcd"
+	makeRun(t, recordDir, runID)
+	outcome := uploadRun(t.Context(), store, recordDir, runID, false)
+	state, err := readState(recordDir, runID)
+	if err != nil || state == nil || outcome.Result != ResultTransientFailed {
+		t.Fatalf("outcome=%#v state=%#v err=%v", outcome, state, err)
+	}
+	summaries, err := ListStatus(recordDir)
+	if err != nil || len(summaries) != 1 {
+		t.Fatalf("summaries=%#v err=%v", summaries, err)
+	}
+	for name, text := range map[string]string{"last_error": state.LastError, "sync outcome": outcome.Detail, "status": summaries[0].Detail} {
+		if strings.Contains(text, "signature-secret") || strings.Contains(text, "X-Amz") {
+			t.Errorf("%s exposed the signed query: %s", name, text)
+		}
+	}
+}
+
+func TestPresignedUploadURLMustUseHTTPS(t *testing.T) {
+	for name, test := range map[string]struct {
+		uploadURL     string
+		allowInsecure bool
+		accepted      bool
+	}{
+		"https":                       {"https://objects.example.test/run", false, true},
+		"loopback http":               {"http://127.0.0.1:9/run", false, true},
+		"localhost http":              {"http://localhost:9/run", false, true},
+		"remote http":                 {"http://objects.example.test/run", false, false},
+		"remote http with opt-in":     {"http://objects.example.test/run", true, true},
+		"unsupported scheme":          {"file:///etc/passwd", true, false},
+		"relative URL":                {"/run", true, false},
+		"remote http with userinfo":   {"http://user@objects.example.test/run", false, false},
+		"uppercase loopback hostname": {"http://LOCALHOST:9/run", false, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := &presignedStore{allowInsecure: test.allowInsecure}
+			if err := store.checkUploadURL(test.uploadURL); (err == nil) != test.accepted {
+				t.Fatalf("checkUploadURL(%q) = %v, accepted want %v", test.uploadURL, err, test.accepted)
+			}
+		})
+	}
+
+	remote := "http://objects.example.test/bucket/run?X-Amz-Signature=signature-secret"
+	store, err := NewStore(config.ResolvedUpload{Backend: "presigned", Endpoint: grantingBroker(t, remote), Token: "broker-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, putErr := store.Put(t.Context(), "run-1", strings.NewReader("bundle"), 6, strings.Repeat("a", 64))
+	if putErr == nil || !strings.Contains(putErr.Error(), "must use https") || strings.Contains(putErr.Error(), "signature-secret") {
+		t.Fatalf("plaintext grant error = %v", putErr)
+	}
+}
+
+func TestEnrollmentCreatesOwnerOnlyRecordRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits")
+	}
+	recordDir := filepath.Join(t.TempDir(), "records")
+	if err := EnsureEnrolled(recordDir); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(recordDir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("record root mode = %v, err=%v", info.Mode().Perm(), err)
 	}
 }

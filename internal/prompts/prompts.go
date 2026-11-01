@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"text/template"
 )
@@ -184,10 +185,21 @@ func load(overridePath string, fallback func() (string, error)) (string, error) 
 	return string(data), nil
 }
 
+// verifierDataClose matches a closing tag of any wrapper verifier_user.tmpl
+// puts around finder- or repository-supplied text.
+var verifierDataClose = regexp.MustCompile(`(?i)</\s*(claim|code_quote|fixed_code|file_contents)\b`)
+
+// dataText is the `data` template function. It defangs any closing wrapper
+// tag inside untrusted text, so a claim or file cannot end its own tag early
+// and append text that reads as part of the prompt.
+func dataText(s string) string {
+	return verifierDataClose.ReplaceAllString(s, `<\/$1`)
+}
+
 // mustRender renders a text/template with data. Panics on parse error
 // (templates are compile-time constants; parse failure is a bug).
 func mustRender(tmplText string, data any) string {
-	t := template.Must(template.New("").Parse(tmplText))
+	t := template.Must(template.New("").Funcs(template.FuncMap{"data": dataText}).Parse(tmplText))
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
 		panic(fmt.Sprintf("prompts: template execution failed: %v", err))

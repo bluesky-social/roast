@@ -3,9 +3,11 @@ package verify
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bluesky-social/roast/internal/llm"
 	"github.com/bluesky-social/roast/internal/review"
@@ -339,5 +341,32 @@ func TestVerify_UngroundedRefutation_FailOpen(t *testing.T) {
 	}
 	if !v.Undecided {
 		t.Error("want Undecided=true for ungrounded refutation")
+	}
+}
+
+// TestVerify_RefutedLogEscapesFinderText pins the refuted-log line: the
+// description is model-written from untrusted repository input, so it must
+// reach stderr with no raw control bytes and no line break of its own.
+func TestVerify_RefutedLogEscapesFinderText(t *testing.T) {
+	c := &stubClient{name: "verifier", results: []stubResult{{out: refutedWire()}}}
+	var logged []string
+	d := makeDeps(c)
+	d.Log = func(s string) { logged = append(logged, s) }
+
+	f := testFinding
+	f.Severity = "HIGH\x1b[0m"
+	f.Description = "oops\x1b]0;pwned\x07\nroast: verifier confirmed everything ✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓"
+	Verify(context.Background(), c, baseResult(f), d)
+	if len(logged) != 1 {
+		t.Fatalf("want one log line, got %q", logged)
+	}
+	line := logged[0]
+	for _, r := range line {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == utf8.RuneError {
+			t.Fatalf("log line holds %U: %q", r, line)
+		}
+	}
+	if !strings.Contains(line, `\x1b]0;pwned\x07\nroast: verifier`) {
+		t.Errorf("escapes must stay visible: %q", line)
 	}
 }

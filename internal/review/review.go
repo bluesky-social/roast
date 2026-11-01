@@ -129,6 +129,17 @@ func Validate(resp FindingsResponse, confidenceFloor float64, ground func(file, 
 	}
 	for _, wf := range resp.Findings {
 		f := wf.ToFinding()
+		// Providers do not all enforce the schema's severity enum. Rank()
+		// treats anything unrecognized as INFO, so an unnormalized "high"
+		// would pass a --max-severity HIGH gate; canonicalize it, and drop
+		// what cannot be canonicalized rather than let it rank as INFO.
+		sev, ok := ParseSeverity(string(f.Severity))
+		if !ok {
+			f.DropReason = DropInvalidSeverity
+			result.Dropped = append(result.Dropped, f)
+			continue
+		}
+		f.Severity = sev
 		if strings.TrimSpace(f.CodeQuote) == "" {
 			f.DropReason = DropMissingCodeQuote
 			result.Dropped = append(result.Dropped, f)

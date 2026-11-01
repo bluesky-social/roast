@@ -30,6 +30,7 @@ import (
 	"github.com/bluesky-social/roast/internal/runupload"
 	"github.com/bluesky-social/roast/internal/scope"
 	"github.com/bluesky-social/roast/internal/snapshot"
+	"github.com/bluesky-social/roast/internal/textsafe"
 	"github.com/bluesky-social/roast/internal/updatecheck"
 	"github.com/bluesky-social/roast/internal/verify"
 )
@@ -111,7 +112,8 @@ func WriteError(w io.Writer, code int, err error) {
 		}{category, err.Error(), code})
 		return
 	}
-	fmt.Fprintf(w, "roast: %v\n", err)
+	// Errors can carry git stderr naming repository paths.
+	fmt.Fprintf(w, "roast: %s\n", textsafe.Text(err.Error()))
 }
 
 type gateExit struct{ code int }
@@ -154,7 +156,10 @@ type reviewFlags struct {
 }
 
 const (
+	defaultMaxTurns          = 16
 	surveyMaxTurnsDefault    = 40
+	defaultDeadline          = 10 * time.Minute
+	surveyDeadlineDefault    = 25 * time.Minute
 	defaultRequestTimeout    = 10 * time.Minute
 	defaultMaxAttempts       = 4
 	defaultMaxTotalTokens    = 3_000_000
@@ -267,7 +272,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(reviewCmd)
 	root.AddCommand(newRunsCommand(stdout, stderr))
 	root.AddCommand(newGateCommand(stdout))
-	root.AddCommand(newConfigCommand(stdout))
+	root.AddCommand(newConfigCommand(stdout, stderr))
 	root.AddCommand(newSkillCommand(stdout))
 	root.AddCommand(newDoctorCommand(stdout))
 	return root
@@ -322,6 +327,23 @@ func noArgs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// usageArgs makes a Cobra positional-argument validator report usage errors.
+func usageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := validate(cmd, args); err != nil {
+			return &usageError{msg: err.Error()}
+		}
+		return nil
+	}
+}
+
+// showHelp makes a command group runnable, so its noArgs validator rejects an
+// unknown subcommand as a usage error instead of Cobra printing help and
+// exiting cleanly.
+func showHelp(cmd *cobra.Command, _ []string) error {
+	return cmd.Help()
+}
+
 func flagUsageError(_ *cobra.Command, err error) error {
 	return &usageError{msg: err.Error()}
 }
@@ -342,10 +364,10 @@ func addReviewFlags(cmd *cobra.Command, f *reviewFlags) {
 	fl.BoolVar(&f.quick, "quick", false, "single-shot finder pass without verification")
 	fl.BoolVar(&f.noVerify, "no-verify", false, "skip cross-model verification")
 	fl.BoolVar(&f.interactive, "interactive", false, "let the finder navigate the local checkout")
-	fl.IntVar(&f.maxTurns, "max-turns", 16, "maximum interactive finder turns")
-	fl.DurationVar(&f.deadline, "deadline", 0, "interactive finder work deadline (0 disables)")
-	fl.DurationVar(&f.requestTimeout, "request-timeout", 0, "timeout for each inference request (default 10m; 0 disables)")
-	fl.IntVar(&f.maxTokensTotal, "max-tokens-total", 0, "shared finder/verifier token ceiling (0 disables)")
+	fl.IntVar(&f.maxTurns, "max-turns", defaultMaxTurns, fmt.Sprintf("maximum interactive finder turns (%d with --scope repo)", surveyMaxTurnsDefault))
+	fl.DurationVar(&f.deadline, "deadline", 0, fmt.Sprintf("interactive finder work deadline (default %s, %s with --scope repo; 0 disables)", shortDuration(defaultDeadline), shortDuration(surveyDeadlineDefault)))
+	fl.DurationVar(&f.requestTimeout, "request-timeout", 0, fmt.Sprintf("timeout for each inference request (default %s; 0 disables)", shortDuration(defaultRequestTimeout)))
+	fl.IntVar(&f.maxTokensTotal, "max-tokens-total", 0, fmt.Sprintf("shared finder/verifier token ceiling (default %d; 0 disables)", defaultMaxTotalTokens))
 	fl.IntVar(&f.maxVerified, "max-verified", 25, "maximum findings sent to the verifier (0 disables)")
 	fl.IntVar(&f.maxAttempts, "max-attempts", 4, "maximum provider and structured-output attempts")
 	fl.BoolVar(&f.showDropped, "show-dropped", false, "render malformed and refuted candidates")
@@ -354,6 +376,18 @@ func addReviewFlags(cmd *cobra.Command, f *reviewFlags) {
 	fl.StringVar(&f.authorModel, "author-model", "", "author model or family; use roles.finder.author_routes to select an independent profile")
 	addRoleFlags(fl, "finder", &f.finder)
 	addRoleFlags(fl, "verifier", &f.verifier)
+}
+
+// shortDuration renders whole-minute durations as "10m" rather than "10m0s".
+func shortDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 func addRoleFlags(fl interface {
@@ -367,7 +401,8 @@ func addRoleFlags(fl interface {
 }
 
 func runReview(cmd *cobra.Command, f *reviewFlags, stdout, stderr io.Writer) error {
-	if err := maybeProvision(cmd, f.configPath, stdout); err != nil {
+	resolved := func() bool { return rolesResolve(cmd.Flags().Changed, f.finder, f.verifier) }
+	if err := maybeProvision(cmd, f.configPath, stderr, resolved); err != nil {
 		return err
 	}
 	return runReviewCommand(cmd.Context(), cmd.Flags().Changed, f, stdout, stderr)
@@ -469,6 +504,14 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		return &usageError{msg: err.Error()}
 	}
 	excludes := append(append([]string{}, cfg.Review.Excludes...), f.excludes...)
+	maxDiffDefault, maxFileContextDefault := defaultMaxDiffBytes, defaultMaxFileCtxBytes
+	if f.quick {
+		maxDiffDefault, maxFileContextDefault = defaultQuickDiffBytes, defaultQuickFileCtxBytes
+	}
+	maxDiff, err := envIntAtLeast("ROAST_MAX_DIFF_BYTES", maxDiffDefault, 1)
+	if err != nil {
+		return &usageError{msg: err.Error()}
+	}
 	build := scope.BuildOpts{
 		Base:            f.base,
 		UncommittedOnly: f.uncommittedOnly,
@@ -477,6 +520,9 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		Excludes:        excludes,
 		IncludeVendored: f.includeVendored,
 		Scope:           f.scope,
+		// No one file's diff can be shown past the whole-diff budget, so
+		// Build need not hold more of it than that.
+		MaxFileDiffBytes: maxDiff,
 	}
 	tree := rcontext.Tree{}
 	if f.staged {
@@ -504,7 +550,22 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		inputKind, reviewedInput = "manifest", sc.Manifest
 	}
 	runID := record.NewRunID()
-	snapshotMeta, snapshotCaveats := captureSnapshot(repo, runID, sc, tree)
+	// Pin the reviewed corpus whether or not a replayable snapshot can be
+	// recorded (snapshots are refused without a HEAD, with an unmerged index,
+	// or under ROAST_SNAPSHOT=0). Only when Git cannot write the tree at all
+	// do readers fall back to the live tree, which context guards separately.
+	var pin snapshot.Pin
+	indexTree := tree.OID
+	if !sc.Staged {
+		var pinErr error
+		pin, pinErr = snapshot.PinWorktree(repo, nil)
+		if pinErr != nil {
+			logf(stderr, "could not pin the working tree (%v); reading it live with .git, ignored, and denylisted paths blocked", pinErr)
+		} else {
+			tree = rcontext.PinnedWorktree(pin.Tree)
+		}
+	}
+	snapshotMeta, snapshotCaveats := captureSnapshot(repo, runID, sc, indexTree, pin)
 	snapshotDurable := false
 	if snapshotMeta.Captured {
 		defer func() {
@@ -512,21 +573,10 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 				_ = snapshot.Delete(repo, runID)
 			}
 		}()
-		if !sc.Staged {
-			tree = rcontext.PinnedWorktree(snapshotMeta.WorktreeTree)
-		}
 	}
 
 	ground := rcontext.NewQuoteGrounder(repo, tree, sc.Diff, "")
 	originalDiffBytes := len(sc.Diff)
-	maxDiffDefault, maxFileContextDefault := defaultMaxDiffBytes, defaultMaxFileCtxBytes
-	if f.quick {
-		maxDiffDefault, maxFileContextDefault = defaultQuickDiffBytes, defaultQuickFileCtxBytes
-	}
-	maxDiff, err := envIntAtLeast("ROAST_MAX_DIFF_BYTES", maxDiffDefault, 1)
-	if err != nil {
-		return &usageError{msg: err.Error()}
-	}
 	maxFileContext, err := envIntAtLeast("ROAST_MAX_FILE_CTX_BYTES", maxFileContextDefault, 1)
 	if err != nil {
 		return &usageError{msg: err.Error()}
@@ -614,9 +664,9 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	}
 	deadlineDuration := f.deadline
 	if !changed("deadline") {
-		deadlineDuration = 10 * time.Minute
+		deadlineDuration = defaultDeadline
 		if survey {
-			deadlineDuration = 25 * time.Minute
+			deadlineDuration = surveyDeadlineDefault
 		}
 		if value := os.Getenv("ROAST_DEADLINE"); value != "" {
 			deadlineDuration, err = parseNonNegativeDuration("ROAST_DEADLINE", value)
@@ -810,7 +860,7 @@ func roleMeta(role config.ResolvedRole, systemPrompt string) record.RoleMeta {
 	}
 }
 
-func captureSnapshot(repo, runID string, sc scope.Scope, tree rcontext.Tree) (record.SnapshotMeta, []string) {
+func captureSnapshot(repo, runID string, sc scope.Scope, indexTree string, pin snapshot.Pin) (record.SnapshotMeta, []string) {
 	if !snapshot.Enabled() {
 		return record.SnapshotMeta{Reason: "disabled by ROAST_SNAPSHOT"}, []string{"Git snapshot capture was disabled; this run cannot be replayed."}
 	}
@@ -822,7 +872,7 @@ func captureSnapshot(repo, runID string, sc scope.Scope, tree rcontext.Tree) (re
 	if base == "" && sc.Base != "" {
 		base = snapshot.RevOID(repo, sc.Base)
 	}
-	snap, err := snapshot.Capture(repo, snapshot.Options{RunID: runID, HeadOID: head, BaseOID: base, IndexTree: tree.OID})
+	snap, err := snapshot.Capture(repo, snapshot.Options{RunID: runID, HeadOID: head, BaseOID: base, IndexTree: indexTree, Worktree: pin})
 	if err != nil {
 		return record.SnapshotMeta{Reason: err.Error(), Head: head, Base: base}, []string{"Git snapshot capture failed: " + err.Error()}
 	}
@@ -959,24 +1009,22 @@ func parseNonNegativeDuration(name, raw string) (time.Duration, error) {
 	return value, nil
 }
 
+// applyRoleFlags applies command-line role overrides. Endpoint and protocol
+// flags follow the same rules as their ROAST_<ROLE>_* variables, including
+// which credential may follow the role to its new endpoint.
 func applyRoleFlags(changed func(string) bool, name string, role config.ResolvedRole, flags roleFlags) config.ResolvedRole {
-	previousProtocol := role.Protocol
+	var baseURL, protocol *string
 	if changed(name + "-base-url") {
-		role.BaseURL = flags.baseURL
+		baseURL = &flags.baseURL
+	}
+	if changed(name + "-protocol") {
+		protocol = &flags.protocol
+	}
+	if baseURL != nil || protocol != nil {
+		role = config.OverrideEndpoint(name, role, baseURL, protocol)
 	}
 	if changed(name + "-model") {
 		role.Model = flags.model
-	}
-	if changed(name + "-protocol") {
-		role.Protocol = flags.protocol
-		if !changed(name+"-base-url") && role.BaseURL == config.DefaultBaseURL(previousProtocol) {
-			role.BaseURL = config.DefaultBaseURL(role.Protocol)
-			// The endpoint moved between public providers. Do not carry a
-			// credential resolved for the previous protocol across that trust
-			// boundary; use only an explicit role/generic key or the destination
-			// provider's environment variable.
-			role.APIKey = config.EnvironmentAPIKey(name, role.Protocol)
-		}
 	}
 	if changed(name + "-max-output-tokens") {
 		role.MaxOutputTokens = flags.maxOutputTokens
@@ -1056,5 +1104,5 @@ func toRenderEntries(in []scope.SizeEntry) []render.SizeEntry {
 }
 
 func logf(w io.Writer, format string, args ...any) {
-	fmt.Fprintf(w, "roast: "+format+"\n", args...)
+	fmt.Fprintf(w, "roast: %s\n", textsafe.Text(fmt.Sprintf(format, args...)))
 }

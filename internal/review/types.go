@@ -7,6 +7,8 @@
 // and again server-side in Validate.
 package review
 
+import "strings"
+
 // Severity levels, ordered. String values match the wire schema and the
 // v2 JSON output consumed by the pre-commit hook.
 type Severity string
@@ -36,11 +38,13 @@ func (s Severity) Rank() int {
 	}
 }
 
-// ParseSeverity validates a user-supplied severity name ("" stays "").
+// ParseSeverity validates a severity name, ignoring case and surrounding
+// space, and returns its canonical form. Anything else, including "", is
+// rejected.
 func ParseSeverity(s string) (Severity, bool) {
-	switch Severity(s) {
+	switch sev := Severity(strings.ToUpper(strings.TrimSpace(s))); sev {
 	case SeverityInfo, SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical:
-		return Severity(s), true
+		return sev, true
 	}
 	return "", false
 }
@@ -142,6 +146,7 @@ func (f Finding) EffectiveSeverity() Severity {
 // a dropped finding means the model ignored its instructions, which is
 // signal.
 const (
+	DropInvalidSeverity      = "invalid_severity"
 	DropMissingCodeQuote     = "missing_code_quote"
 	DropMissingFixedCode     = "missing_fixed_code"
 	DropUngroundedCodeQuote  = "ungrounded_code_quote"

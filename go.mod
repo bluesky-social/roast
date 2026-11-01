@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	charm.land/fantasy v0.45.5
+	github.com/charmbracelet/openai-go v0.0.0-20260921175203-216db9e71b83
 	github.com/invopop/jsonschema v0.14.0
 	github.com/klauspost/compress v1.20.3
 	github.com/minio/minio-go/v7 v7.4.1
@@ -35,7 +36,6 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.6.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/charmbracelet/openai-go v0.0.0-20260921175203-216db9e71b83 // indirect
 	github.com/charmbracelet/x/exp/slice v0.1.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect

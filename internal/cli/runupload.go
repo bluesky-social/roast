@@ -15,14 +15,15 @@ import (
 
 const syncTimeout = 10 * time.Minute
 
-func newRunsSyncCommand(stdout io.Writer) *cobra.Command {
+func newRunsSyncCommand(stdout, stderr io.Writer) *cobra.Command {
 	var configPath string
 	var includeExisting bool
 	cmd := &cobra.Command{
 		Use: "sync", Short: "Retry pending run-bundle uploads", Args: noArgs,
 		SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := maybeProvision(cmd, configPath, stdout); err != nil {
+			rolesReady := func() bool { return rolesResolve(noFlagsChanged, roleFlags{}, roleFlags{}) }
+			if err := maybeProvision(cmd, configPath, stderr, rolesReady); err != nil {
 				return err
 			}
 			cfg, err := config.Load(configPath)

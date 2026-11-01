@@ -73,6 +73,57 @@ func TestDoctorJSON(t *testing.T) {
 	if strings.Contains(stdout.String(), "secret") {
 		t.Fatal("doctor output exposed a credential")
 	}
+	sources := map[string]doctorResult{}
+	for _, result := range results {
+		sources[result.Name] = result
+	}
+	for _, role := range []string{"finder", "verifier"} {
+		if got := sources[role+"-credential"]; got.Status != doctorPass || got.Detail != "DOCTOR_KEY (profile api_key_env)" {
+			t.Errorf("%s credential = %#v", role, got)
+		}
+	}
+}
+
+func TestDoctorReportsWithheldAmbientCredential(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Api-Key") != "anthropic-secret" {
+			t.Errorf("ambient pairing did not reach its own base URL: %s", r.URL.Path)
+		}
+		http.Error(w, "probe only", http.StatusServiceUnavailable)
+	}))
+	defer gateway.Close()
+	t.Setenv("OPENAI_API_KEY", "ambient-secret")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+	t.Setenv("ANTHROPIC_BASE_URL", gateway.URL+"/v1")
+	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	body := "version: 1\ninference_profiles:\n  finder:\n    endpoint: https://template.example/v1\n    model: finder-model\n  verifier:\n    model: verifier-model\n    protocol: anthropic\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	results := doctorChecks(t.Context(), configPath)
+	byName := map[string]doctorResult{}
+	for _, result := range results {
+		byName[result.Name] = result
+	}
+	finder := byName["finder-credential"]
+	if finder.Status != doctorFail || !strings.Contains(finder.Detail, "OPENAI_API_KEY is set but is sent only to its provider's default endpoint or OPENAI_BASE_URL") {
+		t.Fatalf("finder credential = %#v", finder)
+	}
+	if profile := byName["finder-profile"]; profile.Status != doctorFail || !strings.Contains(profile.Detail, "is not sent to https://template.example/v1") {
+		t.Fatalf("finder profile = %#v", profile)
+	}
+	if verifier := byName["verifier-credential"]; verifier.Status != doctorPass || verifier.Detail != "ANTHROPIC_API_KEY (ambient provider key)" {
+		t.Fatalf("verifier credential = %#v", verifier)
+	}
+	if _, probed := byName["finder-endpoint"]; probed {
+		t.Fatal("doctor probed an endpoint without a credential")
+	}
+	for _, result := range results {
+		if strings.Contains(result.Detail, "secret") {
+			t.Fatalf("doctor exposed a credential: %#v", result)
+		}
+	}
 }
 
 func TestDoctorRoundtripUsesConfiguredResponsesRoute(t *testing.T) {

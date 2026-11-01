@@ -66,6 +66,49 @@ type ResolvedRole struct {
 	MaxOutputTokens int
 	Pin             bool
 	AuthorRoutes    map[string]string
+	// Credential names where APIKey came from. It never holds a secret.
+	Credential CredentialSource
+	// ExplicitEndpoint reports that the profile or a role override chose
+	// BaseURL. Otherwise BaseURL is the protocol default or the ambient
+	// provider base URL, and follows a protocol change.
+	ExplicitEndpoint bool
+}
+
+// Credential source kinds, in resolution order.
+const (
+	CredentialRoleEnv     = "role_env"
+	CredentialProfileEnv  = "profile_env"
+	CredentialProfileKey  = "profile_api_key"
+	CredentialProviderEnv = "provider_env"
+	CredentialNone        = "none"
+)
+
+// CredentialSource describes where a role's credential came from without
+// carrying its value.
+type CredentialSource struct {
+	Kind string
+	// Env is the environment variable read for an environment-backed kind.
+	Env string
+	// Withheld names an ambient provider key that was set but not sent,
+	// because the role's endpoint is not that provider's own endpoint.
+	Withheld string
+}
+
+func (s CredentialSource) String() string {
+	switch s.Kind {
+	case CredentialRoleEnv:
+		return s.Env + " (role override)"
+	case CredentialProfileEnv:
+		return s.Env + " (profile api_key_env)"
+	case CredentialProfileKey:
+		return "api_key in the config file"
+	case CredentialProviderEnv:
+		return s.Env + " (ambient provider key)"
+	}
+	if s.Withheld != "" {
+		return fmt.Sprintf("none; %s is set but is sent only to its provider's default endpoint or %s", s.Withheld, pairedBaseURLEnv(s.Withheld))
+	}
+	return "none"
 }
 
 // Review contains local review defaults.
@@ -109,6 +152,9 @@ type ResolvedUpload struct {
 	AccessKey, SecretKey, SessionToken string
 	Token                              string
 	PathStyle                          bool
+	// AllowInsecureHTTP permits plaintext HTTP to non-loopback hosts,
+	// including presigned upload URLs returned by a broker.
+	AllowInsecureHTTP bool
 }
 
 // Config is Roast's user configuration.
@@ -146,10 +192,11 @@ func (c Config) CredentialEnvNames() []string {
 }
 
 // Defaults returns provider-neutral defaults. Model names are intentionally
-// empty: users choose the models available at their endpoints.
+// empty: users choose the models available at their endpoints. The endpoint is
+// left unset so the protocol default, or the user's own provider base URL,
+// applies.
 func Defaults() Config {
 	profile := InferenceProfile{
-		BaseURL:         defaultOpenAIBaseURL,
 		Protocol:        "responses",
 		MaxOutputTokens: 32768,
 	}
@@ -360,7 +407,7 @@ func normalizeUpload(upload *Upload) error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 			return errors.New("upload.endpoint must be an http(s) origin without credentials, a path, query, or fragment")
 		}
-		if u.Scheme == "http" && !loopbackHost(u.Hostname()) && !upload.AllowInsecureHTTP {
+		if u.Scheme == "http" && !IsLoopbackHost(u.Hostname()) && !upload.AllowInsecureHTTP {
 			return errors.New("upload.endpoint must use https outside loopback; set upload.allow_insecure_http only for a trusted local network")
 		}
 		u.Path = ""
@@ -395,7 +442,8 @@ func normalizeUpload(upload *Upload) error {
 	return nil
 }
 
-func loopbackHost(host string) bool {
+// IsLoopbackHost reports whether host is localhost or a loopback IP address.
+func IsLoopbackHost(host string) bool {
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	if host == "localhost" {
 		return true
@@ -422,7 +470,7 @@ func (c Config) ResolveUpload() (ResolvedUpload, error) {
 			}
 			return ResolvedUpload{}, fmt.Errorf("presigned upload token is not configured (set %s)", c.Upload.TokenEnv)
 		}
-		return ResolvedUpload{Backend: "presigned", Endpoint: c.Upload.Endpoint, Token: token}, nil
+		return ResolvedUpload{Backend: "presigned", Endpoint: c.Upload.Endpoint, Token: token, AllowInsecureHTTP: c.Upload.AllowInsecureHTTP}, nil
 	}
 	if c.Upload.Bucket == "" {
 		return ResolvedUpload{}, errors.New("upload bucket is not configured")
@@ -438,6 +486,7 @@ func (c Config) ResolveUpload() (ResolvedUpload, error) {
 		Prefix: c.Upload.Prefix, Region: c.Upload.Region,
 		AccessKey: access, SecretKey: secret,
 		SessionToken: os.Getenv(c.Upload.SessionTokenEnv), PathStyle: c.Upload.PathStyle,
+		AllowInsecureHTTP: c.Upload.AllowInsecureHTTP,
 	}, nil
 }
 
@@ -448,9 +497,6 @@ func normalizeProfile(name string, profile InferenceProfile) (InferenceProfile, 
 	if profile.Protocol == "" {
 		profile.Protocol = "responses"
 	}
-	if profile.BaseURL == "" {
-		profile.BaseURL = DefaultBaseURL(profile.Protocol)
-	}
 	if profile.MaxOutputTokens == 0 {
 		profile.MaxOutputTokens = 32768
 	}
@@ -460,14 +506,59 @@ func normalizeProfile(name string, profile InferenceProfile) (InferenceProfile, 
 	if profile.APIKeyEnv != "" && !envNamePattern.MatchString(profile.APIKeyEnv) {
 		return InferenceProfile{}, fmt.Errorf("inference_profiles.%s.api_key_env is not a valid environment variable name", name)
 	}
-	if err := validateEndpoint("inference_profiles."+name, profile.BaseURL, profile.Protocol, profile.MaxOutputTokens); err != nil {
+	if err := validateEndpoint("inference_profiles."+name, profile.Endpoint(), profile.Protocol, profile.MaxOutputTokens); err != nil {
 		return InferenceProfile{}, err
 	}
 	return profile, nil
 }
 
+// Endpoint returns the profile's configured endpoint, or its protocol's public
+// default when the profile does not set one.
+func (p InferenceProfile) Endpoint() string {
+	if p.BaseURL != "" {
+		return p.BaseURL
+	}
+	return DefaultBaseURL(p.Protocol)
+}
+
+// DescribeEndpoint states where the profile sends requests, including the
+// ambient base URL that replaces an unset endpoint.
+func (p InferenceProfile) DescribeEndpoint() string {
+	if p.BaseURL != "" {
+		return p.BaseURL
+	}
+	return fmt.Sprintf("%s (default, or %s)", DefaultBaseURL(p.Protocol), providerBaseURLEnv(p.Protocol))
+}
+
+// DescribeCredential states, without resolving any secret, where the profile
+// obtains its credential when selected for role.
+func (p InferenceProfile) DescribeCredential(role string) string {
+	roleVar := roleEnvPrefix(role) + "API_KEY"
+	keyVar := providerAPIKeyEnv(p.Protocol)
+	switch {
+	case p.APIKeyEnv != "":
+		return "env " + p.APIKeyEnv
+	case p.APIKey != "":
+		return "api_key in the config file"
+	case p.BaseURL == "":
+		return fmt.Sprintf("none named; %s with the default endpoint or %s, unless %s is set", keyVar, pairedBaseURLEnv(keyVar), roleVar)
+	case sameEndpoint(p.BaseURL, DefaultBaseURL(p.Protocol)):
+		return fmt.Sprintf("none named; %s unless %s is set", keyVar, roleVar)
+	default:
+		return "none named; set " + roleVar
+	}
+}
+
 // ResolveRole expands a role selection into the complete runtime role and
 // applies role/provider environment overrides.
+//
+// Role-specific ROAST_<ROLE>_* variables always apply. The ambient provider
+// base URL (OPENAI_BASE_URL or ANTHROPIC_BASE_URL) applies only to a profile
+// that sets no endpoint. The credential is, in order: ROAST_<ROLE>_API_KEY;
+// the profile's api_key_env or api_key; otherwise the ambient provider key,
+// but only when the role's endpoint is that provider's default endpoint or its
+// ambient base URL. A profile with any other endpoint must name its own
+// credential.
 func (c Config) ResolveRole(name string) (ResolvedRole, error) {
 	selection, ok := c.Roles[name]
 	if !ok || selection.Profile == "" {
@@ -482,82 +573,183 @@ func (c Config) resolveProfile(roleName, profileName string, selection Role) (Re
 		return ResolvedRole{}, fmt.Errorf("role %s references unknown inference profile %q", roleName, profileName)
 	}
 	role := ResolvedRole{
-		Profile: profileName, BaseURL: profile.BaseURL,
+		Profile: profileName, BaseURL: profile.BaseURL, ExplicitEndpoint: profile.BaseURL != "",
 		Model: profile.Model, Protocol: profile.Protocol, MaxOutputTokens: profile.MaxOutputTokens,
 		Pin: selection.Pin, AuthorRoutes: selection.AuthorRoutes,
 	}
-	applyRoleEnv(roleName, &role)
-	role.APIKey = resolveAPIKey(roleName, role.Protocol, profile)
+	if !role.ExplicitEndpoint {
+		role.BaseURL = implicitEndpoint(role.Protocol)
+	}
+	crossedProvider, err := applyRoleEnv(roleName, &role)
+	if err != nil {
+		return ResolvedRole{}, err
+	}
+	role.APIKey, role.Credential = resolveCredential(roleName, profile, role, crossedProvider)
 	return role, nil
 }
 
-func applyRoleEnv(name string, role *ResolvedRole) {
-	prefix := "ROAST_" + strings.ToUpper(name) + "_"
-	previousProtocol := role.Protocol
+// applyRoleEnv applies role-specific overrides. It reports whether a protocol
+// override moved the role between providers' endpoints.
+func applyRoleEnv(name string, role *ResolvedRole) (bool, error) {
+	prefix := roleEnvPrefix(name)
+	var protocol, baseURL *string
 	if value := os.Getenv(prefix + "PROTOCOL"); value != "" {
-		role.Protocol = value
-		if role.BaseURL == DefaultBaseURL(previousProtocol) {
-			role.BaseURL = DefaultBaseURL(role.Protocol)
-		}
-	}
-	if role.Protocol == "anthropic" {
-		if value := os.Getenv("ANTHROPIC_BASE_URL"); value != "" {
-			role.BaseURL = value
-		}
-	} else if value := os.Getenv("OPENAI_BASE_URL"); value != "" {
-		role.BaseURL = value
+		protocol = &value
 	}
 	if value := os.Getenv(prefix + "BASE_URL"); value != "" {
-		role.BaseURL = value
+		baseURL = &value
 	}
+	crossedProvider := applyEndpointOverrides(role, baseURL, protocol)
 	if value := os.Getenv(prefix + "MODEL"); value != "" {
 		role.Model = value
 	}
 	if value := os.Getenv(prefix + "MAX_OUTPUT_TOKENS"); value != "" {
-		if n, err := strconv.Atoi(value); err == nil {
-			role.MaxOutputTokens = n
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return false, fmt.Errorf("%sMAX_OUTPUT_TOKENS must be an integer >= 1 (got %q)", prefix, value)
 		}
+		role.MaxOutputTokens = n
 	}
+	return crossedProvider, nil
 }
 
-func resolveAPIKey(roleName, protocol string, profile InferenceProfile) string {
-	if value := os.Getenv("ROAST_" + strings.ToUpper(roleName) + "_API_KEY"); value != "" {
-		return value
+// resolveCredential selects the role's credential. A profile credential does
+// not follow a protocol override onto another provider's default endpoint.
+func resolveCredential(roleName string, profile InferenceProfile, role ResolvedRole, crossedProvider bool) (string, CredentialSource) {
+	roleVar := roleEnvPrefix(roleName) + "API_KEY"
+	if value := os.Getenv(roleVar); value != "" {
+		return value, CredentialSource{Kind: CredentialRoleEnv, Env: roleVar}
 	}
-	if protocol == profile.Protocol {
+	if !crossedProvider {
 		if profile.APIKeyEnv != "" {
-			return os.Getenv(profile.APIKeyEnv)
+			return os.Getenv(profile.APIKeyEnv), CredentialSource{Kind: CredentialProfileEnv, Env: profile.APIKeyEnv}
 		}
-		if value := providerAPIKey(protocol); value != "" {
-			return value
+		if profile.APIKey != "" {
+			return profile.APIKey, CredentialSource{Kind: CredentialProfileKey}
 		}
-		return profile.APIKey
 	}
-	return providerAPIKey(protocol)
+	return ambientCredential(role.Protocol, role.BaseURL)
 }
 
-func providerAPIKey(protocol string) string {
-	if protocol == "anthropic" {
-		return os.Getenv("ANTHROPIC_API_KEY")
+// ambientCredential returns the ambient provider key for protocol only when
+// endpoint is that provider's default endpoint or the base URL the same
+// environment pairs with the key.
+func ambientCredential(protocol, endpoint string) (string, CredentialSource) {
+	keyVar := providerAPIKeyEnv(protocol)
+	value := os.Getenv(keyVar)
+	if value == "" {
+		return "", CredentialSource{Kind: CredentialNone}
 	}
-	return os.Getenv("OPENAI_API_KEY")
+	if sameEndpoint(endpoint, DefaultBaseURL(protocol)) {
+		return value, CredentialSource{Kind: CredentialProviderEnv, Env: keyVar}
+	}
+	if base := os.Getenv(providerBaseURLEnv(protocol)); base != "" && sameEndpoint(endpoint, base) {
+		return value, CredentialSource{Kind: CredentialProviderEnv, Env: keyVar}
+	}
+	return "", CredentialSource{Kind: CredentialNone, Withheld: keyVar}
 }
 
-// RoleScopedAPIKey resolves only an explicitly role-scoped Roast credential.
-// It lets CLI overrides change protocols without accidentally reusing a
-// provider-specific credential selected for the previous protocol.
-func RoleScopedAPIKey(roleName string) string {
-	return os.Getenv("ROAST_" + strings.ToUpper(roleName) + "_API_KEY")
-}
-
-// EnvironmentAPIKey resolves the environment credential for a role after its
-// protocol is known. Role-specific Roast variables are provider-neutral;
-// provider variables are selected only for their protocol.
-func EnvironmentAPIKey(roleName, protocol string) string {
-	if value := RoleScopedAPIKey(roleName); value != "" {
+// implicitEndpoint is the endpoint of a role that chose none: the ambient
+// provider base URL for protocol, or the protocol's public default.
+func implicitEndpoint(protocol string) string {
+	if value := os.Getenv(providerBaseURLEnv(protocol)); value != "" {
 		return value
 	}
-	return providerAPIKey(protocol)
+	return DefaultBaseURL(protocol)
+}
+
+// applyEndpointOverrides applies a role's protocol and endpoint overrides, in
+// that order, and reports whether the protocol override moved the role from
+// one provider's endpoint to another's. An implicit endpoint follows the new
+// protocol to its default or ambient base URL; an explicit endpoint moves only
+// when it is the previous protocol's public default. An endpoint override
+// makes the endpoint explicit, so the role is no longer on a provider's
+// endpoint that it did not choose.
+func applyEndpointOverrides(role *ResolvedRole, baseURL, protocol *string) bool {
+	crossedProvider := false
+	if protocol != nil {
+		previous := DefaultBaseURL(role.Protocol)
+		role.Protocol = *protocol
+		if next := DefaultBaseURL(*protocol); next != previous {
+			switch {
+			case !role.ExplicitEndpoint:
+				role.BaseURL = implicitEndpoint(*protocol)
+				crossedProvider = true
+			case sameEndpoint(role.BaseURL, previous):
+				role.BaseURL = next
+				crossedProvider = true
+			}
+		}
+	}
+	if baseURL != nil {
+		role.BaseURL, role.ExplicitEndpoint = *baseURL, true
+		crossedProvider = false
+	}
+	return crossedProvider
+}
+
+// OverrideEndpoint applies command-line endpoint and protocol overrides with
+// the same rules as ROAST_<ROLE>_BASE_URL and ROAST_<ROLE>_PROTOCOL, then
+// re-resolves the credential. A nil override is unset.
+func OverrideEndpoint(roleName string, role ResolvedRole, baseURL, protocol *string) ResolvedRole {
+	return rebindCredential(roleName, role, applyEndpointOverrides(&role, baseURL, protocol))
+}
+
+// rebindCredential re-resolves a role's credential after its endpoint or
+// protocol changed. A role-scoped key or the profile's own credential follows
+// an explicit endpoint override. An ambient provider key is checked again
+// against the new endpoint and protocol. When crossedProvider is true, the
+// profile's credential stays with the provider it was configured for.
+func rebindCredential(roleName string, role ResolvedRole, crossedProvider bool) ResolvedRole {
+	switch role.Credential.Kind {
+	case CredentialRoleEnv:
+		return role
+	case CredentialProfileEnv, CredentialProfileKey:
+		if !crossedProvider {
+			return role
+		}
+	}
+	if value := os.Getenv(roleEnvPrefix(roleName) + "API_KEY"); value != "" {
+		role.APIKey, role.Credential = value, CredentialSource{Kind: CredentialRoleEnv, Env: roleEnvPrefix(roleName) + "API_KEY"}
+		return role
+	}
+	role.APIKey, role.Credential = ambientCredential(role.Protocol, role.BaseURL)
+	return role
+}
+
+func roleEnvPrefix(roleName string) string {
+	return "ROAST_" + strings.ToUpper(roleName) + "_"
+}
+
+func providerAPIKeyEnv(protocol string) string {
+	if protocol == "anthropic" {
+		return "ANTHROPIC_API_KEY"
+	}
+	return "OPENAI_API_KEY"
+}
+
+func providerBaseURLEnv(protocol string) string {
+	if protocol == "anthropic" {
+		return "ANTHROPIC_BASE_URL"
+	}
+	return "OPENAI_BASE_URL"
+}
+
+func pairedBaseURLEnv(keyVar string) string {
+	return strings.TrimSuffix(keyVar, "API_KEY") + "BASE_URL"
+}
+
+// sameEndpoint compares endpoints by scheme, host, path without trailing
+// slashes, and query. Unparseable values never match.
+func sameEndpoint(a, b string) bool {
+	left, errLeft := url.Parse(strings.TrimSpace(a))
+	right, errRight := url.Parse(strings.TrimSpace(b))
+	if errLeft != nil || errRight != nil || left.Host == "" || right.Host == "" {
+		return false
+	}
+	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host) &&
+		strings.TrimRight(left.Path, "/") == strings.TrimRight(right.Path, "/") &&
+		left.RawQuery == right.RawQuery && left.User.String() == right.User.String()
 }
 
 // AuthorModel returns the author model or family supplied by the invoking
@@ -666,7 +858,15 @@ func ValidateRole(name string, role ResolvedRole) error {
 		return fmt.Errorf("%s model is not configured (set inference_profiles.%s.model or ROAST_%s_MODEL)", name, role.Profile, strings.ToUpper(name))
 	}
 	if strings.TrimSpace(role.APIKey) == "" {
-		return fmt.Errorf("%s API key is not configured (set inference_profiles.%s.api_key_env or ROAST_%s_API_KEY)", name, role.Profile, strings.ToUpper(name))
+		roleVar := roleEnvPrefix(name) + "API_KEY"
+		switch {
+		case role.Credential.Kind == CredentialProfileEnv:
+			return fmt.Errorf("%s API key is not configured (set %s, named by inference_profiles.%s.api_key_env, or %s)", name, role.Credential.Env, role.Profile, roleVar)
+		case role.Credential.Withheld != "":
+			return fmt.Errorf("%s API key is not configured: %s is not sent to %s because it is neither that provider's default endpoint nor %s (set inference_profiles.%s.api_key_env or %s)",
+				name, role.Credential.Withheld, role.BaseURL, pairedBaseURLEnv(role.Credential.Withheld), role.Profile, roleVar)
+		}
+		return fmt.Errorf("%s API key is not configured (set inference_profiles.%s.api_key_env or %s)", name, role.Profile, roleVar)
 	}
 	return validateEndpoint(name, role.BaseURL, role.Protocol, role.MaxOutputTokens)
 }

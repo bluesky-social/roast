@@ -65,7 +65,13 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if cfg.MaxOutputTokens <= 0 {
 		return nil, fmt.Errorf("%s: max output tokens must be positive", cfg.Model)
 	}
-	httpClient := providerHTTPClient(cfg)
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		// Fantasy omits an empty key, and the SDKs then fall back to ambient
+		// credentials: environment variables, profile files, or federation.
+		return nil, fmt.Errorf("%s: API key is not configured", cfg.Model)
+	}
+	envHeaders := sdkEnvironmentHeaders(cfg.Protocol)
+	httpClient := providerHTTPClient(cfg, envHeaders)
 	var (
 		provider fantasy.Provider
 		err      error
@@ -77,6 +83,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 			openaicompat.WithBaseURL(cfg.BaseURL),
 			openaicompat.WithHTTPClient(httpClient),
 			openaicompat.WithUserAgent(userAgent()),
+			openaicompat.WithSDKOptions(deleteHeaders(envHeaders)...),
 		)
 	case "responses":
 		provider, err = fantasyopenai.New(
@@ -84,6 +91,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 			fantasyopenai.WithBaseURL(cfg.BaseURL),
 			fantasyopenai.WithHTTPClient(httpClient),
 			fantasyopenai.WithUserAgent(userAgent()),
+			fantasyopenai.WithSDKOptions(deleteHeaders(envHeaders)...),
 			fantasyopenai.WithUseResponsesAPI(),
 			fantasyopenai.WithResponsesAPIFunc(func(string) bool { return true }),
 		)
@@ -184,10 +192,14 @@ func (e *captureError) Error() string { return e.err.Error() }
 func (e *captureError) Unwrap() error { return e.err }
 
 type captureTransport struct {
-	base   http.RoundTripper
-	cfg    ClientConfig
-	mu     sync.Mutex
-	failed error
+	base http.RoundTripper
+	cfg  ClientConfig
+	// stripHeaders are SDK environment headers removed from every request.
+	// Only the Anthropic provider needs this hook: Fantasy exposes no SDK
+	// request options for it.
+	stripHeaders []string
+	mu           sync.Mutex
+	failed       error
 }
 
 func (t *captureTransport) fail(err error) error {
@@ -214,9 +226,15 @@ func (t *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if failed != nil {
 		return nil, failed
 	}
-	if sessionID, ok := req.Context().Value(sessionContextKey{}).(string); ok {
+	sessionID, hasSession := req.Context().Value(sessionContextKey{}).(string)
+	if hasSession || len(t.stripHeaders) > 0 {
 		req = req.Clone(req.Context())
-		req.Header.Set("X-Agent-Session-Id", sessionID)
+		for _, name := range t.stripHeaders {
+			req.Header.Del(name)
+		}
+		if hasSession {
+			req.Header.Set("X-Agent-Session-Id", sessionID)
+		}
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
@@ -301,9 +319,11 @@ func (b *streamCaptureBody) Close() error {
 	return b.closeErr
 }
 
-func providerHTTPClient(cfg ClientConfig) *http.Client {
-	client := &http.Client{Transport: &captureTransport{base: http.DefaultTransport, cfg: cfg}}
+func providerHTTPClient(cfg ClientConfig, envHeaders []string) *http.Client {
+	transport := &captureTransport{base: http.DefaultTransport, cfg: cfg}
+	client := &http.Client{Transport: transport}
 	if cfg.Protocol == "anthropic" {
+		transport.stripHeaders = envHeaders
 		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		}

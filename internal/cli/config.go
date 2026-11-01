@@ -2,30 +2,37 @@ package cli
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/bluesky-social/roast/internal/config"
+	"github.com/bluesky-social/roast/internal/llm"
 )
 
-func newConfigCommand(stdout io.Writer) *cobra.Command {
-	cmd := &cobra.Command{Use: "config", Short: "Initialize Roast configuration", Args: noArgs}
-	cmd.AddCommand(newConfigInitCommand(stdout))
+func newConfigCommand(stdout, stderr io.Writer) *cobra.Command {
+	cmd := &cobra.Command{Use: "config", Short: "Initialize Roast configuration", Args: noArgs, RunE: showHelp}
+	cmd.AddCommand(newConfigInitCommand(stdout, stderr))
 	return cmd
 }
 
-func newConfigInitCommand(stdout io.Writer) *cobra.Command {
+func newConfigInitCommand(stdout, stderr io.Writer) *cobra.Command {
 	var sourceURL, destination string
 	cmd := &cobra.Command{
 		Use: "init", Short: "Install configuration from a trusted URL", Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			input := bufio.NewReader(cmd.InOrStdin())
 			if strings.TrimSpace(sourceURL) == "" {
-				_, _ = fmt.Fprint(stdout, "Configuration URL: ")
-				line, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				_, _ = fmt.Fprint(stderr, "Configuration URL: ")
+				line, _ := input.ReadString('\n')
 				sourceURL = strings.TrimSpace(line)
 				if sourceURL == "" {
 					return &usageError{msg: "configuration URL is required"}
@@ -35,8 +42,9 @@ func newConfigInitCommand(stdout io.Writer) *cobra.Command {
 			if destination == "" {
 				destination, _ = config.UserPath()
 			}
-			if err := config.Provision(cmd.Context(), sourceURL, destination, legacy); err != nil {
-				return &usageError{msg: err.Error()}
+			confirm := uploadConfirmer(cmd.InOrStdin(), input, stderr)
+			if err := installTemplate(cmd.Context(), sourceURL, destination, legacy, stderr, confirm); err != nil {
+				return err
 			}
 			_, _ = fmt.Fprintf(stdout, "roast: installed configuration at %s\n", destination)
 			return nil
@@ -47,7 +55,11 @@ func newConfigInitCommand(stdout io.Writer) *cobra.Command {
 	return cmd
 }
 
-func maybeProvision(cmd *cobra.Command, explicitPath string, stdout io.Writer) error {
+// maybeProvision offers the first-run configuration prompt. It never prompts
+// without a terminal on both stdin and stderr, and it does not prompt an
+// unconfigured user whose roles already resolve from the environment and
+// flags.
+func maybeProvision(cmd *cobra.Command, explicitPath string, stderr io.Writer, rolesResolve func() bool) error {
 	if explicitPath != "" {
 		return nil
 	}
@@ -69,36 +81,181 @@ func maybeProvision(cmd *cobra.Command, explicitPath string, stdout io.Writer) e
 		return err
 	}
 	input, ok := cmd.InOrStdin().(*os.File)
-	if !ok {
+	if !ok || !interactive(input, stderr) {
 		return nil
 	}
-	stat, err := input.Stat()
-	if err != nil || stat.Mode()&os.ModeCharDevice == 0 {
+	if legacy == "" && rolesResolve() {
 		return nil
 	}
-	return offerProvision(cmd, path, legacy, input, stdout)
+	return offerProvision(cmd, path, legacy, input, stderr)
 }
 
-func offerProvision(cmd *cobra.Command, path, legacy string, input io.Reader, stdout io.Writer) error {
+func offerProvision(cmd *cobra.Command, path, legacy string, input io.Reader, stderr io.Writer) error {
 	if legacy == "" {
 		legacy, _ = config.LegacyUserPath()
 	}
 	if _, err := os.Stat(legacy); err == nil {
-		_, _ = fmt.Fprintf(stdout, "Roast found a configuration to initialize or update at %s.\n", legacy)
-		_, _ = fmt.Fprintln(stdout, "A trusted configuration URL can update matching Claude profiles to native Messages without replacing your other settings. Leave blank to keep intentional compatibility protocols.")
+		_, _ = fmt.Fprintf(stderr, "Roast found a configuration to initialize or update at %s.\n", legacy)
+		_, _ = fmt.Fprintln(stderr, "A trusted configuration URL can update matching Claude profiles to native Messages without replacing your other settings. Leave blank to keep intentional compatibility protocols.")
 	} else {
 		legacy = ""
-		_, _ = fmt.Fprintln(stdout, "Roast is not configured.")
+		_, _ = fmt.Fprintln(stderr, "Roast is not configured.")
 	}
-	_, _ = fmt.Fprint(stdout, "Configuration URL (leave blank to configure manually): ")
-	line, _ := bufio.NewReader(input).ReadString('\n')
+	_, _ = fmt.Fprint(stderr, "Configuration URL (leave blank to configure manually): ")
+	reader := bufio.NewReader(input)
+	line, _ := reader.ReadString('\n')
 	sourceURL := strings.TrimSpace(line)
 	if sourceURL == "" {
 		return config.AcknowledgeProtocolUpdate(path)
 	}
-	if err := config.Provision(cmd.Context(), sourceURL, path, legacy); err != nil {
-		return &usageError{msg: err.Error()}
+	confirm := func(question string) (bool, error) { return promptNoDefault(stderr, reader, question) }
+	if err := installTemplate(cmd.Context(), sourceURL, path, legacy, stderr, confirm); err != nil {
+		return err
 	}
-	_, _ = fmt.Fprintf(stdout, "roast: installed configuration at %s\n", path)
+	_, _ = fmt.Fprintf(stderr, "roast: installed configuration at %s\n", path)
 	return nil
 }
+
+// installTemplate downloads and validates a template, shows what it installs,
+// asks confirm before enabling uploads when confirm is non-nil, then installs.
+func installTemplate(ctx context.Context, sourceURL, path, legacy string, stderr io.Writer, confirm func(string) (bool, error)) error {
+	plan, err := config.PlanProvision(ctx, sourceURL, path, legacy)
+	if err != nil {
+		return provisionError(err)
+	}
+	writeProvisionSummary(stderr, plan)
+	if plan.TemplateUpload() && confirm != nil {
+		ok, err := confirm(fmt.Sprintf("This configuration uploads every completed review's run bundle, including reviewed code, prompts, and model responses, to %s. Install it?", uploadDestination(plan.Config.Upload)))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return &usageError{msg: "configuration not installed: run uploads were not confirmed"}
+		}
+	}
+	if err := plan.Install(); err != nil {
+		return &usageError{msg: err.Error()}
+	}
+	return nil
+}
+
+// provisionError maps a configuration fetch failure to the endpoint exit code
+// and every other provisioning failure to the usage exit code.
+func provisionError(err error) error {
+	var fetch *config.FetchError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return err
+	case errors.As(err, &fetch):
+		return &endpointError{err: err}
+	default:
+		return &usageError{msg: err.Error()}
+	}
+}
+
+// endpointError classifies a non-inference network failure with the endpoint
+// category without changing its message.
+type endpointError struct{ err error }
+
+func (e *endpointError) Error() string   { return e.err.Error() }
+func (e *endpointError) Unwrap() []error { return []error{e.err, llm.ErrEndpoint} }
+
+// uploadConfirmer returns a y/N prompt when the install is interactive, and
+// nil when it is not: a non-interactive install proceeds on the explicit
+// command with only the summary.
+func uploadConfirmer(stdin io.Reader, input *bufio.Reader, stderr io.Writer) func(string) (bool, error) {
+	if !interactive(stdin, stderr) {
+		return nil
+	}
+	return func(question string) (bool, error) { return promptNoDefault(stderr, input, question) }
+}
+
+// interactive reports whether a prompt can be shown on stderr and answered on
+// stdin. Tests replace it; character devices such as /dev/null do not count.
+var interactive = func(stdin, stderr any) bool {
+	return isTerminal(stdin) && isTerminal(stderr)
+}
+
+func isTerminal(stream any) bool {
+	file, ok := stream.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+
+// writeProvisionSummary reports, per role, where reviewed code is sent and
+// which credential is used, plus the upload destination, so a template's
+// effect is visible before and after it is installed.
+func writeProvisionSummary(w io.Writer, plan *config.ProvisionPlan) {
+	cfg := plan.Config
+	if len(plan.ProtocolUpdates) > 0 {
+		_, _ = fmt.Fprintf(w, "roast: the template switches %s to the native anthropic protocol; no other setting changes.\n", strings.Join(plan.ProtocolUpdates, ", "))
+	}
+	_, _ = fmt.Fprintf(w, "roast: configuration for %s:\n", plan.Path)
+	for _, name := range []string{"finder", "verifier"} {
+		role := cfg.Roles[name]
+		_, _ = fmt.Fprintf(w, "  %-9s %s\n", name+":", describeProfile(cfg, name, role.Profile, plan.ImportedLegacyCredential))
+		for _, route := range slices.Sorted(maps.Keys(role.AuthorRoutes)) {
+			_, _ = fmt.Fprintf(w, "  %-9s author %s -> %s\n", "", route, describeProfile(cfg, name, role.AuthorRoutes[route], plan.ImportedLegacyCredential))
+		}
+	}
+	_, _ = fmt.Fprintf(w, "  %-9s %s\n", "upload:", describeUpload(cfg.Upload, plan.ImportedLegacyCredential))
+}
+
+func describeProfile(cfg config.Config, role, name string, imported bool) string {
+	profile := cfg.InferenceProfiles[name]
+	credential := profile.DescribeCredential(role)
+	if profile.APIKey != "" && imported {
+		credential = "api_key imported from the legacy config"
+	}
+	return fmt.Sprintf("profile %s, %s, protocol %s, credential %s", name, profile.DescribeEndpoint(), profile.Protocol, credential)
+}
+
+func describeUpload(upload config.Upload, imported bool) string {
+	if upload.Endpoint == "" {
+		return "off"
+	}
+	state := "off (roast runs sync sends to " + uploadDestination(upload) + ")"
+	if upload.Enabled {
+		state = "ON, after every review, to " + uploadDestination(upload)
+	}
+	switch {
+	case upload.Backend == "presigned" && upload.TokenEnv != "":
+		state += ", token env " + upload.TokenEnv
+	case upload.Backend == "presigned" && upload.Token != "" && imported:
+		state += ", token imported from the legacy config"
+	case upload.Backend == "s3":
+		names := []string{upload.AccessKeyEnv, upload.SecretKeyEnv}
+		if upload.SessionTokenEnv != "" {
+			names = append(names, upload.SessionTokenEnv)
+		}
+		state += ", credentials env " + strings.Join(names, ", ")
+	}
+	return state
+}
+
+func uploadDestination(upload config.Upload) string {
+	if upload.Backend == "presigned" {
+		return "presigned broker " + upload.Endpoint
+	}
+	return fmt.Sprintf("s3 %s bucket %s prefix %s", upload.Endpoint, upload.Bucket, upload.Prefix)
+}
+
+// rolesResolve reports whether both roles are usable from the default config
+// location, the environment, and the given role flags.
+func rolesResolve(changed func(string) bool, finder, verifier roleFlags) bool {
+	cfg, err := config.Load("")
+	if err != nil {
+		return false
+	}
+	for name, flags := range map[string]roleFlags{"finder": finder, "verifier": verifier} {
+		role, err := cfg.ResolveRole(name)
+		if err != nil {
+			return false
+		}
+		if config.ValidateRole(name, applyRoleFlags(changed, name, role, flags)) != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func noFlagsChanged(string) bool { return false }

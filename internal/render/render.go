@@ -11,6 +11,7 @@ import (
 
 	"github.com/bluesky-social/roast/internal/llm"
 	"github.com/bluesky-social/roast/internal/review"
+	"github.com/bluesky-social/roast/internal/textsafe"
 )
 
 // SizeEntry records the byte contribution of one file to the diff payload.
@@ -126,7 +127,9 @@ func ToJSON(r Report) string {
 
 // ToMarkdown returns the human-readable Markdown summary written to stderr.
 // Findings are sorted severity-descending then confidence-descending. When
-// showDropped is true a dropped-findings section is appended.
+// showDropped is true a dropped-findings section is appended. Finding text is
+// escaped for terminals (see renderFinding); ToJSON needs no such pass because
+// encoding/json escapes control characters itself.
 func ToMarkdown(r Report, showDropped bool) string {
 	res := r.Result
 	var lines []string
@@ -220,12 +223,12 @@ func ToMarkdown(r Report, showDropped bool) string {
 // fingerprint → human note; when the finding's fingerprint has an entry it is
 // appended as "seen previously" line.
 func renderFinding(i int, f review.Finding, dropped bool, prior map[string]string) []string {
-	sev := string(f.Severity)
+	sev := textsafe.Line(string(f.Severity))
 	if sev == "" {
 		sev = "INFO"
 	}
 	if eff := f.EffectiveSeverity(); eff != f.Severity {
-		sev = fmt.Sprintf("%s (finder claimed %s — verifier recalibrated)", eff, sev)
+		sev = fmt.Sprintf("%s (finder claimed %s — verifier recalibrated)", textsafe.Line(string(eff)), sev)
 	}
 	confStr := fmt.Sprintf(" · conf %.2f", f.Confidence)
 	tag := ""
@@ -234,7 +237,7 @@ func renderFinding(i int, f review.Finding, dropped bool, prior map[string]strin
 		if reason == "" {
 			reason = "?"
 		}
-		tag = fmt.Sprintf("[DROPPED:%s] ", reason)
+		tag = fmt.Sprintf("[DROPPED:%s] ", textsafe.Line(reason))
 	}
 	path := f.File
 	if path == "" {
@@ -247,45 +250,46 @@ func renderFinding(i int, f review.Finding, dropped bool, prior map[string]strin
 		lnStr = fmt.Sprintf("%d-%d", f.Lines[0], f.Lines[len(f.Lines)-1])
 	}
 
-	desc := strings.TrimSpace(f.Description)
+	desc := textsafe.Line(strings.TrimSpace(f.Description))
 	var out []string
 	// Stable alias over ordinal: "R-8d8d19" survives re-runs and
 	// re-ordering, "finding #2" does not. Ordinal fallback only for findings
 	// predating identity assignment (old run records).
-	handle := f.Alias
+	handle := textsafe.Line(f.Alias)
 	if handle == "" {
 		handle = fmt.Sprintf("%d.", i)
 	}
 	out = append(out, fmt.Sprintf("### %s %s[%s%s] %s", handle, tag, sev, confStr, desc))
-	out = append(out, fmt.Sprintf("- **File:** `%s:%s`", path, lnStr))
+	out = append(out, "- **File:** "+inlineCode(textsafe.Line(path)+":"+lnStr))
 	if f.CWE != "" {
-		out = append(out, fmt.Sprintf("- **CWE:** %s", f.CWE))
+		out = append(out, fmt.Sprintf("- **CWE:** %s", textsafe.Line(f.CWE)))
 	}
-	out = append(out, fmt.Sprintf("- **Reasoning:** %s", strings.TrimSpace(f.Reasoning)))
+	out = append(out, fmt.Sprintf("- **Reasoning:** %s", listItemText(f.Reasoning, "  ")))
 
 	if f.Verdict != nil {
 		v := f.Verdict
-		vStatus := string(v.Status)
+		vStatus := textsafe.Line(string(v.Status))
 		vConfStr := fmt.Sprintf(" (conf %.2f)", v.Confidence)
-		verifierName := v.Verifier
+		verifierName := textsafe.Line(v.Verifier)
 		if verifierName == "" {
 			verifierName = "?"
 		}
 		out = append(out, fmt.Sprintf("- **Verifier (%s):** %s%s", verifierName, vStatus, vConfStr))
 		if v.Grounding != "" {
-			out = append(out, fmt.Sprintf("  - grounding: %s", strings.TrimSpace(v.Grounding)))
+			out = append(out, fmt.Sprintf("  - grounding: %s", listItemText(v.Grounding, "    ")))
 		}
 	}
 
 	for _, pair := range [][2]string{{"Current", f.CodeQuote}, {"Proposed fix", f.FixedCode}} {
-		label, block := pair[0], strings.TrimRight(pair[1], "\n")
+		label, block := pair[0], strings.TrimRight(textsafe.Text(pair[1]), "\n")
 		if block != "" {
+			fence := codeFence(block)
 			out = append(out, fmt.Sprintf("- **%s:**", label))
-			out = append(out, "  ```")
+			out = append(out, "  "+fence)
 			for _, ln := range strings.Split(block, "\n") {
 				out = append(out, "  "+ln)
 			}
-			out = append(out, "  ```")
+			out = append(out, "  "+fence)
 		} else if dropped {
 			out = append(out, fmt.Sprintf("- **%s:** *(not provided)*", label))
 		}
@@ -295,10 +299,46 @@ func renderFinding(i int, f review.Finding, dropped bool, prior map[string]strin
 	fp := review.Fingerprint(f)
 	if prior != nil {
 		if note, ok := prior[fp]; ok {
-			out = append(out, fmt.Sprintf("- **Seen previously:** %s", note))
+			out = append(out, fmt.Sprintf("- **Seen previously:** %s", textsafe.Line(note)))
 		}
 	}
 
 	out = append(out, "")
 	return out
+}
+
+// listItemText sanitizes a multi-line field and indents each continuation
+// line, so model-written text cannot leave its list item and pose as a
+// report heading.
+func listItemText(s, indent string) string {
+	return strings.ReplaceAll(textsafe.Text(strings.TrimSpace(s)), "\n", "\n"+indent)
+}
+
+// codeFence returns a backtick fence longer than any backtick run in content,
+// so a quoted ``` line cannot close the block early.
+func codeFence(content string) string {
+	return strings.Repeat("`", max(3, longestBacktickRun(content)+1))
+}
+
+// inlineCode wraps s in a code span whose delimiter outruns any backtick run
+// inside it, padding with spaces when s starts or ends with a backtick.
+func inlineCode(s string) string {
+	delim := strings.Repeat("`", longestBacktickRun(s)+1)
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		return delim + " " + s + " " + delim
+	}
+	return delim + s + delim
+}
+
+func longestBacktickRun(s string) int {
+	longest, run := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] != '`' {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	return longest
 }
