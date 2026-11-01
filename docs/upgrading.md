@@ -27,13 +27,15 @@ roast doctor
 ```
 
 Use the URL your organization provides, not the illustrative URL above.
-An interactive review (stdin and stderr are terminals) also offers the
-configuration-URL prompt when the current config is missing and the finder and
-verifier cannot be resolved from the environment or flags, is unversioned, or has Claude profiles using Chat Completions or
-Responses. Compatibility protocols can be intentional; leave the URL blank to
-keep them. For versioned configs, that choice is recorded in a private sibling
-`.protocol-update-ack` file containing only the config's hash, so the prompt does
-not repeat unless the config changes. Explicit `config init` still works after
+An interactive `roast review` or `roast runs sync` (stdin and stderr are
+terminals) also offers the configuration-URL prompt in three cases: the default
+config file is missing and the finder and verifier cannot be resolved from the
+environment or flags; the file is unversioned; or the file has Claude profiles
+using Chat Completions or Responses. The last two cases prompt even when the
+roles already resolve. Compatibility protocols can be intentional; leave the
+URL blank to keep them. For versioned configs, that choice is recorded in a
+private sibling `.protocol-update-ack` file containing only the config's hash,
+so the prompt does not repeat unless the config changes. Explicit `config init` still works after
 a decline. Non-interactive runs do not prompt or update files. An explicit
 `--config` bypasses automatic enrollment.
 
@@ -93,10 +95,18 @@ That compatibility does not discover a replacement upload endpoint. Old
 | `gate.auto_install` / `ROAST_HOOK_INSTALL` | Retired. The first interactive review asks once per repository; a decline is recorded in local Git config. `ROAST_NO_HOOK=1` suppresses bootstrap, and `roast gate enable|status|disable` manages explicit enrollment. |
 | Old upload enrollment | Configure an S3-compatible destination with explicit credential environment variables, or a presigned broker with `token_env`/locally imported token. Uploads remain disabled unless the new config explicitly enables them. |
 
-For provider defaults, `OPENAI_API_KEY` / `OPENAI_BASE_URL` apply to `chat` and
-`responses`; `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` apply to `anthropic`.
-Role-specific settings override them. Remove obsolete environment exports when
-you have moved to explicit credential sources.
+Provider variables are a fallback: `OPENAI_API_KEY` / `OPENAI_BASE_URL` serve
+`chat` and `responses`, and `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` serve
+`anthropic`. A provider `*_BASE_URL` applies only to a profile that sets no
+`endpoint`. A provider `*_API_KEY` from the shell is sent only to that
+provider's default endpoint or to the endpoint named by the same provider's
+`*_BASE_URL`. A profile with any other endpoint, such as a gateway, must name
+its credential with `api_key_env` (or a user-config `api_key`), or the role
+needs `ROAST_FINDER_API_KEY` / `ROAST_VERIFIER_API_KEY`. A gateway profile that
+relied on an ambient provider key otherwise fails with "API key is not
+configured". Role-specific settings override provider variables. Remove
+obsolete environment exports when you have moved to explicit credential
+sources.
 
 ## 4. Refresh the skill and check the gate
 

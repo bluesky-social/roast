@@ -48,9 +48,13 @@ const RefPrefix = "refs/roast/snapshots/"
 // covers the one residual class — "dropped creds.json and forgot to gitignore
 // it". Patterns are matched against the basename AND the full repo-relative
 // path with filepath.Match semantics (`*` does not cross `/`).
+//
+// SSH keys are matched by key-type prefix so suffixed names (id_ed25519_github,
+// id_rsa_work) and .pub files are covered too; a bare `id_*` would also drop
+// ordinary sources such as id_map.go.
 var DefaultDenylist = []string{
 	".env*", "*.pem", "*_rsa", "*.key", "creds*",
-	"id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss",
+	"id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*", "id_xmss*",
 	"credentials.json", ".npmrc", ".pypirc", ".netrc", "_netrc", ".pgpass",
 	".git-credentials", "*.p12", "*.pfx",
 }

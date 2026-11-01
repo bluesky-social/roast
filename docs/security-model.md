@@ -16,10 +16,10 @@ file.
 
 An organization can publish a configuration template at a URL. A template is
 installed by `roast config init --from <url>`, by `roast config init` with the
-URL typed at its prompt, or by entering the URL at the interactive first-run
-prompt that `roast review` and `roast runs sync` show when no configuration
-exists. Templates are trusted input: review and host them with the same care as
-other organization configuration.
+URL typed at its prompt, or by entering the URL at the interactive
+configuration-URL prompt that `roast review` and `roast runs sync` can show
+(described below). Templates are trusted input: review and host them with the
+same care as other organization configuration.
 
 The configuration URL must use HTTPS, or plain HTTP to a loopback address, and
 must not embed credentials or a fragment. Redirects must stay on the same
@@ -54,9 +54,21 @@ Roast installs it only after an explicit `y` answer to a `[y/N]` question.
 Non-interactive installs print the summary and proceed, since the command
 itself names the URL.
 
-The first-run prompt appears only when both stdin and stderr are terminals, and
-only when no configuration exists and the finder and verifier cannot already
-be resolved from the environment and command-line flags. Its prompts go to
+A template's text fields, such as profile names, author-route keys, endpoints,
+and the upload bucket and prefix, must not contain control characters; Roast
+rejects such a template before writing anything. The summary and the upload
+question also escape control characters in every configuration value they
+print, so configuration text cannot rewrite what the user is asked to approve.
+
+The configuration-URL prompt appears only when both stdin and stderr are
+terminals and no `--config` path is given. It then appears in three cases: the
+default config file is missing and the finder and verifier cannot be resolved
+from the environment and command-line flags; the file is unversioned; or the
+file has Claude profiles using Chat Completions or Responses. The last two cases
+prompt even when the roles already resolve. Leaving the URL blank leaves the
+configuration as it is; for a versioned file, that choice is recorded in a
+private sibling `.protocol-update-ack` file containing only the config's hash,
+so the prompt does not repeat until the config changes. Its prompts go to
 stderr, so redirected review output is never mixed with them.
 
 ## Credentials and endpoints
@@ -79,7 +91,9 @@ override:
   another's, the profile's credential does not follow it.
 - An endpoint override (`ROAST_<ROLE>_BASE_URL` or `--<role>-base-url`)
   carries the role key or the profile's own credential to the endpoint it
-  names, but never a provider key from the shell.
+  names. It carries a provider key from the shell only under the rule above:
+  when the endpoint it names is that provider's default endpoint or the same
+  provider's `*_BASE_URL`.
 - `ROAST_<ROLE>_*` variables and the matching command-line flags apply these
   rules identically.
 
@@ -88,10 +102,11 @@ profile's custom endpoint, such as a gateway or a template's endpoint. A
 profile with such an endpoint must name its credential, and the name is not
 restricted: a profile, including one installed from a template, may set
 `endpoint: https://models.example.org/v1` with `api_key_env: OPENAI_API_KEY`,
-and that key is then sent to that endpoint. The install summary lists every
-credential variable a template names, so review it before relying on a
-template. `roast doctor` reports which source each role used, and names a
-provider key it withheld.
+and that key is then sent to that endpoint. The install summary lists the
+credential variable of each profile that a role or author route selects, and
+the upload credential variables, so review it before relying on a template.
+`roast doctor` reports which source each role used, and names a provider key it
+withheld.
 
 ## Network disclosure
 
@@ -122,12 +137,14 @@ without a presigned URL's signed query string. The bundled broker expects
 authentication to be enforced by a trusted reverse proxy; it must not be
 exposed directly to untrusted clients.
 
-Released binaries check GitHub for a newer stable release by sending an
-unauthenticated `GET` to the repository's latest-release API endpoint, with
-Roast's version in the `User-Agent` header. The check sends no review data,
+Builds that report a version other than `dev` check GitHub for a newer stable
+release by sending an unauthenticated `GET` to the repository's latest-release
+API endpoint, with Roast's version in the `User-Agent` header. These include
+release binaries, `go install` builds, and source builds from a Git checkout,
+which the Go toolchain stamps with a version. The check sends no review data,
 repository content, or credentials. Commands reuse a cached result for up to a
-day, `roast doctor` checks on each run, development builds skip the check, and
-`ROAST_NO_UPDATE_CHECK=1` disables it.
+day, `roast doctor` checks on each run, builds that report `dev` skip the check,
+and `ROAST_NO_UPDATE_CHECK=1` disables it.
 
 ## Local sensitive data
 

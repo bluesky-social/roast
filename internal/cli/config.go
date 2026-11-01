@@ -16,6 +16,7 @@ import (
 
 	"github.com/bluesky-social/roast/internal/config"
 	"github.com/bluesky-social/roast/internal/llm"
+	"github.com/bluesky-social/roast/internal/textsafe"
 )
 
 func newConfigCommand(stdout, stderr io.Writer) *cobra.Command {
@@ -125,7 +126,7 @@ func installTemplate(ctx context.Context, sourceURL, path, legacy string, stderr
 	}
 	writeProvisionSummary(stderr, plan)
 	if plan.TemplateUpload() && confirm != nil {
-		ok, err := confirm(fmt.Sprintf("This configuration uploads every completed review's run bundle, including reviewed code, prompts, and model responses, to %s. Install it?", uploadDestination(plan.Config.Upload)))
+		ok, err := confirm(uploadQuestion(plan.Config.Upload))
 		if err != nil {
 			return err
 		}
@@ -183,18 +184,19 @@ func isTerminal(stream any) bool {
 
 // writeProvisionSummary reports, per role, where reviewed code is sent and
 // which credential is used, plus the upload destination, so a template's
-// effect is visible before and after it is installed.
+// effect is visible before and after it is installed. Every configuration
+// value passes through textsafe.Line, so none can rewrite the summary.
 func writeProvisionSummary(w io.Writer, plan *config.ProvisionPlan) {
 	cfg := plan.Config
 	if len(plan.ProtocolUpdates) > 0 {
-		_, _ = fmt.Fprintf(w, "roast: the template switches %s to the native anthropic protocol; no other setting changes.\n", strings.Join(plan.ProtocolUpdates, ", "))
+		_, _ = fmt.Fprintf(w, "roast: the template switches %s to the native anthropic protocol; no other setting changes.\n", textsafe.Line(strings.Join(plan.ProtocolUpdates, ", ")))
 	}
 	_, _ = fmt.Fprintf(w, "roast: configuration for %s:\n", plan.Path)
 	for _, name := range []string{"finder", "verifier"} {
 		role := cfg.Roles[name]
 		_, _ = fmt.Fprintf(w, "  %-9s %s\n", name+":", describeProfile(cfg, name, role.Profile, plan.ImportedLegacyCredential))
 		for _, route := range slices.Sorted(maps.Keys(role.AuthorRoutes)) {
-			_, _ = fmt.Fprintf(w, "  %-9s author %s -> %s\n", "", route, describeProfile(cfg, name, role.AuthorRoutes[route], plan.ImportedLegacyCredential))
+			_, _ = fmt.Fprintf(w, "  %-9s author %s -> %s\n", "", textsafe.Line(route), describeProfile(cfg, name, role.AuthorRoutes[route], plan.ImportedLegacyCredential))
 		}
 	}
 	_, _ = fmt.Fprintf(w, "  %-9s %s\n", "upload:", describeUpload(cfg.Upload, plan.ImportedLegacyCredential))
@@ -206,7 +208,12 @@ func describeProfile(cfg config.Config, role, name string, imported bool) string
 	if profile.APIKey != "" && imported {
 		credential = "api_key imported from the legacy config"
 	}
-	return fmt.Sprintf("profile %s, %s, protocol %s, credential %s", name, profile.DescribeEndpoint(), profile.Protocol, credential)
+	return textsafe.Line(fmt.Sprintf("profile %s, %s, protocol %s, credential %s", name, profile.DescribeEndpoint(), profile.Protocol, credential))
+}
+
+// uploadQuestion asks before installing a template that enables uploads.
+func uploadQuestion(upload config.Upload) string {
+	return fmt.Sprintf("This configuration uploads every completed review's run bundle, including reviewed code, prompts, and model responses, to %s. Install it?", uploadDestination(upload))
 }
 
 func describeUpload(upload config.Upload, imported bool) string {
@@ -229,14 +236,14 @@ func describeUpload(upload config.Upload, imported bool) string {
 		}
 		state += ", credentials env " + strings.Join(names, ", ")
 	}
-	return state
+	return textsafe.Line(state)
 }
 
 func uploadDestination(upload config.Upload) string {
 	if upload.Backend == "presigned" {
-		return "presigned broker " + upload.Endpoint
+		return textsafe.Line("presigned broker " + upload.Endpoint)
 	}
-	return fmt.Sprintf("s3 %s bucket %s prefix %s", upload.Endpoint, upload.Bucket, upload.Prefix)
+	return textsafe.Line(fmt.Sprintf("s3 %s bucket %s prefix %s", upload.Endpoint, upload.Bucket, upload.Prefix))
 }
 
 // rolesResolve reports whether both roles are usable from the default config

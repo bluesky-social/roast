@@ -336,3 +336,86 @@ func TestProvisionRejectsUnversionedOrSecretRemoteConfig(t *testing.T) {
 		})
 	}
 }
+
+const controlTemplate = `version: 1
+inference_profiles:
+  finder:
+    endpoint: https://models.example/v1
+    model: finder-model
+    protocol: chat
+    api_key_env: FINDER_KEY
+  verifier:
+    model: verifier-model
+roles:
+  finder:
+    profile: finder
+    author_routes:
+      openai: verifier
+  verifier:
+    profile: verifier
+review:
+  excludes:
+    - vendor
+upload:
+  enabled: true
+  endpoint: https://uploads.example
+  bucket: reviews
+  prefix: roast-runs
+  region: us-east-1
+`
+
+func TestProvisionRejectsTemplateControlCharacters(t *testing.T) {
+	if _, err := ValidateProvisionDocument([]byte(controlTemplate)); err != nil {
+		t.Fatalf("clean template rejected: %v", err)
+	}
+	for name, test := range map[string]struct{ old, new, where string }{
+		"ESC in bucket":        {"bucket: reviews", `bucket: "reviews\e[2K\rupload: off"`, "upload.bucket"},
+		"C1 in prefix":         {"prefix: roast-runs", `prefix: "roast\x9b2Jruns"`, "upload.prefix"},
+		"DEL in region":        {"region: us-east-1", `region: "us-east-1\x7f"`, "upload.region"},
+		"NEL in upload":        {"endpoint: https://uploads.example", `endpoint: "https://uploads.example\u0085"`, "upload.endpoint"},
+		"ESC in endpoint":      {"endpoint: https://models.example/v1", `endpoint: "https://models.example/v1\e[8m"`, "inference_profiles.finder.endpoint"},
+		"newline in model":     {"model: finder-model", `model: "finder\nmodel"`, "inference_profiles.finder.model"},
+		"ESC in profile name":  {"  verifier:\n    model:", "  \"verifier\\e]0;title\\a\":\n    model:", "inference profile name"},
+		"ESC in route key":     {"openai: verifier", `"openai\e[31m": verifier`, "roles.finder.author_routes key"},
+		"tab in route profile": {"openai: verifier", `openai: "verifier\t"`, "roles.finder.author_routes.openai"},
+		"ESC in role profile":  {"    profile: verifier\n", "    profile: \"verifier\\e\"\n", "roles.verifier.profile"},
+		"ESC in role name":     {"roles:\n", "roles:\n  \"other\\e\":\n    profile: finder\n", "role name"},
+		"ESC in exclude":       {"    - vendor", `    - "vendor\e"`, "review.excludes[0]"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(controlTemplate, test.old, test.new, 1)
+			if body == controlTemplate {
+				t.Fatalf("replacement %q did not apply", test.old)
+			}
+			_, err := ValidateProvisionDocument([]byte(body))
+			if err == nil || !strings.Contains(err.Error(), "control characters") || !strings.Contains(err.Error(), test.where) {
+				t.Fatalf("err = %v, want a control-character error naming %s", err, test.where)
+			}
+			if hasControlCharacter(err.Error()) {
+				t.Fatalf("error repeats the control character: %q", err.Error())
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+			defer server.Close()
+			destination := filepath.Join(t.TempDir(), "config.yaml")
+			if err := Provision(t.Context(), server.URL, destination, ""); err == nil {
+				t.Fatal("template with a control character was installed")
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected template wrote a config: %v", err)
+			}
+		})
+	}
+}
+
+func TestHasControlCharacter(t *testing.T) {
+	for _, s := range []string{"\x1b", "a\tb", "a\nb", "\r", "\x00", "\x7f", "\u0080", "\u009b", "\xff"} {
+		if !hasControlCharacter(s) {
+			t.Errorf("hasControlCharacter(%q) = false", s)
+		}
+	}
+	for _, s := range []string{"", "plain", "modèle ✓", " ", "ÿ", "https://models.example/v1"} {
+		if hasControlCharacter(s) {
+			t.Errorf("hasControlCharacter(%q) = true", s)
+		}
+	}
+}
