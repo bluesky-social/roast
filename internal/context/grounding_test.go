@@ -8,7 +8,8 @@ import (
 )
 
 func TestQuoteGrounder(t *testing.T) {
-	dir := t.TempDir()
+	// A repository, because the live corpus is Git's view of the working tree.
+	dir := initRepo(t)
 	src := "func Foo() {\n\treturn\tbar(1,\n\t\t2)\n}\n"
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)

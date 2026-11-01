@@ -14,9 +14,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/bluesky-social/roast/internal/llm"
 	"github.com/bluesky-social/roast/internal/review"
+	"github.com/bluesky-social/roast/internal/textsafe"
 	"github.com/invopop/jsonschema"
 )
 
@@ -164,9 +166,12 @@ func Verify(ctx context.Context, verifier llm.Client, result *review.Result, dep
 		if !v.Gates() {
 			f.DropReason = review.DropRefutedByVerifier
 			out.Dropped = append(out.Dropped, f)
+			// Finder text is model-written from untrusted repository input:
+			// escape it so the log line can neither drive the terminal nor
+			// break into extra lines.
 			deps.Log(fmt.Sprintf(
 				"roast: verifier refuted [%s] %s (conf %.2f)",
-				f.Severity, truncate(f.Description, 80), v.Confidence,
+				textsafe.Line(string(f.Severity)), textsafe.Line(truncate(f.Description, 80)), v.Confidence,
 			))
 		} else {
 			out.Findings = append(out.Findings, f)
@@ -215,9 +220,14 @@ func verifyOne(ctx context.Context, verifier llm.Client, f review.Finding, deps 
 	}
 }
 
+// truncate cuts s to at most n bytes without splitting a UTF-8 sequence, which
+// would otherwise render as escaped invalid bytes.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n]
 }

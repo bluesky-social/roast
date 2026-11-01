@@ -15,6 +15,7 @@ import (
 	"github.com/bluesky-social/roast/internal/record"
 	"github.com/bluesky-social/roast/internal/scope"
 	"github.com/bluesky-social/roast/internal/snapshot"
+	"github.com/bluesky-social/roast/internal/textsafe"
 )
 
 func newRunsCommand(stdout, stderr io.Writer) *cobra.Command {
@@ -104,7 +105,9 @@ func newRunsShowCommand(stdout io.Writer) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("run has no report artifact: %w", err)
 			}
-			_, err = stdout.Write(data)
+			// Reports written before render escaped finding text can hold raw
+			// control bytes from model output; escape on the way out too.
+			_, err = io.WriteString(stdout, textsafe.Text(string(data)))
 			return err
 		},
 	}

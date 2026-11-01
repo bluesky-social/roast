@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -280,6 +281,59 @@ func TestValidateDropReasons(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // EffectiveSeverity / MaxSeverity recalibration
+
+// TestValidateCanonicalizesSeverity pins the gate bypass fix: providers that do
+// not enforce the schema enum can return "high", which Rank() would score as
+// INFO and a --max-severity HIGH gate would pass.
+func TestValidateCanonicalizesSeverity(t *testing.T) {
+	var findings []WireFinding
+	for _, sev := range []Severity{"high", " Critical ", "medium", "SEVERE", ""} {
+		f := goodWireFinding
+		f.Severity = sev
+		f.CodeQuote = "quote for " + string(sev)
+		findings = append(findings, f)
+	}
+	r := Validate(FindingsResponse{Assessment: AssessmentFindings, Findings: findings}, 0.6, nil)
+
+	var kept []Severity
+	for _, f := range r.Findings {
+		kept = append(kept, f.Severity)
+	}
+	if got := fmt.Sprint(kept); got != "[HIGH CRITICAL MEDIUM]" {
+		t.Errorf("kept severities = %s, want canonical [HIGH CRITICAL MEDIUM]", got)
+	}
+	if r.MaxSeverity() != SeverityCritical.Rank() {
+		t.Errorf("MaxSeverity = %d, want CRITICAL's rank", r.MaxSeverity())
+	}
+	if len(r.Dropped) != 2 {
+		t.Fatalf("want the unknown and empty severities dropped, got %v", r.Dropped)
+	}
+	for _, f := range r.Dropped {
+		if f.DropReason != DropInvalidSeverity {
+			t.Errorf("severity %q dropped as %q, want %q", f.Severity, f.DropReason, DropInvalidSeverity)
+		}
+	}
+
+	only := goodWireFinding
+	only.Severity = "high"
+	gate := Validate(FindingsResponse{Findings: []WireFinding{only}}, 0.6, nil)
+	if gate.MaxSeverity() < SeverityHigh.Rank() {
+		t.Error(`a lowercase "high" finding must trip a HIGH gate`)
+	}
+}
+
+func TestParseSeverityIgnoresCase(t *testing.T) {
+	for in, want := range map[string]Severity{"high": SeverityHigh, "Low": SeverityLow, " INFO ": SeverityInfo} {
+		if got, ok := ParseSeverity(in); !ok || got != want {
+			t.Errorf("ParseSeverity(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"", "SEVERE", "hi gh"} {
+		if _, ok := ParseSeverity(in); ok {
+			t.Errorf("ParseSeverity(%q) should be rejected", in)
+		}
+	}
+}
 
 func TestEffectiveSeverity(t *testing.T) {
 	cases := []struct {

@@ -60,9 +60,12 @@ echo a secret into an artifact or response.
 ## Untrusted repository and model input
 
 Repository paths supplied by a model are confined beneath the reviewed tree;
-absolute paths, traversal, unsafe Git revision spellings, and escaping symlinks
-are rejected. Staged reviews and captured worktree reviews use a pinned Git tree
-so concurrent checkout changes cannot alter the evidence seen during a run.
+absolute paths, traversal, unsafe Git revision spellings, escaping symlinks,
+and paths inside `.git` are rejected. Every review reads a pinned Git tree, even
+when no replayable snapshot can be recorded, so concurrent checkout changes
+cannot alter the evidence seen during a run. If Git cannot write that tree,
+Roast reads the live working tree instead but refuses ignored files and
+untracked files matching its secret denylist.
 
 Model output is schema-validated. Findings without a source quote grounded in
 the reviewed corpus are dropped, and a separately configured verifier checks
