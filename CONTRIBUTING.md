@@ -116,9 +116,12 @@ To hold a patch release, add the `release:manual` label and disable any already
 queued auto-merge (`gh pr merge <number> --disable-auto`). Automation leaves
 that PR for manual review. Removing the label makes it eligible again.
 
-The release workflow requires `TAP_GITHUB_TOKEN`, with contents write access to
-the tap. It checks access before building a stable release. Preview releases
-never update the tap.
+The release workflow publishes the cask with a short-lived installation token
+from the public release GitHub App (`PUBLIC_RELEASE_APP_ID` and
+`PUBLIC_RELEASE_APP_KEY`), minted per run and scoped to
+`bluesky-social/homebrew-tap` with contents write. The App must be installed on
+the tap repository. The workflow mints and checks the token before building a
+stable release. Preview releases never update the tap.
 
 Validate packaging locally with the GoReleaser version pinned in the workflows:
 
