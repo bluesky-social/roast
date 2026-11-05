@@ -1,89 +1,72 @@
 # Roast
 
-Roast is an adversarial cross-model code reviewer. A finder proposes potential
-issues, then an independent verifier checks each claim against the code before
-it reaches the final report.
+Roast is an adversarial, cross-model code reviewer. A finder model proposes
+defects in a Git diff, each with a code quote and a concrete fix; an
+independent verifier model then re-reads the cited code and confirms or refutes
+every claim before it reaches the report. The two roles can use different
+providers, endpoints, and wire protocols.
 
-Roast reviews a Git diff, requires every candidate to quote the code and offer
-a concrete fix, then asks a second model to confirm or refute the claim. The
-finder and verifier may use different endpoints and wire protocols.
-
-## Current status
-
-Roast supports local review, repository survey, durable run records,
-an optional Git gate, and optional S3-compatible run uploads. It has no
-telemetry or external retrieval tools. In interactive mode, models can only
-navigate the local checkout with bounded file, grep, and listing tools.
-
-## Build
-
-Roast requires Go 1.27.3 or newer:
-
-```sh
-go build ./cmd/roast
-```
+Roast has no telemetry. Models see only what Roast sends them, and in
+interactive mode they can navigate the local checkout only through bounded,
+read-only file, grep, and listing tools.
 
 ## Install
 
-For macOS with Homebrew:
+With Homebrew:
 
 ```sh
 brew install --cask bluesky-social/tap/roast
 ```
 
-Existing installations from `bluesky-social/tap` upgrade in place with
-`brew upgrade --cask roast`; no re-tap or package rename is needed.
-See [Upgrading from pre-1.1 configurations](docs/upgrading.md) for configuration
-migration and optional cleanup of retired Claude integrations.
-
-Tagged releases provide `roast` archives for macOS, Linux, and Windows on
-amd64 and arm64. Download the archive for your platform from
+Or download an archive for macOS, Linux, or Windows (amd64 and arm64) from
 [GitHub Releases](https://github.com/bluesky-social/roast/releases) and verify
-it against the published SHA-256 checksum file.
-
-With Go 1.27.3 or newer, you can instead install the latest tagged version:
+it against the published SHA-256 checksums. Or, with Go 1.27.3 or newer:
 
 ```sh
 go install github.com/bluesky-social/roast/cmd/roast@latest
 ```
 
-Source builds use the command shown above. Run `roast --version` to inspect the
-version, commit, and build date stamped into a release binary. Other builds
-report what the Go toolchain recorded: the module version for `go install`,
-plus the commit and its date when built from a Git checkout.
+To build from a checkout, run `go build ./cmd/roast`. `roast --version` prints
+the version, commit, and build date.
 
-Binaries that report a version other than `dev` perform a cached, informational
-check for newer stable GitHub releases. The check never blocks a command or
-changes its exit status. Network
-and cache failures fail open; update with Homebrew or the installation method
-you originally used. Set `ROAST_NO_UPDATE_CHECK=1` to disable the check.
+Builds that report a version other than `dev` run a cached, informational check
+for newer stable releases. It never blocks a command or changes its exit
+status, and it fails open; set `ROAST_NO_UPDATE_CHECK=1` to turn it off.
 
-To install the bundled Agent Skill:
+Upgrading from a pre-1.1 configuration? See
+[Upgrading from pre-1.1 configurations](docs/upgrading.md).
+
+### Agent Skill
 
 ```sh
 roast skill install
 roast skill status
 ```
 
-Roast always installs to the shared `~/.agents/skills/roast` location and also
-installs to `$CLAUDE_CONFIG_DIR/skills/roast` (or `~/.claude/skills/roast`) when
-Claude Code is detected, and to `$XDG_CONFIG_HOME/polytoken/skills/roast` (or
-`~/.config/polytoken/skills/roast`) when Polytoken is detected. `roast skill
-status` reports every detected target. Use `--dir` to operate on only one
-explicit parent skills directory.
+This installs the bundled skill to `~/.agents/skills/roast`, and also to
+`$CLAUDE_CONFIG_DIR/skills/roast` (default `~/.claude/skills/roast`) when Claude
+Code is detected and to `$XDG_CONFIG_HOME/polytoken/skills/roast` (default
+`~/.config/polytoken/skills/roast`) when Polytoken is detected. `--dir` limits
+either command to one parent skills directory.
 
-## Configure
-
-Both roles require a model name and API key. By default they use the OpenAI
-Responses protocol at `https://api.openai.com/v1`:
+## Quick start
 
 ```sh
 export OPENAI_API_KEY='...'
 export ROAST_FINDER_MODEL='your-finder-model'
 export ROAST_VERIFIER_MODEL='your-verifier-model'
+roast doctor
+roast review --task 'add retry handling'
 ```
 
-Each role can instead use its own endpoint and protocol:
+Both roles default to the OpenAI Responses protocol at
+`https://api.openai.com/v1`.
+
+## Configure
+
+### Environment variables
+
+Each role can use its own endpoint, credential, and protocol:
 
 ```sh
 export ROAST_FINDER_BASE_URL='https://finder.example/v1'
@@ -97,9 +80,8 @@ export ROAST_VERIFIER_MODEL='verifier-model'
 export ROAST_VERIFIER_PROTOCOL='responses'
 ```
 
-Native Anthropic Messages is also supported. It uses `x-api-key`
-authentication and defaults to `https://api.anthropic.com/v1` when
-`protocol: anthropic` is selected:
+Protocols are `chat`, `responses`, and `anthropic` (native Messages, which
+authenticates with `x-api-key` and defaults to `https://api.anthropic.com/v1`):
 
 ```sh
 export ANTHROPIC_API_KEY='...'
@@ -107,13 +89,13 @@ export ROAST_FINDER_MODEL='claude-model-name'
 export ROAST_FINDER_PROTOCOL='anthropic'
 ```
 
-The supported protocol values are `chat`, `responses`, and `anthropic`. Custom
-base URLs work for each protocol, so a role can use a hosted provider, gateway,
-or local server that implements the selected wire contract.
+Any base URL works, so a role can point at a hosted provider, a gateway, or a
+local server that implements the selected protocol.
 
-Configuration may also be stored in the user config directory at
-`roast/config.yaml` (see [Config file location](#config-file-location)), or
-supplied with `--config`:
+### Config file
+
+For named profiles, use `roast/config.yaml` in your user config directory (see
+[Config file location](#config-file-location)) or pass `--config`:
 
 ```yaml
 version: 1
@@ -137,9 +119,240 @@ roles:
     profile: claude
   verifier:
     profile: verifier
+```
 
-# Optional: send each completed deterministic bundle directly to an
-# S3-compatible object store. Disabled unless explicitly enabled.
+A profile is a complete unit: model, `endpoint`, `protocol`, output-token limit,
+and credential source. Roast never infers a protocol or credential from a model
+name, and never reads configuration from the repository under review, so a
+checkout cannot redirect inference or supply credentials.
+
+`api_key_env` names an environment variable that is read only when the profile
+is selected. A literal `api_key` also works, but environment references are
+preferable. `version: 1` is required for new configs; Roast migrates its two
+legacy unversioned formats in memory, and rejects unknown fields and
+unsupported versions.
+
+### Credentials and precedence
+
+Command-line role flags override `ROAST_FINDER_*` / `ROAST_VERIFIER_*`
+variables, which override profiles. A role's credential is the first of:
+
+1. `ROAST_FINDER_API_KEY` or `ROAST_VERIFIER_API_KEY`;
+2. the profile's `api_key_env` or `api_key`;
+3. the provider's `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, but only when the
+   role's endpoint is that provider's default or its `OPENAI_BASE_URL` /
+   `ANTHROPIC_BASE_URL`.
+
+Provider variables are fallbacks, never overrides: a provider `*_BASE_URL`
+applies only to a profile with no `endpoint`, and the `OPENAI_*` variables
+apply only to `chat` and `responses` while `ANTHROPIC_*` apply only to
+`anthropic`. A profile with any other endpoint must name its credential, so a
+key in your shell is never sent implicitly to a gateway or a configuration
+template's endpoint. When a protocol override moves a role to another
+provider's endpoint, the profile's credential does not follow it. Flags and
+environment overrides follow the same rules, and `roast doctor` reports which
+source each role used.
+
+### Author routes
+
+When the invoking agent passes `--author-model` (or `ROAST_AUTHOR_MODEL`), the
+finder can switch to another profile by exact model name or model family, so a
+model is not reviewing its own work. Here `primary` and `independent` are
+profiles defined under `inference_profiles`:
+
+```yaml
+roles:
+  finder:
+    profile: primary
+    author_routes:
+      openai: independent
+      exact-author-model: independent
+```
+
+`roles.finder.pin: true` keeps the configured finder anyway, with a warning.
+
+### Other settings
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `review.excludes` | none | Git pathspecs excluded from every review, in addition to `--exclude`. |
+| `review.confidence_floor` | `0.6` | Findings below this finder confidence (0–1) are dropped before verification and listed under `dropped_findings`. `0` selects the default. |
+| `review.quick_confidence_floor` | `0.8` | The same floor for `--quick` reviews, which skip verification. |
+| `roles.finder.pin` | `false` | Ignore `author_routes` even when the author shares the finder's model family. |
+| `prompts.finder_code`, `prompts.finder_prose`, `prompts.verifier` | built in | Absolute paths to prompt overrides. |
+
+Runs record the profile name and resolved non-secret settings, never API keys.
+The invocation argv is recorded, so keep secrets out of command-line values.
+
+### Config file location
+
+Without `--config`, Roast reads `roast/config.yaml` from the user configuration
+directory:
+
+| Platform | Default path |
+| --- | --- |
+| macOS | `~/Library/Application Support/roast/config.yaml` |
+| Linux and other Unix | `$XDG_CONFIG_HOME/roast/config.yaml`, or `~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset |
+| Windows | `%AppData%\roast\config.yaml` |
+
+macOS and Windows ignore `XDG_CONFIG_HOME`; where it applies, it must be an
+absolute path. A missing default file is not an error. `roast doctor` reports
+the path it used.
+
+### Configuration URLs
+
+An organization can publish a secret-free configuration document, installed
+with `roast config init --from <https-url>`. The document must declare
+`version: 1`, may name credential environment variables, and must not contain
+credentials or control characters. A template can still name a variable such
+as `OPENAI_API_KEY` for its own endpoint, which sends that key there, so Roast
+prints a summary of each selected profile's endpoint and credential variable,
+and of any upload destination, when it installs a template.
+
+When stdin and stderr are terminals and no `--config` is given, `roast review`
+and `roast runs sync` also offer this prompt if the default config is missing
+and the roles cannot be resolved from the environment or flags, or if the
+config is unversioned or has Claude profiles using Chat Completions or
+Responses. A [presigned upload broker](#presigned-upload-broker) can serve the
+document.
+
+## Use
+
+Run Roast inside a Git repository:
+
+```sh
+roast review --task 'add retry handling'   # review the current changes
+roast review --staged --max-severity HIGH  # staged changes; exit 1 on HIGH+
+roast review --interactive                 # let the finder navigate the repo
+roast review --quick                       # finder only, no verification
+roast review --scope repo                  # survey the whole repository
+roast runs                                 # list local runs
+roast runs show <run-id>
+roast runs checkout <run-id>
+roast doctor
+```
+
+The default scope is committed changes since the best available main branch,
+plus uncommitted and untracked changes. Untracked files that look like secrets
+(`.env*`, `*.pem`, `*.key`, SSH keys such as `id_ed25519*`, and similar) are
+skipped with a note on stderr. JSON goes to stdout and Markdown to stderr;
+`--format` selects one.
+
+`--interactive` gives the finder several turns with the navigation tools. Small
+diffs (under 80 lines and 4 files) get a single structured call instead, and
+Roast says so; `ROAST_INTERACTIVE_MIN_DIFF_LINES` and
+`ROAST_INTERACTIVE_MIN_FILES` change those thresholds, and `0` disables them.
+`--quick` turns navigation off. `--scope repo` always navigates and rejects
+`--quick`.
+
+The finder and verifier must submit schema-validated results through a tool
+call. A role that never does gets bounded reminders within its limits; if it
+still fails, the run is reported incomplete, never clean.
+
+`roast doctor` validates profiles and credentials, lists each provider's
+models, makes one small tool-call request per configured model, and reports
+Git, gate, Agent Skill, upload, and release status. `--json` gives
+machine-readable output.
+
+### What is sent where
+
+Source code, diffs, prompts, tool schemas, and tool results go to the inference
+endpoints you configure, and run bundles go to your upload destination if you
+enable uploads. Review data goes nowhere else; Roast's only other network calls
+are the release check and configuration URLs you ask it to fetch.
+Review your providers' data-handling terms before using Roast on sensitive
+code. The [security model](docs/security-model.md) covers trust boundaries and
+artifacts in full.
+
+Each request carries an `X-Agent-Session-Id` that is stable across one model
+conversation's tool turns and retries and differs between conversations. It
+identifies a conversation, not a person or a whole run.
+
+## Resource limits
+
+Defaults are generous enough for slow local models, and every tunable limit is
+yours to change:
+
+| Control | Default | Override |
+| --- | ---: | --- |
+| Output tokens per model call | 32,768 | Profile `max_output_tokens`, `ROAST_{FINDER,VERIFIER}_MAX_OUTPUT_TOKENS`, or `--{finder,verifier}-max-output-tokens` |
+| Timeout per inference request | 10 minutes | `--request-timeout` / `ROAST_REQUEST_TIMEOUT`; `0` disables |
+| Interactive finder work deadline | 10 minutes | `--deadline` / `ROAST_DEADLINE`; `0` disables |
+| Repository-survey work deadline | 25 minutes | `--deadline` / `ROAST_DEADLINE`; `0` disables |
+| Provider/structured-output attempts | 4 | `--max-attempts` / `ROAST_MAX_ATTEMPTS` |
+| Shared finder/verifier token budget | 3,000,000 | `--max-tokens-total` / `ROAST_MAX_TOTAL_TOKENS`; `0` disables |
+| Findings sent to the verifier | 25 | `--max-verified` / `ROAST_MAX_VERIFIED`; `0` disables |
+| Diff bytes, normal / quick (also caps each file's section) | 1,000,000 / 200,000 | `ROAST_MAX_DIFF_BYTES` |
+| File-context bytes, normal / quick | 400,000 / 100,000 | `ROAST_MAX_FILE_CTX_BYTES` |
+| Initial finder prompt bytes | 8,000,000 | `ROAST_MAX_PROMPT_BYTES` |
+
+Interactive runs default to 16 finder turns and surveys to 40 (`--max-turns`).
+Past roughly 3 MB of conversation, Roast tells the finder to stop exploring and
+submit; a work deadline leaves a separate 90-second window for that final
+submission.
+
+Fixed caps protect memory and artifacts: 16 MiB per captured provider response;
+64 KiB per `git_diff` window and per `read_file`, `grep_repo`, or `list_files`
+result; `read_file` lines truncated at 32 KiB, 2,000 lines per window;
+`grep_repo` lines truncated at 2 KiB; at most 500 listed paths and 200 matching
+lines.
+
+Invalid or negative overrides are usage errors, not silent fallbacks. Resolved
+limits are recorded with each run.
+
+## Exit codes
+
+| Code | Meaning | `error_category` |
+| ---: | --- | --- |
+| 0 | Clean completion | `none` |
+| 1 | A finding met the `--max-severity` threshold | `findings` |
+| 2 | Invalid invocation or configuration | `usage` |
+| 3 | Inference authentication failed | `auth` |
+| 4 | Operational failure or incomplete result | `endpoint`, `resource_limit`, or `partial` |
+| 5 | Cancelled or terminated | `cancelled` |
+
+`--error-format json` writes diagnostics to stderr as JSON without changing
+review output:
+
+```json
+{"error_category":"endpoint","message":"...","exit_code":4}
+```
+
+## Run records
+
+Every non-empty review is recorded under `$XDG_DATA_HOME/roast` (default
+`~/.local/share/roast`; override with `ROAST_RECORD_DIR`). A run holds the
+secret-free role configuration, argv, exact prompts and reviewed input, raw
+provider response bodies (streamed SSE kept byte-for-byte, including partial
+streams from failed attempts), usage, results, a Git snapshot, and a
+deterministic `bundle.tar.zst` whose manifest lists every artifact's size and
+SHA-256. Requests, HTTP headers, and credentials are never recorded. Run
+directories are kept until you delete them.
+
+The navigation tools read the snapshot, not the live checkout: the captured
+index for `--staged`, otherwise the captured worktree including non-ignored
+untracked files. Editing files mid-review changes nothing the models see.
+
+Snapshots are Git refs under `refs/roast/snapshots/`. `roast runs checkout
+<run-id> [dir]` restores one as a detached linked worktree, with the reviewed
+contents on disk and the reviewed index staged, so `git status` and `git diff`
+show exactly what was reviewed. `roast runs prune` removes snapshot refs older
+than 30 days (`--dry-run` to preview) but never run directories.
+`ROAST_SNAPSHOT=0` skips snapshot capture, so such a run cannot be checked out.
+
+## Run uploads
+
+Uploads are off by default. When enabled, Roast uploads each completed review's
+bundle on a best-effort basis; failures never change the review result and stay
+pending for `roast runs sync`. `roast runs status` shows upload state. Runs
+recorded before you opted in are uploaded only with
+`roast runs sync --include-existing`. Running `roast runs sync` is itself an
+explicit upload request, so it uploads even while automatic upload is disabled.
+
+To upload directly to an S3-compatible store (AWS S3, MinIO, Cloudflare R2, and
+others):
+
+```yaml
 upload:
   enabled: true
   backend: s3
@@ -151,349 +364,40 @@ upload:
   secret_key_env: ROAST_UPLOAD_SECRET_KEY
   # session_token_env: ROAST_UPLOAD_SESSION_TOKEN
   path_style: false
-  # allow_insecure_http: false
 ```
 
-Organizations which do not distribute object-store credentials can instead
-use a presigned upload broker:
+Credentials come only from the named environment variables, never from AWS
+profiles, SSO, or instance metadata. Objects are content-addressed at
+`<prefix>/sha256/<bundle-digest>.tar.zst`. Endpoints must use HTTPS unless on
+loopback; `allow_insecure_http: true` permits plaintext on a trusted local
+network and must never be used across an untrusted one.
+
+Organizations that don't hand out storage credentials can run a
+[presigned upload broker](#presigned-upload-broker) instead:
 
 ```yaml
 upload:
   enabled: true
   backend: presigned
   endpoint: https://roast-uploads.example.com
-  token_env: ROAST_UPLOAD_TOKEN
+  token_env: ROAST_UPLOAD_TOKEN   # or a literal upload.token in your own config
 ```
 
-`version: 1` identifies the public configuration contract. Roast also accepts
-two legacy unversioned formats and migrates them in memory: inline
-role settings using `api`/`author_flip`, and named profiles using `base_url`.
-An explicit unsupported version or an unknown field is an error.
-The old inline-role format recognizes and discards its retired `gate` and
-`sourcebot` sections; they are not valid fields in version-1 configuration.
-
-Each profile names a model and the HTTP `endpoint` that serves it. `protocol`
-selects the Fantasy wire adapter (`chat`, `responses`, or `anthropic`). The
-provider is simply the service behind that endpoint; Roast does not infer a
-wire protocol or credential boundary from the model name.
-
-`api_key_env` names an environment variable; its value is resolved only when
-the profile is selected. A literal `api_key` is also supported in the
-user-owned config, but environment references are preferable. Role-specific
-`ROAST_FINDER_*` and `ROAST_VERIFIER_*` variables override profiles, and
-command-line role flags override both. Roast does not read repository-local
-configuration, so a checkout cannot redirect inference or supply credentials.
-
-Provider variables are a fallback, never an override. `OPENAI_API_KEY` and
-`OPENAI_BASE_URL` apply only to `chat` and `responses`; `ANTHROPIC_API_KEY` and
-`ANTHROPIC_BASE_URL` apply only to `anthropic`. A provider `*_BASE_URL` applies
-only to a profile that sets no `endpoint`. A role's credential is the first of:
-
-1. `ROAST_FINDER_API_KEY` or `ROAST_VERIFIER_API_KEY`;
-2. the profile's `api_key_env` or `api_key`;
-3. the provider `*_API_KEY`, only when the role's endpoint is that provider's
-   default endpoint or the same provider's `*_BASE_URL`.
-
-A profile with any other endpoint must name its credential, so a provider key
-from your shell is never sent implicitly to a gateway or a template's endpoint.
-Naming it is explicit, not restricted: a profile, including one installed from
-a template, may pair `endpoint: https://models.example.org/v1` with
-`api_key_env: OPENAI_API_KEY`, and that key then goes to that endpoint; the
-install summary shows the credential variable of each profile that a role or
-author route selects, and the upload credential variables. When a
-protocol override moves a role from one provider's endpoint to another's, the
-profile's credential does not follow it. Environment overrides and
-command-line flags apply these rules identically. `roast doctor` reports which
-source each role used.
-
-For the `s3` backend, upload credentials are resolved only from the environment variables named by
-`access_key_env`, `secret_key_env`, and optional `session_token_env`. Roast
-does not consult AWS profiles, SSO, instance metadata, or another provider
-credential chain. `endpoint`, `region`, and `path_style` support services such
-as MinIO, Cloudflare R2, and other S3-compatible object stores. Upload
-endpoints must use HTTPS unless they are on loopback. Plaintext HTTP on another
-trusted local network requires `allow_insecure_http: true`; it sends bundle
-contents and SigV4 authentication material without transport encryption and
-must never be used across an untrusted network.
-
-The `presigned` backend sends the configured bearer token only to the broker's
-control-plane endpoint. The broker returns a short-lived PUT URL and required
-signed headers; Roast sends the bundle directly to object storage without the
-bearer token, then asks the broker to verify completion. The broker owns the
-bucket name, object prefix, and storage credentials.
-
-When the invoking agent supplies `--author-model` or `ROAST_AUTHOR_MODEL`, the
-finder can select another complete profile by exact model name or model family:
-
-```yaml
-version: 1
-
-inference_profiles:
-  primary:
-    endpoint: https://api.openai.com/v1
-    model: gpt-reviewer
-    protocol: responses
-    api_key_env: OPENAI_API_KEY
-  independent:
-    endpoint: https://api.anthropic.com/v1
-    model: claude-reviewer
-    protocol: anthropic
-    api_key_env: ANTHROPIC_API_KEY
-
-roles:
-  finder:
-    profile: primary
-    author_routes:
-      openai: independent
-      exact-author-model: independent
-```
-
-The selected profile contributes its model, endpoint, protocol, output-token
-limit, and credential source as one unit. Roast records the profile name and
-resolved non-secret fields, but excludes API keys and captured `*_API_KEY`
-environment values from run artifacts. The invocation argv is recorded, so do
-not place secrets in command-line values. Prompt overrides are user-owned files:
-
-```yaml
-prompts:
-  finder_code: /absolute/path/to/finder.txt
-  finder_prose: /absolute/path/to/prose-finder.txt
-  verifier: /absolute/path/to/verifier.txt
-```
-
-### Other settings
-
-| Key | Default | Effect |
-| --- | --- | --- |
-| `review.excludes` | none | Git pathspecs left out of every review, in addition to any `--exclude` flags. |
-| `review.confidence_floor` | `0.6` | Findings whose finder confidence (0 to 1) is below this value are dropped before verification and listed under `dropped_findings`. `0` selects the default. |
-| `review.quick_confidence_floor` | `0.8` | The same floor for `--quick` reviews, which skip verification. `0` selects the default. |
-| `roles.finder.pin` | `false` | Keep the configured finder even when the author model shares its model family. `author_routes` are not consulted, and Roast warns that the review is less independent. |
-| `upload.token` | none | A literal bearer token for the `presigned` backend, instead of `token_env`. Like `api_key`, it belongs only in the user-owned config; a configuration URL cannot supply it. |
-
-### Config file location
-
-Without `--config`, Roast reads `roast/config.yaml` from the operating
-system's user configuration directory:
-
-| Platform | Default path |
-| --- | --- |
-| macOS | `~/Library/Application Support/roast/config.yaml` |
-| Linux and other Unix | `$XDG_CONFIG_HOME/roast/config.yaml`, or `~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset |
-| Windows | `%AppData%\roast\config.yaml` |
-
-macOS and Windows ignore `XDG_CONFIG_HOME`; where it applies, it must be an
-absolute path. A missing default file is not an error: Roast uses its built-in
-defaults and the environment. `roast doctor` reports the path it selected.
-
-### Configuration URLs
-
-An organization can publish a secret-free configuration document for users to
-install with `roast config init --from <https-url>`. When stdin and stderr are
-terminals and no `--config` is given, `roast review` and `roast runs sync` also
-offer to install one if the default config file is missing and the finder and
-verifier cannot be resolved from the environment or flags, or if the file is
-unversioned or has Claude profiles using Chat Completions or Responses. The
-document must declare `version: 1` and may name credential environment
-variables, but must not contain credentials or control characters. A presigned
-upload broker can serve it (see
-[Presigned upload broker](#presigned-upload-broker)). To migrate an older
-config, including the opt-in import of its existing credential, see
-[Upgrading from pre-1.1 configurations](docs/upgrading.md).
-
-## Use
-
-Run Roast inside a Git repository:
-
-```sh
-roast review --task 'add retry handling'
-roast review --staged --max-severity HIGH
-roast review --interactive
-roast review --quick
-roast review --scope repo
-roast runs
-roast runs show <run-id>
-roast runs checkout <run-id>
-roast runs status
-roast runs sync
-roast doctor
-```
-
-`roast doctor` validates the resolved profiles and credentials, performs an
-authenticated `GET` of each provider's `/models` endpoint, then makes one small
-tool-submission inference request through each configured model and protocol. It
-also reports Git/gate, Agent Skill, upload, and release status. Use `--json` for
-machine-readable results.
-
-Finalization uses automatic tool selection with only the result tool available.
-Roast accepts only a schema-validated tool submission, not free-form text. Missing
-submissions receive bounded reminders within the existing attempt, token, and
-deadline limits; an exhausted run is incomplete, never silently clean.
-
-`--interactive` lets the finder explore the checkout over several turns with
-the repository-navigation tools. A diff of fewer than 80 lines that touches
-fewer than 4 files gets a single structured finder call instead, and Roast says
-so on stderr. `ROAST_INTERACTIVE_MIN_DIFF_LINES` and
-`ROAST_INTERACTIVE_MIN_FILES` change those thresholds; setting either to `0`
-keeps the interactive loop regardless of diff size. `--quick` overrides
-`--interactive` and the thresholds, turning navigation off. A
-`--scope repo` survey always navigates and rejects `--quick`.
-
-On the first interactive review in a repository, Roast asks once whether to
-install its staged-content pre-commit gate. The answer is stored in local Git
-config for that repository; a decline is not prompted again. Non-interactive
-runs never install a hook without recorded consent. Manage the decision
-explicitly with `roast gate enable|status|disable`. Set `ROAST_NO_HOOK=1` to
-skip this first-run check entirely; explicit `roast gate` commands still work.
-
-Shared `core.hooksPath` dispatchers still require an opt-in in each repository's
-local Git config. Disabling one repository preserves a custom hooks directory's
-dispatcher for other repositories.
-
-The default scope includes committed changes since the best available main
-branch plus uncommitted and untracked changes. Untracked files whose names look
-like secrets, such as `.env*`, `*.pem`, `*.key`, and SSH keys like
-`id_ed25519*`, are skipped with a note on stderr. JSON is written to stdout and
-Markdown to stderr; select one with `--format`.
-
-Source code, diffs, prompts, tool schemas, and local tool results are sent to
-the inference endpoints you configure. Chat and Responses use bearer
-authorization; native Anthropic uses `x-api-key`. When upload is enabled, the
-complete run bundle is also sent to the configured object-store endpoint.
-Roast sends no review data anywhere else. Review your providers' data-handling
-terms before using Roast on sensitive repositories. See the
-[security model](docs/security-model.md) for the complete trust and artifact
-boundaries.
-
-Every inference request carries an `X-Agent-Session-Id` identifying its Roast
-conversation. Tool turns, structured-output corrections, and retries retain the
-same ID. Separate finder calls and each independent verifier conversation get
-different IDs, including when they share a client or run concurrently. The ID
-does not identify a person and is not a per-request ID or a whole-review run ID.
-
-## Resource limits
-
-Roast applies the same resource controls to hosted providers, gateways, and
-local inference servers. Defaults are intentionally generous enough for slow
-local models, and every duration or run-level ceiling that may need tuning is
-operator-controlled:
-
-| Control | Default | Override |
-| --- | ---: | --- |
-| Output tokens per model call | 32,768 | Profile `max_output_tokens`, `ROAST_FINDER_MAX_OUTPUT_TOKENS` / `ROAST_VERIFIER_MAX_OUTPUT_TOKENS`, or `--finder-max-output-tokens` / `--verifier-max-output-tokens` |
-| Timeout per inference request | 10 minutes | `--request-timeout` / `ROAST_REQUEST_TIMEOUT`; `0` disables |
-| Interactive finder work deadline | 10 minutes | `--deadline` / `ROAST_DEADLINE`; `0` disables |
-| Repository-survey work deadline | 25 minutes | `--deadline` / `ROAST_DEADLINE`; `0` disables |
-| Provider/structured-output attempts | 4 | `--max-attempts` / `ROAST_MAX_ATTEMPTS` |
-| Shared finder/verifier token budget | 3,000,000 | `--max-tokens-total` / `ROAST_MAX_TOTAL_TOKENS`; `0` disables |
-| Findings sent to the verifier | 25 | `--max-verified` / `ROAST_MAX_VERIFIED`; `0` disables |
-| Diff bytes in a normal/quick prompt (also caps each file's section) | 1,000,000 / 200,000 | `ROAST_MAX_DIFF_BYTES` |
-| File-context bytes in a normal/quick prompt | 400,000 / 100,000 | `ROAST_MAX_FILE_CTX_BYTES` |
-| Initial finder prompt bytes | 8,000,000 | `ROAST_MAX_PROMPT_BYTES` |
-
-Interactive finder runs default to 16 turns; repository surveys default to 40.
-`--max-turns` changes either value. Once an agent conversation grows beyond
-roughly 3 MB, Roast tells it to stop exploring and submit its accumulated
-result. A finder work deadline gets a separate 90-second final-submission
-window so the deadline does not discard work already found.
-
-Some defensive caps are intentionally not configurable: one captured provider
-response may be at most 16 MiB; one `git_diff` tool window is at most 64 KiB;
-`read_file` truncates individual lines at 32 KiB and serves at most 2,000 lines
-per window; `grep_repo` truncates each matching line at 2 KiB; `list_files` and
-`grep_repo` return at most 500 paths and 200 matching lines respectively; and
-every `read_file`, `grep_repo`, and `list_files` result is capped at 64 KiB.
-These caps protect memory, prompts, and run artifacts rather than expressing a
-provider's context-window limit.
-
-Invalid or negative resource overrides are usage errors instead of silently
-falling back to another value. Resolved limits are recorded in run metadata.
-
-## Exit and error contract
-
-Roast preserves this process exit-code contract:
-
-| Code | Meaning | Machine category |
-| ---: | --- | --- |
-| 0 | Clean completion | `none` |
-| 1 | A finding met the requested `--max-severity` gate | `findings` |
-| 2 | Invalid invocation or configuration | `usage` |
-| 3 | Inference authentication failed | `auth` |
-| 4 | Operational failure or incomplete result | `endpoint`, `resource_limit`, or `partial` |
-| 5 | Caller cancellation or termination | `cancelled` |
-
-Use `--error-format json` for stable machine-readable diagnostics on stderr:
-
-```json
-{"error_category":"endpoint","message":"...","exit_code":4}
-```
-
-This setting does not change successful review output: `--format json` still
-writes the result to stdout, while diagnostics remain on stderr.
-
-Every non-empty review creates a local run under `$XDG_DATA_HOME/roast`, or
-`~/.local/share/roast` when that variable is unset (override either with
-`ROAST_RECORD_DIR`). It records secret-free role configuration, invocation
-argv, exact prompts and reviewed input, raw provider response bodies,
-normalized usage, results, a Git snapshot, and a deterministic
-`bundle.tar.zst`. Provider requests, HTTP headers, and credentials are not
-recorded. The snapshot and digests make a run reproducible by external tooling
-without recording API keys or other credential values.
-
-Inference uses each configured protocol's native streaming implementation in
-Fantasy. `provider-responses.jsonl` identifies each captured body's
-`content_type`: JSON bodies remain JSON values, while `text/event-stream`
-bodies are stored as JSON strings containing the original SSE bytes, including
-partial streams from failed attempts. No inference protocol conversion is used.
-
-Repository-navigation tools read that immutable snapshot during the run. For
-staged reviews they read the captured index; other reviews read the captured
-worktree, including captured non-ignored untracked files. Editing the checkout
-after inference starts does not change finder or verifier context.
-
-Snapshots are Git refs under `refs/roast/snapshots/` in the reviewed
-repository. `roast runs checkout <run-id> [dir]` restores one as a detached
-linked worktree of that repository: `HEAD` is the reviewed commit, the
-captured worktree contents are on disk, and the captured index is staged, so
-`git status` and `git diff` show what was reviewed. Without `dir`, Roast
-creates a temporary directory. It prints the worktree path on stdout and the
-`git worktree remove` command that cleans it up on stderr. Set
-`ROAST_SNAPSHOT=0` to skip snapshot capture; such a run records no snapshot
-ref, notes that it cannot be replayed, and cannot be checked out.
-
-Local run artifacts are retained indefinitely and are never deleted
-automatically. `roast runs prune` only removes snapshot refs in the current
-repository, defaults to refs older than 30 days, and supports `--dry-run`; it
-does not delete run directories or bundles.
-
-Each archive is a `roast-run-bundle` v1 bundle. Its generated
-`bundle-manifest.json` inventories every archived artifact with its byte size
-and SHA-256 digest. Roast verifies both new and reused bundles before accepting
-them and refuses symlinked or other non-regular run artifacts.
-
-When `upload.enabled` is true, Roast makes a best-effort upload after each
-completed review. Direct-S3 objects use the content-addressed key
-`<prefix>/sha256/<bundle-digest>.tar.zst`; the broker assigns a unique key and
-binds its grant to the bundle's size and SHA-256. Upload failures never change the review result and remain pending
-for `roast runs sync`; `roast runs status` reports local upload state. Runs
-which predate the first opt-in are not uploaded unless sync is given
-`--include-existing`. Invoking `runs sync` is itself an explicit upload request
-and works even while automatic upload is disabled. Upload bookkeeping is
-stored outside run directories and is never included in a bundle.
+The bearer token goes only to the broker. The broker returns a short-lived,
+content-bound PUT URL; Roast uploads the bundle straight to storage without the
+token, then asks the broker to verify it.
 
 ## Presigned upload broker
 
-This repository includes the stateless `roast-broker` service and a root
-`Dockerfile`. It expects authentication to be enforced by a trusted reverse
-proxy. For `/api/v1/roast/runs` and its completion endpoint, the proxy must
-remove the configured principal header from incoming requests, validate
-`Authorization: Bearer`, and inject the verified principal. `/healthz` and the
-optional, secret-free `/config/v1` are intentionally unauthenticated so a new
-client can fetch configuration before it has credentials. Never expose the
-container directly to untrusted clients, because all routes share one listener
-and the API trusts only the proxy-injected principal header.
+`roast-broker` is a small stateless service, built by the root `Dockerfile`. It
+relies on a trusted reverse proxy for authentication: on `/api/v1/roast/runs`
+and its completion endpoint, the proxy must strip any incoming principal
+header, validate `Authorization: Bearer`, and inject the verified principal.
+`/healthz` and the optional `/config/v1` are unauthenticated so new clients can
+fetch configuration. Never expose the container directly; every route shares
+one listener, and the API trusts the principal header.
 
-Required environment variables are:
+Required environment:
 
 ```text
 ROAST_BROKER_PRINCIPAL_HEADER=X-Forwarded-Email
@@ -502,35 +406,29 @@ ROAST_BROKER_S3_ENDPOINT=https://objects.example.com
 ROAST_BROKER_S3_BUCKET=roast-runs
 ```
 
-Static S3-compatible credentials may be supplied with
-`ROAST_BROKER_S3_ACCESS_KEY`, `ROAST_BROKER_S3_SECRET_KEY`, and optional
-`ROAST_BROKER_S3_SESSION_TOKEN`. With those unset, the MinIO client uses its
-IAM/workload-identity credential source. Optional settings include
-`ROAST_BROKER_S3_REGION`, `ROAST_BROKER_S3_PREFIX`,
+Storage credentials come from `ROAST_BROKER_S3_ACCESS_KEY`,
+`ROAST_BROKER_S3_SECRET_KEY`, and optional `ROAST_BROKER_S3_SESSION_TOKEN`, or
+from the MinIO client's IAM/workload-identity chain when those are unset. Also
+available: `ROAST_BROKER_S3_REGION`, `ROAST_BROKER_S3_PREFIX`,
 `ROAST_BROKER_S3_PATH_STYLE`, `ROAST_BROKER_MAX_BUNDLE_BYTES`, and
-`ROAST_BROKER_LISTEN_ADDRESS` (default `:8080`, all interfaces).
+`ROAST_BROKER_LISTEN_ADDRESS` (default `:8080`). Set
+`ROAST_BROKER_CLIENT_CONFIG_FILE` to a validated, secret-free client config to
+serve it at `/config/v1` as a configuration URL; startup fails if it is
+unversioned, invalid, or contains credentials.
 
-Mounting a validated, secret-free client config and setting
-`ROAST_BROKER_CLIENT_CONFIG_FILE` serves it at `/config/v1`, making the broker
-itself a configuration URL. Startup fails if that document is unversioned,
-invalid, or contains inline inference or broker credentials.
+The protocol has three steps:
 
-The version-1 broker protocol is deliberately small:
+1. `POST /api/v1/roast/runs` declares the run ID, bundle size, and SHA-256, and
+   returns a presigned PUT and an opaque completion token.
+2. The client PUTs the bundle with exactly the returned headers and no broker
+   credential.
+3. `POST /api/v1/roast/runs/{run_id}/complete` presents the token; the broker
+   checks ownership and the stored object's size and checksum.
 
-- `POST /api/v1/roast/runs` declares the run ID, bundle length, and SHA-256 and
-  returns a content-bound presigned PUT plus an opaque completion token.
-- The client performs the PUT with exactly the returned headers and without
-  its broker credential.
-- `POST /api/v1/roast/runs/{run_id}/complete` presents the opaque token; the
-  broker verifies principal ownership and the stored object's length and
-  checksum.
-
-Each grant uses a unique object key, so the broker requires no database.
-Operators should configure bucket lifecycle expiration for abandoned uploads.
+Each grant gets a unique object key, so the broker needs no database. Configure
+bucket lifecycle expiration to clean up abandoned uploads.
 
 ## Pre-commit gate
-
-The optional local commit gate is explicit:
 
 ```sh
 roast gate enable
@@ -538,39 +436,35 @@ roast gate status
 roast gate disable
 ```
 
-It runs a `--quick` review of the commit's staged content and fails open on
-operational errors: a missing binary, failed inference, empty output, or
-timeout prints a warning and allows the commit. It blocks only when a finding
-meets the severity threshold. The hook reads these variables when it runs:
+The gate runs a `--quick` review of the staged content on each commit and
+blocks only when a finding meets the severity threshold. It fails open: a
+missing binary, failed inference, empty output, or timeout prints a warning and
+allows the commit.
+
+The first interactive review in a repository asks once whether to enable it and
+records the answer in local Git config; non-interactive runs never install a
+hook without that consent. `ROAST_NO_HOOK=1` skips the question. With a shared
+`core.hooksPath`, each repository still needs its own opt-in, and disabling one
+leaves the dispatcher in place for the others.
 
 | Variable | Effect |
 | --- | --- |
-| `ROAST_SKIP` | Any non-empty value, conventionally `ROAST_SKIP=1`, bypasses one commit. |
-| `ROAST_BIN` | Path of the `roast` binary to run instead of the one on `PATH`. |
-| `ROAST_GATE_TIMEOUT` | Seconds before an unfinished review is stopped and the commit allowed. Defaults to `180`; `0` disables the watchdog, and a non-numeric value uses the default. |
-| `ROAST_GATE_SEVERITY` | Lowest severity that blocks the commit: `INFO`, `LOW`, `MEDIUM`, `HIGH` (the default), or `CRITICAL`. An invalid value makes the review fail, so the commit is allowed. |
+| `ROAST_SKIP` | Any non-empty value (conventionally `1`) skips one commit. |
+| `ROAST_BIN` | The `roast` binary to run instead of the one on `PATH`. |
+| `ROAST_GATE_TIMEOUT` | Seconds before an unfinished review is stopped and the commit allowed. Default `180`; `0` disables; a non-numeric value uses the default. |
+| `ROAST_GATE_SEVERITY` | Lowest blocking severity: `INFO`, `LOW`, `MEDIUM`, `HIGH` (default), or `CRITICAL`. An invalid value fails the review, so the commit is allowed. |
 
-## Pull request titles
+## Contributing
 
-Pull requests are squash-merged, so each PR title becomes the commit on `main`
-and an entry in the release notes. Titles need a conventional `type:` prefix,
-which a required check enforces; commits without one are left out of the
-release notes. `feat:` releases a minor version, a breaking change (`feat!:`,
-or a `BREAKING CHANGE:` footer) a major version, and any other prefix, such as
-`fix:` or `docs:`, a patch. Write the title as the changelog line you want.
-Maintainer release steps are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Pull requests are squash-merged, so each title becomes a commit on `main` and a
+release-notes entry. Titles need a conventional `type:` prefix (checked in CI):
+`feat:` releases a minor version, `feat!:` or a `BREAKING CHANGE:` footer a
+major version, and any other type, such as `fix:` or `docs:`, a patch. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for development checks and release steps,
+and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 
-This project is dual-licensed under MIT and Apache 2.0:
-
-- [MIT License](LICENSE-MIT.txt)
-- [Apache License, Version 2.0](LICENSE-APACHE.txt)
-
-Downstream projects and end users may choose either license individually, or
-both together, at their discretion.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution checks,
-and [SECURITY.md](SECURITY.md) for the supported-version and private-reporting
-policy. Runtime dependencies retain their own licenses; CI checks the complete
-linked dependency graph against the project's allowed license set.
+Dual-licensed under [MIT](LICENSE-MIT.txt) or
+[Apache 2.0](LICENSE-APACHE.txt), at your option. Dependencies keep their own
+licenses; CI checks the linked dependency graph against the allowed set.
