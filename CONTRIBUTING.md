@@ -82,7 +82,9 @@ release API, so Roast does not advertise an upgrade before downloads are ready.
 GoReleaser updates `Casks/roast.rb` on `main` in
 `bluesky-social/homebrew-tap` with this repository's asset URLs and checksums.
 Existing `bluesky-social/tap` installations keep the same package name and
-upgrade with `brew upgrade --cask roast`.
+upgrade with `brew upgrade --cask bluesky-social/tap/roast`, or with a plain
+`brew upgrade` once the tap is trusted (`brew trust --tap bluesky-social/tap`;
+Homebrew 7 and later).
 
 The `release-please` workflow runs on every push to `main` and hourly during
 the weekday release window, keeping a standing `chore(main): release X.Y.Z`
