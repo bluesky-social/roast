@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.2 (2026-11-05)
+
+## What's Changed
+* fix: tighten the secret denylist and sanitize template output before publication by @amckinley in https://github.com/bluesky-social/roast/pull/114
+* ci: publish the cask with a minted App token by @amckinley in https://github.com/bluesky-social/roast/pull/116
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/117
+* chore(deps): update module go.yaml.in/yaml/v3 to v3.0.6 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/118
+* fix(deps): update module go.yaml.in/yaml/v3 to v3.0.6 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/119
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.2.1...v1.2.2
+
 ## 1.2.1 (2026-11-01)
 
 ## What's Changed
