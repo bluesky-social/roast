@@ -15,12 +15,12 @@ read-only file, grep, and listing tools.
 With Homebrew:
 
 ```sh
-brew trust --tap bluesky-social/tap
 brew install --cask bluesky-social/tap/roast
 ```
 
-Homebrew requires trusting third-party taps; without it, `brew update` skips
-the tap and `brew upgrade` refuses the cask, so Roast would stop updating.
+Homebrew only loads casks from third-party taps you trust, though naming the
+cask in full (as above) counts. For a plain `brew upgrade` to update Roast,
+also run `brew trust --tap bluesky-social/tap`.
 
 Or download an archive for macOS, Linux, or Windows (amd64 and arm64) from
 [GitHub Releases](https://github.com/bluesky-social/roast/releases) and verify
