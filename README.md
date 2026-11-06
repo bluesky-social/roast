@@ -183,6 +183,7 @@ roles:
 | `review.confidence_floor` | `0.6` | Findings below this finder confidence (0–1) are dropped before verification and listed under `dropped_findings`. `0` selects the default. |
 | `review.quick_confidence_floor` | `0.8` | The same floor for `--quick` reviews, which skip verification. |
 | `roles.finder.pin` | `false` | Ignore `author_routes` even when the author shares the finder's model family. |
+| `inference_profiles.<name>.session_header` | none | Also send the per-conversation session ID under this header name, for gateways that key sessions on their own header (for example `x-opencode-session`). It must be a valid header name and cannot name a credential or framing header, or one Roast or the provider SDK sets. |
 | `prompts.finder_code`, `prompts.finder_prose`, `prompts.verifier` | built in | Absolute paths to prompt overrides. |
 
 Runs record the profile name and resolved non-secret settings, never API keys.
@@ -282,7 +283,8 @@ artifacts in full.
 
 Each request carries an `X-Agent-Session-Id` that is stable across one model
 conversation's tool turns and retries and differs between conversations. It
-identifies a conversation, not a person or a whole run.
+identifies a conversation, not a person or a whole run. A profile's
+`session_header` sends the same value under one more header name as well.
 
 ## Resource limits
 

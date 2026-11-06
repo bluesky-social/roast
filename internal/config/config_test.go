@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -524,6 +525,61 @@ func TestLoadAllowsExplicitLocalPlaintextUpload(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(writeConfig(t, body)); err != nil {
 				t.Fatalf("expected local plaintext endpoint to be accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadSessionHeader(t *testing.T) {
+	for _, header := range []string{"x-opencode-session", "X-Gateway-Session", "!#$%&'*+-.^_`|~09azAZ", "X-" + strings.Repeat("s", 62)} {
+		t.Run(header, func(t *testing.T) {
+			path := writeConfig(t, "version: 1\ninference_profiles:\n  gateway:\n    endpoint: https://gateway.example/v1\n    model: gateway-model\n    protocol: chat\n    session_header: "+strconv.Quote(header)+
+				"\n  plain:\n    model: plain-model\nroles:\n  finder:\n    profile: gateway\n  verifier:\n    profile: plain\n")
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finder, err := cfg.ResolveRole("finder")
+			if err != nil {
+				t.Fatal(err)
+			}
+			verifier, err := cfg.ResolveRole("verifier")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finder.SessionHeader != header || verifier.SessionHeader != "" {
+				t.Fatalf("session headers = %q, %q; want %q, none", finder.SessionHeader, verifier.SessionHeader, header)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidSessionHeader(t *testing.T) {
+	cases := map[string]string{}
+	for _, name := range []string{
+		"Authorization", "X-Api-Key", "Proxy-Authorization", "Cookie", "Host",
+		"Content-Type", "Content-Length", "Transfer-Encoding", "Connection", "User-Agent",
+		"Anthropic-Version", "Anthropic-Beta", "OpenAI-Organization", "OpenAI-Project",
+		"X-Agent-Session-Id",
+		// Message framing, connection control, and other SDK or transport headers.
+		"Content-Encoding", "Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Upgrade", "Expect",
+		"Accept", "Accept-Encoding", "Anthropic-Workspace-Id", "X-Stainless-Retry-Count", "X-Stainless-Future-Header",
+	} {
+		for _, spelling := range []string{name, strings.ToLower(name), strings.ToUpper(name)} {
+			cases[spelling] = "is reserved"
+		}
+	}
+	for _, name := range []string{
+		"x opencode session", "x-opencode-session:", " x-opencode-session", "x-session\t", "x-sessión",
+		"x/session", "(session)", `x"session`, "x-session\r\nX-Injected: 1", "X-" + strings.Repeat("s", 63),
+	} {
+		cases[name] = "must be an HTTP header name"
+	}
+	for header, want := range cases {
+		t.Run(header, func(t *testing.T) {
+			_, err := Load(writeConfig(t, "version: 1\ninference_profiles:\n  gateway:\n    model: m\n    session_header: "+strconv.Quote(header)+"\n"))
+			if err == nil || !strings.Contains(err.Error(), "inference_profiles.gateway.session_header") || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err = %v, want a session_header error containing %q", err, want)
 			}
 		})
 	}

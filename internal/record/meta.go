@@ -81,6 +81,7 @@ type RoleMeta struct {
 	Protocol        string `json:"protocol"`
 	API             string `json:"api,omitempty"` // pre-profile run compatibility
 	MaxOutputTokens int    `json:"max_output_tokens"`
+	SessionHeader   string `json:"session_header,omitempty"`
 	PromptDigest    string `json:"prompt_digest,omitempty"`
 }
 

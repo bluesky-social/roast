@@ -122,10 +122,11 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			results = append(results, doctorResult{name + "-profile", doctorFail, validateErr.Error()})
 			continue
 		}
-		results = append(results, doctorResult{
-			Name: name + "-profile", Status: doctorPass,
-			Detail: fmt.Sprintf("%s: %s via %s at %s with credential %s", role.Profile, role.Model, role.Protocol, role.BaseURL, role.Credential),
-		})
+		detail := fmt.Sprintf("%s: %s via %s at %s with credential %s", role.Profile, role.Model, role.Protocol, role.BaseURL, role.Credential)
+		if role.SessionHeader != "" {
+			detail += ", session header " + role.SessionHeader
+		}
+		results = append(results, doctorResult{Name: name + "-profile", Status: doctorPass, Detail: detail})
 		results = append(results, doctorEndpointCheck(ctx, client, name, role))
 		results = append(results, doctorRoundtripCheck(ctx, name, role))
 	}
@@ -149,7 +150,7 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 	defer cancel()
 	client, err := llm.New(probeContext, llm.ClientConfig{
 		Role: name, BaseURL: role.BaseURL, APIKey: role.APIKey, Model: role.Model,
-		Protocol: role.Protocol, MaxOutputTokens: maxOutputTokens,
+		Protocol: role.Protocol, MaxOutputTokens: maxOutputTokens, SessionHeader: role.SessionHeader,
 		MaxAttempts: 1, RequestTimeout: 15 * time.Second,
 	})
 	if err != nil {

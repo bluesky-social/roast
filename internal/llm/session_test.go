@@ -38,6 +38,9 @@ func TestProviderConversationIdentity(test *testing.T) {
 				if !strings.HasPrefix(sessionID, "roast-") {
 					test.Errorf("session ID = %q", sessionID)
 				}
+				if got := request.Header.Values("X-Opencode-Session"); len(got) != 1 || got[0] != sessionID {
+					test.Errorf("configured session header = %q, want [%q]", got, sessionID)
+				}
 				mu.Lock()
 				if previous := identities[marker]; previous != "" && previous != sessionID {
 					test.Errorf("%s changed identity: %q -> %q", marker, previous, sessionID)
@@ -88,7 +91,7 @@ func TestProviderConversationIdentity(test *testing.T) {
 			defer server.Close()
 			client, err := New(test.Context(), ClientConfig{
 				BaseURL: server.URL + "/v1", APIKey: "test", Model: "test-model", Protocol: protocol,
-				MaxOutputTokens: 100, MaxAttempts: 2,
+				MaxOutputTokens: 100, MaxAttempts: 2, SessionHeader: "x-opencode-session",
 			})
 			if err != nil {
 				test.Fatal(err)
@@ -155,9 +158,12 @@ func (transport sessionRoundTripper) RoundTrip(request *http.Request) (*http.Res
 }
 
 func TestSessionTransportDoesNotMutateRequests(test *testing.T) {
-	transport := &captureTransport{base: sessionRoundTripper(func(request *http.Request) (*http.Response, error) {
+	transport := &captureTransport{cfg: ClientConfig{SessionHeader: "X-Gateway-Session"}, base: sessionRoundTripper(func(request *http.Request) (*http.Response, error) {
 		if identity := request.Header.Get("X-Agent-Session-Id"); identity != "roast-test" {
 			return nil, fmt.Errorf("session identity = %q", identity)
+		}
+		if identity := request.Header.Get("X-Gateway-Session"); identity != "roast-test" {
+			return nil, fmt.Errorf("configured session identity = %q", identity)
 		}
 		return &http.Response{StatusCode: http.StatusNoContent}, nil
 	})}
@@ -169,7 +175,53 @@ func TestSessionTransportDoesNotMutateRequests(test *testing.T) {
 	if _, err := transport.RoundTrip(request); err != nil {
 		test.Fatal(err)
 	}
-	if identity := request.Header.Get("X-Agent-Session-Id"); identity != "" {
-		test.Fatalf("mutated caller request header: %q", identity)
+	for _, name := range []string{"X-Agent-Session-Id", "X-Gateway-Session"} {
+		if identity := request.Header.Get(name); identity != "" {
+			test.Fatalf("mutated caller request header %s: %q", name, identity)
+		}
+	}
+}
+
+// A configured session header that the environment also names goes out once,
+// with Roast's value: environment headers are removed before session headers
+// are set, so the stripping cannot remove the configured one.
+func TestSessionHeaderOverridesEnvironmentHeader(test *testing.T) {
+	const ambient = "x-opencode-session: junk-ambient-session\nX-Agent-Session-Id: junk-ambient-session"
+	for _, protocol := range []string{"chat", "responses", "anthropic"} {
+		test.Run(protocol, func(test *testing.T) {
+			setAmbientSDKEnvironment(test, map[string]string{"OPENAI_CUSTOM_HEADERS": ambient, "ANTHROPIC_CUSTOM_HEADERS": ambient}, "", "")
+			var mu sync.Mutex
+			var headers []http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				mu.Lock()
+				headers = append(headers, request.Header.Clone())
+				mu.Unlock()
+				writer.Header().Set("Content-Type", "application/json")
+				_ = testutil.WriteInferenceStream(writer, protocol, structuredToolResponse(protocol, "verdict", `{"status":"ok"}`))
+			}))
+			defer server.Close()
+			client, err := New(test.Context(), ClientConfig{
+				BaseURL: server.URL + "/v1", APIKey: "test", Model: "test-model", Protocol: protocol,
+				MaxOutputTokens: 100, MaxAttempts: 1, SessionHeader: "X-OpenCode-Session",
+			})
+			if err != nil {
+				test.Fatal(err)
+			}
+			var result struct {
+				Status string `json:"status"`
+			}
+			if err := client.CompleteStructured(test.Context(), "system", "user", "verdict", &result); err != nil {
+				test.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(headers) != 1 {
+				test.Fatalf("server received %d requests, want 1", len(headers))
+			}
+			session, configured := headers[0].Values("X-Agent-Session-Id"), headers[0].Values("X-Opencode-Session")
+			if len(session) != 1 || !strings.HasPrefix(session[0], "roast-") || len(configured) != 1 || configured[0] != session[0] {
+				test.Fatalf("X-Agent-Session-Id = %q, X-Opencode-Session = %q; want one equal Roast session ID each", session, configured)
+			}
+		})
 	}
 }

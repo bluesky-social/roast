@@ -467,6 +467,7 @@ func rejectControlCharacters(cfg Config) error {
 		if err := check(
 			field{prefix + "endpoint", profile.BaseURL}, field{prefix + "model", profile.Model},
 			field{prefix + "protocol", profile.Protocol}, field{prefix + "api_key_env", profile.APIKeyEnv},
+			field{prefix + "session_header", profile.SessionHeader},
 		); err != nil {
 			return err
 		}
