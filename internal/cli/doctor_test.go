@@ -145,3 +145,49 @@ func TestDoctorRoundtripUsesConfiguredResponsesRoute(t *testing.T) {
 		t.Fatalf("doctorRoundtripCheck() = %#v, calls=%d", result, calls)
 	}
 }
+
+func TestDoctorReportsAndSendsSessionHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		configured := r.Header.Get("X-Opencode-Session")
+		if want := request.Model == "finder-model"; want != (configured != "") || configured != "" && configured != r.Header.Get("X-Agent-Session-Id") {
+			http.Error(w, "session_header was not applied to exactly the finder profile", http.StatusBadRequest)
+			return
+		}
+		_ = testutil.WriteJSONStream(w, "responses", `{"id":"resp","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"fc","type":"function_call","call_id":"call","name":"doctor_probe","arguments":"{\"ok\":true}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
+	}))
+	defer server.Close()
+	t.Setenv("DOCTOR_KEY", "secret")
+	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	body := "version: 1\ninference_profiles:\n  finder:\n    endpoint: " + server.URL + "/v1\n    api_key_env: DOCTOR_KEY\n    model: finder-model\n    session_header: x-opencode-session\n  verifier:\n    endpoint: " + server.URL + "/v1\n    api_key_env: DOCTOR_KEY\n    model: verifier-model\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]doctorResult{}
+	for _, result := range doctorChecks(t.Context(), configPath) {
+		byName[result.Name] = result
+	}
+	if finder := byName["finder-profile"]; finder.Status != doctorPass || !strings.HasSuffix(finder.Detail, ", session header x-opencode-session") {
+		t.Fatalf("finder profile = %#v", finder)
+	}
+	if verifier := byName["verifier-profile"]; verifier.Status != doctorPass || strings.Contains(verifier.Detail, "session header") {
+		t.Fatalf("verifier profile = %#v", verifier)
+	}
+	for _, role := range []string{"finder", "verifier"} {
+		if roundtrip := byName[role+"-roundtrip"]; roundtrip.Status != doctorPass {
+			t.Errorf("%s roundtrip = %#v", role, roundtrip)
+		}
+	}
+}

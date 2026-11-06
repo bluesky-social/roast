@@ -38,6 +38,10 @@ type ClientConfig struct {
 	MaxAttempts     int
 	RequestTimeout  time.Duration
 	Protocol        string
+	// SessionHeader, when set, carries the conversation's session ID in
+	// addition to X-Agent-Session-Id. Config validation rejects names that
+	// would replace a credential or SDK-controlled header.
+	SessionHeader   string
 	Ledger          *Ledger
 	CaptureResponse func(RawResponse) error
 }
@@ -234,6 +238,9 @@ func (t *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		}
 		if hasSession {
 			req.Header.Set("X-Agent-Session-Id", sessionID)
+			if t.cfg.SessionHeader != "" {
+				req.Header.Set(t.cfg.SessionHeader, sessionID)
+			}
 		}
 	}
 	resp, err := t.base.RoundTrip(req)

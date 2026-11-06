@@ -452,6 +452,12 @@ func TestFinderVerifierPipelineWithMockEndpoint(t *testing.T) {
 		mu.Lock()
 		models = append(models, request.Model)
 		mu.Unlock()
+		gatewaySession := r.Header.Get("X-Opencode-Session")
+		if request.Model == "finder-test" && (gatewaySession == "" || gatewaySession != r.Header.Get("X-Agent-Session-Id")) ||
+			request.Model != "finder-test" && gatewaySession != "" {
+			http.Error(w, "session_header was not applied to exactly the finder profile", http.StatusBadRequest)
+			return
+		}
 
 		var name, arguments string
 		switch request.Model {
@@ -512,6 +518,7 @@ inference_profiles:
     model: finder-test
     protocol: chat
     max_output_tokens: 2048
+    session_header: x-opencode-session
   verifier-test:
     endpoint: %s/v1
     api_key: test-key
@@ -613,8 +620,11 @@ upload:
 	if got := meta.Budgets["max_attempts"]; got != float64(1) {
 		t.Fatalf("max attempts = %v, want 1", got)
 	}
-	if got := meta.Roles["finder"]; got.Profile != "finder-test" || got.Protocol != "chat" || got.API != "" {
+	if got := meta.Roles["finder"]; got.Profile != "finder-test" || got.Protocol != "chat" || got.API != "" || got.SessionHeader != "x-opencode-session" {
 		t.Fatalf("recorded finder role = %#v", got)
+	}
+	if got := meta.Roles["verifier"]; got.SessionHeader != "" {
+		t.Fatalf("recorded verifier role = %#v", got)
 	}
 	var statusOut bytes.Buffer
 	statusCode, statusErr := ExecuteContext(t.Context(), []string{"runs", "status"}, &statusOut, io.Discard)

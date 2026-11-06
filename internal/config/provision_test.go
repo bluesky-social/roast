@@ -322,6 +322,51 @@ func TestProvisionKeepsUnsetTemplateEndpointsUnset(t *testing.T) {
 	}
 }
 
+func TestProvisionAcceptsTemplateSessionHeader(t *testing.T) {
+	sessionTemplate := strings.Replace(provisionTemplate, "    protocol: chat\n", "    protocol: chat\n    session_header: x-opencode-session\n", 1)
+	for name, test := range map[string]struct {
+		template string
+		want     string
+		legacy   bool
+	}{
+		"set":                  {template: sessionTemplate, want: "x-opencode-session"},
+		"set, legacy import":   {template: sessionTemplate, want: "x-opencode-session", legacy: true},
+		"unset, legacy import": {template: provisionTemplate, legacy: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(test.template)) }))
+			defer server.Close()
+			legacy := ""
+			if test.legacy {
+				legacy = filepath.Join(t.TempDir(), "legacy.yaml")
+				if err := os.WriteFile(legacy, []byte("gateway:\n  api_key: legacy-secret\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			destination := filepath.Join(t.TempDir(), "config.yaml")
+			if err := Provision(t.Context(), server.URL, destination, legacy); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.InferenceProfiles["finder"].SessionHeader != test.want || cfg.InferenceProfiles["verifier"].SessionHeader != "" {
+				t.Fatalf("profiles = %#v, want finder session_header %q", cfg.InferenceProfiles, test.want)
+			}
+			// A re-encoded config without the setting must stay readable by
+			// releases that predate it.
+			if raw, err := os.ReadFile(destination); err != nil || (test.want == "" && strings.Contains(string(raw), "session_header")) {
+				t.Fatalf("installed config mentions an unset session_header (read error: %v)", err)
+			}
+		})
+	}
+	rejected := strings.Replace(provisionTemplate, "    protocol: chat\n", "    protocol: chat\n    session_header: Authorization\n", 1)
+	if _, err := ValidateProvisionDocument([]byte(rejected)); err == nil || !strings.Contains(err.Error(), "inference_profiles.finder.session_header") {
+		t.Fatalf("template naming a reserved session header: err = %v", err)
+	}
+}
+
 func TestProvisionRejectsUnversionedOrSecretRemoteConfig(t *testing.T) {
 	for name, body := range map[string]string{
 		"unversioned": strings.Replace(provisionTemplate, "version: 1\n", "", 1),
@@ -344,6 +389,7 @@ inference_profiles:
     model: finder-model
     protocol: chat
     api_key_env: FINDER_KEY
+    session_header: x-gateway-session
   verifier:
     model: verifier-model
 roles:
@@ -375,6 +421,7 @@ func TestProvisionRejectsTemplateControlCharacters(t *testing.T) {
 		"NEL in upload":        {"endpoint: https://uploads.example", `endpoint: "https://uploads.example\u0085"`, "upload.endpoint"},
 		"ESC in endpoint":      {"endpoint: https://models.example/v1", `endpoint: "https://models.example/v1\e[8m"`, "inference_profiles.finder.endpoint"},
 		"newline in model":     {"model: finder-model", `model: "finder\nmodel"`, "inference_profiles.finder.model"},
+		"ESC in session hdr":   {"session_header: x-gateway-session", `session_header: "x-gateway\e[2Ksession"`, "inference_profiles.finder.session_header"},
 		"ESC in profile name":  {"  verifier:\n    model:", "  \"verifier\\e]0;title\\a\":\n    model:", "inference profile name"},
 		"ESC in route key":     {"openai: verifier", `"openai\e[31m": verifier`, "roles.finder.author_routes key"},
 		"tab in route profile": {"openai: verifier", `openai: "verifier\t"`, "roles.finder.author_routes.openai"},

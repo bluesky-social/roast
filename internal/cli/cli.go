@@ -856,7 +856,7 @@ func reviewExitError(finalErr error, gateRank, maxSeverity int, partial bool) er
 func roleMeta(role config.ResolvedRole, systemPrompt string) record.RoleMeta {
 	return record.RoleMeta{
 		Profile: role.Profile, BaseURL: role.BaseURL, Model: role.Model, Protocol: role.Protocol,
-		MaxOutputTokens: role.MaxOutputTokens, PromptDigest: record.Digest(systemPrompt),
+		MaxOutputTokens: role.MaxOutputTokens, SessionHeader: role.SessionHeader, PromptDigest: record.Digest(systemPrompt),
 	}
 }
 
@@ -1037,7 +1037,7 @@ func clientConfig(roleName string, role config.ResolvedRole, ledger *llm.Ledger,
 		Role:    roleName,
 		BaseURL: strings.TrimRight(role.BaseURL, "/"), APIKey: role.APIKey,
 		Model: role.Model, Protocol: role.Protocol, MaxOutputTokens: role.MaxOutputTokens,
-		MaxAttempts: maxAttempts, RequestTimeout: requestTimeout,
+		SessionHeader: role.SessionHeader, MaxAttempts: maxAttempts, RequestTimeout: requestTimeout,
 		Ledger: ledger, CaptureResponse: capture,
 	}
 }

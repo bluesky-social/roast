@@ -122,6 +122,9 @@ defaults, such as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, Anthropic
 profile files, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, and
 `OPENAI_CUSTOM_HEADERS`; `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the
 `*_BASE_URL` variables apply only as inputs to Roast's own configuration.
+A profile's `session_header`, which a template may also set, only adds one more
+header carrying the per-conversation session ID; it cannot name a credential or
+framing header, or one Roast or the provider SDK sets.
 
 Roast does not infer trust from a model name. An OpenAI-compatible gateway,
 hosted provider, and local server are all treated as the operator-configured

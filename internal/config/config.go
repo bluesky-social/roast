@@ -43,6 +43,11 @@ type InferenceProfile struct {
 	Model           string `yaml:"model"`
 	Protocol        string `yaml:"protocol"`
 	MaxOutputTokens int    `yaml:"max_output_tokens"`
+	// SessionHeader names one more request header that carries the
+	// per-conversation session ID, for gateways that key sessions on their own
+	// header rather than X-Agent-Session-Id. omitempty keeps a config that
+	// provisioning re-encodes readable by releases without this field.
+	SessionHeader string `yaml:"session_header,omitempty"`
 }
 
 // Role selects an inference profile. The finder may route away from the
@@ -65,6 +70,7 @@ type ResolvedRole struct {
 	Model           string
 	Protocol        string
 	MaxOutputTokens int
+	SessionHeader   string
 	Pin             bool
 	AuthorRoutes    map[string]string
 	// Credential names where APIKey came from. It never holds a secret.
@@ -518,7 +524,46 @@ func normalizeProfile(name string, profile InferenceProfile) (InferenceProfile, 
 	if err := validateEndpoint("inference_profiles."+name, profile.Endpoint(), profile.Protocol, profile.MaxOutputTokens); err != nil {
 		return InferenceProfile{}, err
 	}
+	if profile.SessionHeader != "" {
+		if err := validateSessionHeader("inference_profiles."+name+".session_header", profile.SessionHeader); err != nil {
+			return InferenceProfile{}, err
+		}
+	}
 	return profile, nil
+}
+
+const maxSessionHeaderLength = 64
+
+// reservedSessionHeaders carry credentials, frame the message or control the
+// connection, or are set by Roast, the provider SDKs (including every
+// X-Stainless- header), or Go's HTTP transport. A session_header naming one
+// would replace or forge that header with the session ID.
+var reservedSessionHeaders = []string{
+	"Authorization", "X-Api-Key", "Proxy-Authorization", "Cookie",
+	"Host", "Content-Type", "Content-Length", "Content-Encoding", "Transfer-Encoding",
+	"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Upgrade", "Expect",
+	"Accept", "Accept-Encoding", "User-Agent", "X-Agent-Session-Id",
+	"Anthropic-Version", "Anthropic-Beta", "Anthropic-Workspace-Id", "OpenAI-Organization", "OpenAI-Project",
+}
+
+// validateSessionHeader accepts an RFC 9110 field name (a token) that names
+// no reserved header in any letter case.
+func validateSessionHeader(field, name string) error {
+	if len(name) > maxSessionHeaderLength || strings.IndexFunc(name, func(r rune) bool { return !isTokenChar(r) }) >= 0 {
+		return fmt.Errorf("%s must be an HTTP header name of at most %d letters, digits, or !#$%%&'*+-.^_`|~ characters", field, maxSessionHeaderLength)
+	}
+	reserved := strings.HasPrefix(strings.ToLower(name), "x-stainless-")
+	for _, header := range reservedSessionHeaders {
+		reserved = reserved || strings.EqualFold(name, header)
+	}
+	if reserved {
+		return fmt.Errorf("%s cannot be %q, which is reserved for credentials, request framing, or a header Roast or the provider SDK sets", field, name)
+	}
+	return nil
+}
+
+func isTokenChar(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", r)
 }
 
 // Endpoint returns the profile's configured endpoint, or its protocol's public
@@ -584,7 +629,7 @@ func (c Config) resolveProfile(roleName, profileName string, selection Role) (Re
 	role := ResolvedRole{
 		Profile: profileName, BaseURL: profile.BaseURL, ExplicitEndpoint: profile.BaseURL != "",
 		Model: profile.Model, Protocol: profile.Protocol, MaxOutputTokens: profile.MaxOutputTokens,
-		Pin: selection.Pin, AuthorRoutes: selection.AuthorRoutes,
+		SessionHeader: profile.SessionHeader, Pin: selection.Pin, AuthorRoutes: selection.AuthorRoutes,
 	}
 	if !role.ExplicitEndpoint {
 		role.BaseURL = implicitEndpoint(role.Protocol)

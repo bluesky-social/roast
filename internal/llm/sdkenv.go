@@ -17,7 +17,8 @@ import (
 // ANTHROPIC_API_KEY, OPENAI_API_KEY, and OPENAI_ADMIN_KEY, the configured base
 // URL over both *_BASE_URL variables and a profile's base_url, and each also
 // replaces a custom header with its name. captureTransport sets Roast's
-// session header last.
+// session headers last, after removing environment headers, so a profile's
+// session_header carries Roast's value even when the environment names it.
 
 // sdkEnvironmentHeaders returns the headers that protocol's SDK can add from
 // the environment and that Roast never configures for it:
