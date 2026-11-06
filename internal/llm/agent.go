@@ -53,6 +53,15 @@ type agentRunState struct {
 	acceptFinal      *fantasy.ToolCallContent
 	// stopCause says why the latest response produced no submission.
 	stopCause string
+
+	// recordTools only save part of the result; they run even on the wrap-up
+	// turn. recordRounds counts wrap-up responses that only recorded: they
+	// never use submission attempts, and past their own allowance the run
+	// stops after recording.
+	recordTools  map[string]bool
+	recordRounds int
+	// halt ends the loop once the current response's tools have run.
+	halt bool
 }
 
 type injectedMessage struct {
@@ -94,6 +103,20 @@ func (s *agentRunState) forceFinal(cause error) {
 	if cause != nil && s.cutoff == nil {
 		s.cutoff = cause
 	}
+}
+
+// deadlinePassedDuringFinalization ends a final phase that is already under
+// way once the work deadline has passed, including while the last response's
+// tools ran: the wrap-up window is spent, so no further call opens.
+func (s *agentRunState) deadlinePassedDuringFinalization() bool {
+	if !s.finalTurn || !s.wd.check() {
+		return false
+	}
+	s.forceFinal(ErrWorkDeadline)
+	if s.stopCause == "" {
+		s.stopCause = "the work deadline passed before `" + s.opts.FinalTool + "` was called"
+	}
+	return true
 }
 
 func (s *agentRunState) notice() string {
@@ -363,13 +386,18 @@ func (m *managedModel) finalCall(call fantasy.Call, notice string) fantasy.Call 
 	return call
 }
 
-func (m *managedModel) canRetrySubmission() bool {
-	// Never reopen exploration or start another wrap-up window after a cutoff.
-	// Every reminder still goes through the normal token admission and deadlines.
+// mayContinueFinalization reports whether finalization may make another call.
+// Never reopen exploration or start another wrap-up window after a cutoff.
+// Every reminder still goes through the normal token admission and deadlines.
+func (m *managedModel) mayContinueFinalization() bool {
 	if m.state.wd.check() {
 		m.state.forceFinal(ErrWorkDeadline)
 	}
-	return m.state.cutoff == nil && m.state.submissionAttempts < maxAttempts(m.client.cfg)
+	return m.state.cutoff == nil
+}
+
+func (m *managedModel) canRetrySubmission() bool {
+	return m.mayContinueFinalization() && m.state.submissionAttempts < maxAttempts(m.client.cfg)
 }
 
 // reviewResponse decides how a complete response is dispatched. It never
@@ -380,18 +408,35 @@ func (m *managedModel) reviewResponse(calls []fantasy.ToolCallContent) ([]fantas
 	s := m.state
 	s.stopCause = ""
 	var final *fantasy.ToolCallContent
+	records := 0
 	for i, call := range calls {
-		if call.ToolName == s.opts.FinalTool {
+		switch {
+		case call.ToolName == s.opts.FinalTool:
 			final = &calls[i]
-			continue
-		}
-		// Fantasy answers unknown tools with an error result; report them as
-		// turns because nothing else will.
-		if !s.toolNames[call.ToolName] && s.opts.OnTurn != nil {
+		case s.recordTools[call.ToolName]:
+			records++
+		case !s.toolNames[call.ToolName] && s.opts.OnTurn != nil:
+			// Fantasy answers unknown tools with an error result; report them
+			// as turns because nothing else will.
 			s.opts.OnTurn(TurnInfo{Turn: s.turn, Tool: call.ToolName, Args: decodeArgs(call.Input)})
 		}
 	}
 
+	if s.finalTurn && final == nil && records > 0 && records == len(calls) {
+		// Recording results on the wrap-up turn is never a failed submission.
+		// Run the calls; hand the turn back only within the recording
+		// allowance and never past a cutoff, otherwise stop after them.
+		s.recordRounds++
+		switch {
+		case !m.mayContinueFinalization():
+			s.halt = true
+			s.stopCause = "the model recorded results but did not call `" + s.opts.FinalTool + "` before the cutoff"
+		case s.recordRounds > maxAttempts(m.client.cfg):
+			s.halt = true
+			s.stopCause = fmt.Sprintf("the model kept recording results without calling `%s` (%d recording rounds)", s.opts.FinalTool, s.recordRounds)
+		}
+		return nil, fantasy.FinishReasonToolCalls
+	}
 	if s.finalTurn {
 		s.submissionAttempts++
 	}
@@ -422,6 +467,7 @@ func (m *managedModel) reviewResponse(calls []fantasy.ToolCallContent) ([]fantas
 		// Auto tool selection can produce prose or other tool calls. Only a
 		// validated final submission may finish successfully; never dispatch
 		// exploration tools, even ones Fantasy still knows how to execute.
+		// Recording tools still run.
 		s.blockExploration = "Not executed: exploration is finished."
 		if m.canRetrySubmission() {
 			return []fantasy.ToolCallContent{nudgeCall(fmt.Sprintf("roast-final-%d", s.submissionAttempts),
@@ -436,6 +482,11 @@ func (m *managedModel) reviewResponse(calls []fantasy.ToolCallContent) ([]fantas
 			attempts = "attempt"
 		}
 		s.stopCause += fmt.Sprintf(" (%d submission %s)", s.submissionAttempts, attempts)
+		if records > 0 {
+			// Keep what the model recorded: dispatch, then stop.
+			s.halt = true
+			return nil, fantasy.FinishReasonToolCalls
+		}
 		return nil, fantasy.FinishReasonStop
 	}
 
@@ -465,6 +516,7 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 	state := &agentRunState{
 		opts: opts, model: c.cfg.Model, wd: newWorkDeadlineState(opts), structured: structured, out: out,
 		toolNames: make(map[string]bool, len(opts.Tools)+1), toolSchemas: make(map[string]map[string]any, len(opts.Tools)),
+		recordTools: make(map[string]bool),
 	}
 	if structured {
 		state.finalTurn = true
@@ -483,6 +535,9 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 			tools = append(tools, finalFantasyTool(info, state))
 			continue
 		}
+		if opts.Tools[i].RecordsResult {
+			state.recordTools[opts.Tools[i].Name] = true
+		}
 		tools = append(tools, explorationFantasyTool(info, opts.Tools[i], state))
 	}
 	state.toolNames[nudgeToolName] = true
@@ -499,8 +554,9 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 			return nil, errors.New("tool-call repair disabled")
 		}),
 		fantasy.WithStopConditions(func([]fantasy.StepResult) bool {
-			return state.finalDone || state.validationExhausted ||
-				(state.finalTurn && state.submissionAttempts >= maxAttempts(c.cfg))
+			return state.finalDone || state.validationExhausted || state.halt ||
+				(state.finalTurn && state.submissionAttempts >= maxAttempts(c.cfg)) ||
+				state.deadlinePassedDuringFinalization()
 		}),
 	)
 
@@ -560,7 +616,7 @@ func (t *roastFantasyTool) SetProviderOptions(opts fantasy.ProviderOptions) { t.
 
 func explorationFantasyTool(info fantasy.ToolInfo, definition Tool, state *agentRunState) fantasy.AgentTool {
 	return &roastFantasyTool{info: info, run: func(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-		if state.blockExploration != "" {
+		if state.blockExploration != "" && !definition.RecordsResult {
 			return fantasy.NewTextErrorResponse(state.blockExploration), nil
 		}
 		args := decodeArgs(call.Input)

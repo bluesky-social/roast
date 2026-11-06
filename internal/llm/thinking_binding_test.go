@@ -224,6 +224,31 @@ func TestAnthropicReplayKeepsSignedThinkingPrefix(t *testing.T) {
 		}
 	})
 
+	t.Run("wrap-up-records-result", func(t *testing.T) {
+		// Recording on the wrap-up turn runs and is replayed unchanged.
+		server := newBindingServer(t, func(request int) []any {
+			if request == 1 {
+				return []any{thinkingBlock("save it first"), toolUseBlock("toolu-1", "record", `{"note":"a"}`)}
+			}
+			return []any{thinkingBlock(""), toolUseBlock("toolu-2", "submit", `{"answer":"done"}`)}
+		})
+		var reads, records int
+		var out answer
+		err := bindingClient(t, server).Converse(t.Context(), "system", "user", ConverseOpts{
+			MaxTurns: 1, FinalTool: "submit", Tools: []Tool{readTool(&reads), {
+				Name: "record", Description: "record a note", RecordsResult: true,
+				Schema: map[string]any{"type": "object", "properties": map[string]any{"note": map[string]any{"type": "string"}}},
+				Run: func(context.Context, map[string]any) (any, error) {
+					records++
+					return map[string]any{"recorded": true}, nil
+				},
+			}, submitTool},
+		}, &out)
+		if err != nil || out.Answer != "done" || records != 1 || reads != 0 {
+			t.Fatalf("answer=%q records=%d reads=%d error=%v", out.Answer, records, reads, err)
+		}
+	})
+
 	t.Run("final-turn-exploration", func(t *testing.T) {
 		// The model ignores the wrap-up notice once. Its exploration call is
 		// answered, not executed, and the replay keeps the call it made.
