@@ -362,7 +362,9 @@ func Find(ctx context.Context, client llm.Client, in FindInput) (*Result, error)
 			} else if errors.Is(err, llm.ErrBudgetExhausted) {
 				stopReason = "token_budget"
 			}
-			note := fmt.Sprintf("interactive review ended without submit_findings (even after the reserved wrap-up turn); stop reason: %s", stopReason)
+			// Keep the cause: it carries the provider's error or the reason the
+			// model stopped, which the stop reason alone does not.
+			note := fmt.Sprintf("interactive review ended without submit_findings (even after the reserved wrap-up turn); stop reason: %s; cause: %v", stopReason, err)
 			if n := len(acc.order); n > 0 {
 				// The governing invariant: no stop path may discard
 				// accumulated work. The incrementally-reported findings ARE

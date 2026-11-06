@@ -11,14 +11,20 @@ import (
 	"charm.land/fantasy"
 )
 
+// assertAutomaticFinalCall checks a final-phase request: tool choice stays
+// automatic and the submission tool is offered. The tool set is not narrowed;
+// exploration calls are answered without being run.
 func assertAutomaticFinalCall(t *testing.T, call fantasy.Call) {
 	t.Helper()
 	if call.ToolChoice == nil || *call.ToolChoice != fantasy.ToolChoiceAuto {
 		t.Fatalf("tool choice = %v, want auto", call.ToolChoice)
 	}
-	if len(call.Tools) != 1 || call.Tools[0].GetName() != "submit" {
-		t.Fatalf("tools = %#v, want submit only", call.Tools)
+	for _, tool := range call.Tools {
+		if tool.GetName() == "submit" {
+			return
+		}
 	}
+	t.Fatalf("tools = %#v, want submit offered", call.Tools)
 }
 
 func TestFinalizationUsesAutomaticToolChoice(t *testing.T) {

@@ -92,15 +92,25 @@ func basicTools(run ToolFunc) []Tool {
 	}
 }
 
+// assertToolNames checks the request offers exactly these tools. Finalization
+// never narrows the tool set: it is part of the prefix signed reasoning binds to.
+func assertToolNames(t *testing.T, call fantasy.Call, names ...string) {
+	t.Helper()
+	got := make([]string, 0, len(call.Tools))
+	for _, tool := range call.Tools {
+		got = append(got, tool.GetName())
+	}
+	if strings.Join(got, ",") != strings.Join(names, ",") {
+		t.Fatalf("tools = %v, want %v", got, names)
+	}
+}
+
 func TestAgentBudgetRefusalUsesReservedFinalCall(t *testing.T) {
 	var calls int
 	budgetFired := false
 	c := testClient(func(_ context.Context, call fantasy.Call) (*fantasy.Response, error) {
 		calls++
-		tools := call.Tools
-		if len(tools) != 1 || tools[0].GetName() != "submit" {
-			t.Fatalf("tools = %#v, want final only", tools)
-		}
+		assertToolNames(t, call, "read", "submit")
 		return toolCallResponse("submit", `{"answer":"budget"}`), nil
 	})
 	c.cfg.Ledger = NewLedger(1500)
@@ -128,10 +138,7 @@ func TestAgentInFlightDeadlineGetsFreshFinalWindow(t *testing.T) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}
-		tools := call.Tools
-		if len(tools) != 1 || tools[0].GetName() != "submit" {
-			t.Fatalf("tools = %#v, want final only", tools)
-		}
+		assertToolNames(t, call, "read", "submit")
 		return toolCallResponse("submit", `{"answer":"deadline"}`), nil
 	})
 	var out struct {
@@ -242,7 +249,7 @@ func TestAgentUnknownToolReturnsErrorToModel(t *testing.T) {
 			return toolCallResponse("missing", `{}`), nil
 		}
 		data, _ := json.Marshal(call.Prompt)
-		if !strings.Contains(string(data), "unknown tool: missing") {
+		if !strings.Contains(string(data), "tool not found: missing") {
 			t.Fatalf("unknown-tool result missing: %s", data)
 		}
 		return toolCallResponse("submit", `{"answer":"recovered"}`), nil

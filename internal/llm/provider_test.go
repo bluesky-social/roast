@@ -101,11 +101,14 @@ func TestAnthropicAgentUsesNativeMessages(t *testing.T) {
 			t.Fatal("native Anthropic request did not enable streaming")
 		}
 	}
+	// The wrap-up turn keeps the tool set: it is part of the signed-reasoning prefix.
+	firstTools, _ := json.Marshal(requests[0]["tools"])
+	secondToolsJSON, _ := json.Marshal(requests[1]["tools"])
 	secondTools, _ := requests[1]["tools"].([]any)
-	if len(secondTools) != 1 || secondTools[0].(map[string]any)["name"] != "submit" {
-		t.Fatalf("second tools = %#v", requests[1]["tools"])
+	if string(firstTools) != string(secondToolsJSON) || len(secondTools) != 2 || secondTools[1].(map[string]any)["name"] != "submit" {
+		t.Fatalf("second tools = %s, want the first request's %s", secondToolsJSON, firstTools)
 	}
-	inputSchema, _ := secondTools[0].(map[string]any)["input_schema"].(map[string]any)
+	inputSchema, _ := secondTools[1].(map[string]any)["input_schema"].(map[string]any)
 	if inputSchema["type"] != "object" || inputSchema["required"] == nil || inputSchema["properties"] == nil {
 		t.Fatalf("Anthropic input schema lost core fields: %#v", inputSchema)
 	}
@@ -121,7 +124,7 @@ func TestAnthropicAgentUsesNativeMessages(t *testing.T) {
 	}
 }
 
-func TestResponsesAgentReplaysToolOutputAndRestrictsFinalTurn(t *testing.T) {
+func TestResponsesAgentReplaysToolOutputAndKeepsToolsOnFinalTurn(t *testing.T) {
 	var mu sync.Mutex
 	var requests []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -188,9 +191,10 @@ func TestResponsesAgentReplaysToolOutputAndRestrictsFinalTurn(t *testing.T) {
 	if requests[1]["tool_choice"] != "auto" {
 		t.Fatalf("final tool choice = %#v, want auto", requests[1]["tool_choice"])
 	}
-	tools, _ := requests[1]["tools"].([]any)
-	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "submit" {
-		t.Fatalf("second tools = %#v", requests[1]["tools"])
+	firstTools, _ := json.Marshal(requests[0]["tools"])
+	secondTools, _ := json.Marshal(requests[1]["tools"])
+	if string(firstTools) != string(secondTools) || !strings.Contains(string(secondTools), `"submit"`) {
+		t.Fatalf("second tools = %s, want the first request's %s", secondTools, firstTools)
 	}
 	input, _ := requests[1]["input"].([]any)
 	inputJSON, _ := json.Marshal(input)

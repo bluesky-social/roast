@@ -51,16 +51,31 @@ func WriteInferenceStream(w http.ResponseWriter, protocol string, response map[s
 		for index, raw := range response["content"].([]any) {
 			block := raw.(map[string]any)
 			startBlock := maps.Clone(block)
-			input, err := json.Marshal(block["input"])
-			if err != nil {
-				return err
+			var deltas []map[string]any
+			switch block["type"] {
+			case "thinking":
+				startBlock["thinking"], startBlock["signature"] = "", ""
+				deltas = []map[string]any{
+					{"type": "thinking_delta", "thinking": block["thinking"]},
+					{"type": "signature_delta", "signature": block["signature"]},
+				}
+			case "text":
+				startBlock["text"] = ""
+				deltas = []map[string]any{{"type": "text_delta", "text": block["text"]}}
+			default:
+				input, err := json.Marshal(block["input"])
+				if err != nil {
+					return err
+				}
+				startBlock["input"] = map[string]any{}
+				deltas = []map[string]any{{"type": "input_json_delta", "partial_json": string(input)}}
 			}
-			startBlock["input"] = map[string]any{}
-			for _, event := range []map[string]any{
-				{"type": "content_block_start", "index": index, "content_block": startBlock},
-				{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "input_json_delta", "partial_json": string(input)}},
-				{"type": "content_block_stop", "index": index},
-			} {
+			events := []map[string]any{{"type": "content_block_start", "index": index, "content_block": startBlock}}
+			for _, delta := range deltas {
+				events = append(events, map[string]any{"type": "content_block_delta", "index": index, "delta": delta})
+			}
+			events = append(events, map[string]any{"type": "content_block_stop", "index": index})
+			for _, event := range events {
 				if err := emit(event["type"].(string), event); err != nil {
 					return err
 				}
@@ -97,13 +112,17 @@ func WriteInferenceStream(w http.ResponseWriter, protocol string, response map[s
 		for index, raw := range response["choices"].([]any) {
 			choice := raw.(map[string]any)
 			delta := maps.Clone(choice["message"].(map[string]any))
+			rawTools, _ := delta["tool_calls"].([]any)
 			var tools []any
-			for toolIndex, rawTool := range delta["tool_calls"].([]any) {
+			for toolIndex, rawTool := range rawTools {
 				tool := maps.Clone(rawTool.(map[string]any))
 				tool["index"] = toolIndex
 				tools = append(tools, tool)
 			}
-			delta["tool_calls"] = tools
+			delete(delta, "tool_calls")
+			if len(tools) > 0 {
+				delta["tool_calls"] = tools
+			}
 			choices = append(choices, map[string]any{"index": index, "delta": delta, "finish_reason": nil})
 			finishes = append(finishes, map[string]any{"index": index, "delta": map[string]any{}, "finish_reason": choice["finish_reason"]})
 		}
