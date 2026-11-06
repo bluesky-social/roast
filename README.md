@@ -275,7 +275,8 @@ call. A role that never does gets bounded reminders within its limits; if it
 still fails, the run is reported incomplete, never clean.
 
 `roast doctor` validates profiles and credentials, lists each provider's
-models, makes one small tool-call request per configured model, and reports
+models, runs a small two-turn tool loop per configured model (a tool call, its
+result, and the final submission, as a review does), and reports
 Git, gate, Agent Skill, upload, and release status. `--json` gives
 machine-readable output.
 

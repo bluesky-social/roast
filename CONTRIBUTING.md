@@ -31,6 +31,32 @@ Format Go changes with `gofmt`. Tests use local HTTP servers and temporary Git
 repositories; they must not require real model credentials or send repository
 content to an inference provider.
 
+Opt-in live tests in `internal/llm` run a minimal two-turn tool loop (one
+exploration call, its result, then the submission on the wrap-up turn) against
+a real endpoint with a small output ceiling. They send a fixed probe prompt,
+never repository content, and skip unless their API key variable is set:
+
+| Variable | Default |
+| --- | --- |
+| `ROAST_LIVE_ANTHROPIC_API_KEY` | unset (skip) |
+| `ROAST_LIVE_ANTHROPIC_BASE_URL` | `https://api.anthropic.com/v1` |
+| `ROAST_LIVE_ANTHROPIC_MODELS` | `claude-sonnet-5-5` (comma-separated) |
+| `ROAST_LIVE_DEEPSEEK_API_KEY` | unset (skip) |
+| `ROAST_LIVE_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` |
+| `ROAST_LIVE_DEEPSEEK_MODEL` | `deepseek-v4-pro` |
+| `ROAST_LIVE_DEEPSEEK_PROTOCOL` | `chat` (or `anthropic` with an `/anthropic/v1` base URL) |
+
+```sh
+ROAST_LIVE_ANTHROPIC_API_KEY=... go test ./internal/llm -run TestLive -count=1 -v
+```
+
+The Anthropic test also sends the `thinking-binding-controls-2026-08-01` beta
+header without changing the mismatch behavior, so accounts that do not enforce
+thinking-block binding still report a replay whose prefix changed; the test
+fails on any such report. Tests read these variables before clearing the
+ambient environment, so other tests never see them. Never commit keys or paste
+them into logs.
+
 Before opening a pull request, also check that `go mod tidy` leaves `go.mod`
 and `go.sum` unchanged, including the tool modules (run `go mod tidy` inside each
 tool directory). CI runs vulnerability, Git-history secret, and

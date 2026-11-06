@@ -36,6 +36,58 @@ type agentRunState struct {
 	submissionAttempts  int
 	validationExhausted bool
 	budgetOnce          sync.Once
+
+	// Signed reasoning (Claude 5.1 and later) is bound to the system prompt,
+	// the tool set, and every earlier message, and the provider rejects a
+	// replay whose prefix changed. Fantasy rebuilds each step from its own
+	// history, which never includes messages Roast adds, so each added message
+	// is pinned after the Fantasy messages that preceded it when first sent.
+	base     fantasy.Prompt
+	injected []injectedMessage
+
+	// Dispatch policy for the response being processed, decided once it is
+	// complete. Corrections travel as tool results so the replayed assistant
+	// turn stays exactly what the model produced.
+	blockExploration string
+	rejectFinal      string
+	acceptFinal      *fantasy.ToolCallContent
+	// stopCause says why the latest response produced no submission.
+	stopCause string
+
+	// recordTools only save part of the result; they run even on the wrap-up
+	// turn. recordRounds counts wrap-up responses that only recorded: they
+	// never use submission attempts, and past their own allowance the run
+	// stops after recording.
+	recordTools  map[string]bool
+	recordRounds int
+	// halt ends the loop once the current response's tools have run.
+	halt bool
+}
+
+type injectedMessage struct {
+	at      int
+	message fantasy.Message
+}
+
+func (s *agentRunState) inject(message fantasy.Message) {
+	s.injected = append(s.injected, injectedMessage{at: len(s.base), message: message})
+}
+
+// messages returns this step's conversation: Fantasy's history with every
+// message Roast added restored at its original position.
+func (s *agentRunState) messages() fantasy.Prompt {
+	out := make(fantasy.Prompt, 0, len(s.base)+len(s.injected))
+	next := 0
+	for i, message := range s.base {
+		for ; next < len(s.injected) && s.injected[next].at <= i; next++ {
+			out = append(out, s.injected[next].message)
+		}
+		out = append(out, message)
+	}
+	for ; next < len(s.injected); next++ {
+		out = append(out, s.injected[next].message)
+	}
+	return out
 }
 
 func (s *agentRunState) notifyBudget() {
@@ -51,6 +103,20 @@ func (s *agentRunState) forceFinal(cause error) {
 	if cause != nil && s.cutoff == nil {
 		s.cutoff = cause
 	}
+}
+
+// deadlinePassedDuringFinalization ends a final phase that is already under
+// way once the work deadline has passed, including while the last response's
+// tools ran: the wrap-up window is spent, so no further call opens.
+func (s *agentRunState) deadlinePassedDuringFinalization() bool {
+	if !s.finalTurn || !s.wd.check() {
+		return false
+	}
+	s.forceFinal(ErrWorkDeadline)
+	if s.stopCause == "" {
+		s.stopCause = "the work deadline passed before `" + s.opts.FinalTool + "` was called"
+	}
+	return true
 }
 
 func (s *agentRunState) notice() string {
@@ -77,15 +143,15 @@ func (s *agentRunState) cutoffError(what string, cause error) error {
 
 func (s *agentRunState) prepareStep(ctx context.Context, opts fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
 	s.turn++
-	messages := opts.Messages
+	s.base = opts.Messages
 	ceiling := s.opts.InputByteCeiling
 	if ceiling <= 0 {
 		ceiling = defaultInputByteCeiling
 	}
-	if s.turn > 1 && !s.inputWarn && fantasyConversationBytes(messages) > ceiling {
+	if s.turn > 1 && !s.inputWarn && fantasyConversationBytes(s.messages()) > ceiling {
 		s.inputWarn = true
-		messages = append(messages, fantasy.NewUserMessage(
-			"INPUT BUDGET EXHAUSTED. Do not request more files. Call `"+s.opts.FinalTool+"` now with what you have — partial results beat none.",
+		s.inject(fantasy.NewUserMessage(
+			"INPUT BUDGET EXHAUSTED. Do not request more files. Call `" + s.opts.FinalTool + "` now with what you have — partial results beat none.",
 		))
 	}
 	if s.wd.check() {
@@ -94,20 +160,17 @@ func (s *agentRunState) prepareStep(ctx context.Context, opts fantasy.PrepareSte
 	if s.turn >= normalizedMaxTurns(s.opts.MaxTurns) {
 		s.forceFinal(nil)
 	}
-
-	prepared := fantasy.PrepareStepResult{Messages: messages, ActiveTools: s.active}
-	if s.finalTurn {
-		prepared.ActiveTools = []string{s.opts.FinalTool}
-		if !s.noticeSent {
-			s.noticeSent = true
-			notice := s.notice()
-			if s.structured {
-				notice = "Return the requested structured result via the `" + s.opts.FinalTool + "` tool call. Do not answer in prose."
-			}
-			prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(notice))
+	if s.finalTurn && !s.noticeSent {
+		s.noticeSent = true
+		notice := s.notice()
+		if s.structured {
+			notice = "Return the requested structured result via the `" + s.opts.FinalTool + "` tool call. Do not answer in prose."
 		}
+		s.inject(fantasy.NewUserMessage(notice))
 	}
-	return ctx, prepared, nil
+	// The tool set is part of the signed-reasoning prefix too, so it never
+	// narrows for finalization; tool results enforce the final phase instead.
+	return ctx, fantasy.PrepareStepResult{Messages: s.messages(), ActiveTools: s.active}, nil
 }
 
 type managedModel struct {
@@ -139,11 +202,12 @@ func (m *managedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 			call.Tools[i] = functionTool
 		}
 	}
-	final := onlyFinalTool(call.Tools, m.state.opts.FinalTool)
-	if final {
-		choice := fantasy.ToolChoiceAuto
-		call.ToolChoice = &choice
-	}
+	final := m.state.finalTurn
+	// Never force a tool choice: thinking-mode providers (DeepSeek, Claude
+	// with thinking) reject it. Finalization relies on the notice, schema
+	// validation, and bounded reminders instead.
+	choice := fantasy.ToolChoiceAuto
+	call.ToolChoice = &choice
 	return func(yield func(fantasy.StreamPart) bool) {
 		toolJSON, _ := json.Marshal(call.Tools)
 		release, err := m.client.cfg.Ledger.Reserve(fantasyConversationBytes(call.Prompt)+len(toolJSON)+2048, m.client.cfg.MaxOutputTokens, final)
@@ -223,11 +287,17 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 			callErr = err
 		}
 	}()
+	m.state.blockExploration, m.state.rejectFinal, m.state.acceptFinal = "", "", nil
 	stream, err := m.client.model.Stream(callCtx, call)
 	if err != nil {
 		return err
 	}
-	var content fantasy.ResponseContent
+	// From the first tool call on, hold every part until the response is
+	// complete. Releasing them in arrival order keeps the replayed turn
+	// identical to what the provider sent (a thinking block after a tool call
+	// is signed over that call), and nothing is dispatched before capture.
+	var held []fantasy.StreamPart
+	var calls []fantasy.ToolCallContent
 	for part := range stream {
 		switch part.Type {
 		case fantasy.StreamPartTypeError:
@@ -235,11 +305,13 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 		case fantasy.StreamPartTypeFinish:
 			finish = &part
 		case fantasy.StreamPartTypeToolCall:
-			content = append(content, fantasy.ToolCallContent{
-				ToolCallID: part.ID, ToolName: part.ToolCallName, Input: part.ToolCallInput,
-				ProviderExecuted: part.ProviderExecuted, ProviderMetadata: part.ProviderMetadata,
-			})
+			calls = append(calls, fantasy.ToolCallContent{ToolCallID: part.ID, ToolName: part.ToolCallName, Input: part.ToolCallInput})
+			held = append(held, part)
 		default:
+			if len(held) > 0 {
+				held = append(held, part)
+				continue
+			}
 			if !yield(part) {
 				return errStreamStopped
 			}
@@ -257,22 +329,32 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 	if finish == nil {
 		return fantasy.NewIncompleteStreamError()
 	}
-	response := &fantasy.Response{Content: content, FinishReason: finish.FinishReason}
+	reason := finish.FinishReason
+	var appended []fantasy.ToolCallContent
 	// Let Fantasy reject incomplete/truncated/filtered turns. Rewriting their
 	// finish reason to tool_calls could execute a partial tool invocation.
-	if finish.FinishReason == fantasy.FinishReasonToolCalls || finish.FinishReason == fantasy.FinishReasonStop {
-		response = m.rewriteResponse(response)
+	if reason == fantasy.FinishReasonToolCalls || reason == fantasy.FinishReasonStop {
+		appended, reason = m.reviewResponse(calls)
+	} else {
+		m.state.stopCause = fmt.Sprintf("the response ended with finish reason %q", reason)
+		if reason == fantasy.FinishReasonLength {
+			m.state.stopCause += "; raise max_output_tokens if the output was cut off"
+		}
 	}
-	for _, tool := range response.Content.ToolCalls() {
+	for _, part := range held {
+		if !yield(part) {
+			return errStreamStopped
+		}
+	}
+	for _, tool := range appended {
 		if !yield(fantasy.StreamPart{
 			Type: fantasy.StreamPartTypeToolCall, ID: tool.ToolCallID,
 			ToolCallName: tool.ToolName, ToolCallInput: tool.Input,
-			ProviderExecuted: tool.ProviderExecuted, ProviderMetadata: tool.ProviderMetadata,
 		}) {
 			return errStreamStopped
 		}
 	}
-	finish.FinishReason = response.FinishReason
+	finish.FinishReason = reason
 	if !yield(*finish) {
 		return errStreamStopped
 	}
@@ -291,107 +373,128 @@ func (m *managedModel) StreamObject(context.Context, fantasy.ObjectCall) (fantas
 	return nil, errors.New("roast agent runtime does not stream objects")
 }
 
+// finalCall turns this step's call into the wrap-up call. The notice joins
+// the conversation for good (a Fantasy retry of this step resends it, and
+// later steps keep it), and the tool set is left as sent.
 func (m *managedModel) finalCall(call fantasy.Call, notice string) fantasy.Call {
 	m.state.finalTurn = true
-	tools := make([]fantasy.Tool, 0, 1)
-	for _, tool := range call.Tools {
-		if tool.GetName() == m.state.opts.FinalTool {
-			tools = append(tools, tool)
-		}
+	if !m.state.noticeSent {
+		m.state.noticeSent = true
+		m.state.inject(fantasy.NewUserMessage(notice))
 	}
-	call.Tools = tools
-	choice := fantasy.ToolChoiceAuto
-	call.ToolChoice = &choice
-	call.Prompt = append(call.Prompt, fantasy.NewUserMessage(notice))
+	call.Prompt = m.state.messages()
 	return call
 }
 
-func (m *managedModel) canRetrySubmission() bool {
-	// Never reopen exploration or start another wrap-up window after a cutoff.
-	// Every reminder still goes through the normal token admission and deadlines.
+// mayContinueFinalization reports whether finalization may make another call.
+// Never reopen exploration or start another wrap-up window after a cutoff.
+// Every reminder still goes through the normal token admission and deadlines.
+func (m *managedModel) mayContinueFinalization() bool {
 	if m.state.wd.check() {
 		m.state.forceFinal(ErrWorkDeadline)
 	}
-	return m.state.cutoff == nil && m.state.submissionAttempts < maxAttempts(m.client.cfg)
+	return m.state.cutoff == nil
 }
 
-func (m *managedModel) rewriteResponse(resp *fantasy.Response) *fantasy.Response {
-	if resp == nil {
-		return nil
-	}
+func (m *managedModel) canRetrySubmission() bool {
+	return m.mayContinueFinalization() && m.state.submissionAttempts < maxAttempts(m.client.cfg)
+}
 
-	var finalCall *fantasy.ToolCallContent
-	hasToolCall := false
-	content := append(fantasy.ResponseContent(nil), resp.Content...)
-	for i, item := range content {
-		if item.GetType() != fantasy.ContentTypeToolCall {
-			continue
-		}
-		call, ok := fantasy.AsContentType[fantasy.ToolCallContent](item)
-		if !ok {
-			continue
-		}
-		hasToolCall = true
-		if call.ToolName == m.state.opts.FinalTool {
-			finalCall = &call
-			continue
-		}
-		if !m.state.toolNames[call.ToolName] {
-			if m.state.opts.OnTurn != nil {
-				m.state.opts.OnTurn(TurnInfo{Turn: m.state.turn, Tool: call.ToolName, Args: decodeArgs(call.Input)})
-			}
-			content[i] = nudgeCall(call.ToolCallID, "unknown tool: "+call.ToolName)
+// reviewResponse decides how a complete response is dispatched. It never
+// edits, drops, or reorders what the model produced: a later signed thinking
+// block may be bound to any of it. It returns synthetic nudge calls to append
+// after the model's content, and the finish reason to report.
+func (m *managedModel) reviewResponse(calls []fantasy.ToolCallContent) ([]fantasy.ToolCallContent, fantasy.FinishReason) {
+	s := m.state
+	s.stopCause = ""
+	var final *fantasy.ToolCallContent
+	records := 0
+	for i, call := range calls {
+		switch {
+		case call.ToolName == s.opts.FinalTool:
+			final = &calls[i]
+		case s.recordTools[call.ToolName]:
+			records++
+		case !s.toolNames[call.ToolName] && s.opts.OnTurn != nil:
+			// Fantasy answers unknown tools with an error result; report them
+			// as turns because nothing else will.
+			s.opts.OnTurn(TurnInfo{Turn: s.turn, Tool: call.ToolName, Args: decodeArgs(call.Input)})
 		}
 	}
 
-	if m.state.finalTurn {
-		m.state.submissionAttempts++
+	if s.finalTurn && final == nil && records > 0 && records == len(calls) {
+		// Recording results on the wrap-up turn is never a failed submission.
+		// Run the calls; hand the turn back only within the recording
+		// allowance and never past a cutoff, otherwise stop after them.
+		s.recordRounds++
+		switch {
+		case !m.mayContinueFinalization():
+			s.halt = true
+			s.stopCause = "the model recorded results but did not call `" + s.opts.FinalTool + "` before the cutoff"
+		case s.recordRounds > maxAttempts(m.client.cfg):
+			s.halt = true
+			s.stopCause = fmt.Sprintf("the model kept recording results without calling `%s` (%d recording rounds)", s.opts.FinalTool, s.recordRounds)
+		}
+		return nil, fantasy.FinishReasonToolCalls
 	}
-	if finalCall != nil {
-		validationErr := validateFinalArguments(finalCall.Input, m.state.out)
-		if validationErr != nil && m.state.finalTurn && m.canRetrySubmission() {
+	if s.finalTurn {
+		s.submissionAttempts++
+	}
+	if final != nil {
+		s.blockExploration = "Not executed: this response also called `" + s.opts.FinalTool + "`, which ends the run."
+		validationErr := validateFinalArguments(final.Input, s.out)
+		if validationErr != nil && s.finalTurn && m.canRetrySubmission() {
 			// This failure is provisional. Do not let it mask a provider error
 			// from the follow-up call.
-			m.state.finalErr = nil
-			feedback := fmt.Sprintf("your previous response was not valid JSON matching the schema: %v. Call `%s` again with valid arguments.", validationErr, m.state.opts.FinalTool)
-			resp.Content = fantasy.ResponseContent{nudgeCall(finalCall.ToolCallID, feedback)}
-			resp.FinishReason = fantasy.FinishReasonToolCalls
-			return resp
+			s.finalErr = nil
+			s.rejectFinal = fmt.Sprintf("your previous response was not valid JSON matching the schema: %v. Call `%s` again with valid arguments.", validationErr, s.opts.FinalTool)
+			s.stopCause = "the last `" + s.opts.FinalTool + "` call did not match the schema"
+			return nil, fantasy.FinishReasonToolCalls
 		}
-		m.state.finalErr = validationErr
+		s.finalErr = validationErr
 		if validationErr != nil {
-			m.state.validationExhausted = true
+			s.validationExhausted = true
 		}
-		resp.Content = fantasy.ResponseContent{*finalCall}
-		resp.FinishReason = fantasy.FinishReasonToolCalls
-		return resp
+		accepted := *final
+		s.acceptFinal = &accepted
+		// Fantasy still validates required fields before dispatch; if it
+		// rejects the call, the run can end here without a submission.
+		s.stopCause = "the last `" + s.opts.FinalTool + "` call did not pass tool-call validation"
+		return nil, fantasy.FinishReasonToolCalls
 	}
 
-	if m.state.finalTurn {
-		// Auto tool selection can produce prose or hallucinated tool calls. Only
-		// a validated final submission may finish successfully; never dispatch
+	if s.finalTurn {
+		// Auto tool selection can produce prose or other tool calls. Only a
+		// validated final submission may finish successfully; never dispatch
 		// exploration tools, even ones Fantasy still knows how to execute.
-		resp.Content = nil
-		resp.FinishReason = fantasy.FinishReasonStop
+		// Recording tools still run.
+		s.blockExploration = "Not executed: exploration is finished."
 		if m.canRetrySubmission() {
-			resp.Content = fantasy.ResponseContent{nudgeCall(fmt.Sprintf("roast-final-%d", m.state.submissionAttempts),
-				"Exploration is finished. Return the result via the `"+m.state.opts.FinalTool+"` tool call, not prose or another tool.")}
-			resp.FinishReason = fantasy.FinishReasonToolCalls
+			return []fantasy.ToolCallContent{nudgeCall(fmt.Sprintf("roast-final-%d", s.submissionAttempts),
+				"Exploration is finished. Return the result via the `"+s.opts.FinalTool+"` tool call, not prose or another tool.")}, fantasy.FinishReasonToolCalls
 		}
-		return resp
+		s.stopCause = "the model answered without calling `" + s.opts.FinalTool + "`"
+		if len(calls) > 0 {
+			s.stopCause = "the model called other tools instead of `" + s.opts.FinalTool + "`"
+		}
+		attempts := "attempts"
+		if s.submissionAttempts == 1 {
+			attempts = "attempt"
+		}
+		s.stopCause += fmt.Sprintf(" (%d submission %s)", s.submissionAttempts, attempts)
+		if records > 0 {
+			// Keep what the model recorded: dispatch, then stop.
+			s.halt = true
+			return nil, fantasy.FinishReasonToolCalls
+		}
+		return nil, fantasy.FinishReasonStop
 	}
 
-	resp.Content = content
-	if hasToolCall {
-		resp.FinishReason = fantasy.FinishReasonToolCalls
-		return resp
+	if len(calls) > 0 {
+		return nil, fantasy.FinishReasonToolCalls
 	}
-	if !m.state.finalTurn {
-		resp.Content = append(resp.Content, nudgeCall(fmt.Sprintf("roast-nudge-%d", m.state.turn),
-			"Results must be delivered via the `"+m.state.opts.FinalTool+"` tool call. If you have enough context call it now; otherwise call an exploration tool."))
-		resp.FinishReason = fantasy.FinishReasonToolCalls
-	}
-	return resp
+	return []fantasy.ToolCallContent{nudgeCall(fmt.Sprintf("roast-nudge-%d", s.turn),
+		"Results must be delivered via the `"+s.opts.FinalTool+"` tool call. If you have enough context call it now; otherwise call an exploration tool.")}, fantasy.FinishReasonToolCalls
 }
 
 func (c *client) CompleteStructured(ctx context.Context, system, user string, schemaName string, out any) error {
@@ -413,6 +516,7 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 	state := &agentRunState{
 		opts: opts, model: c.cfg.Model, wd: newWorkDeadlineState(opts), structured: structured, out: out,
 		toolNames: make(map[string]bool, len(opts.Tools)+1), toolSchemas: make(map[string]map[string]any, len(opts.Tools)),
+		recordTools: make(map[string]bool),
 	}
 	if structured {
 		state.finalTurn = true
@@ -431,6 +535,9 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 			tools = append(tools, finalFantasyTool(info, state))
 			continue
 		}
+		if opts.Tools[i].RecordsResult {
+			state.recordTools[opts.Tools[i].Name] = true
+		}
 		tools = append(tools, explorationFantasyTool(info, opts.Tools[i], state))
 	}
 	state.toolNames[nudgeToolName] = true
@@ -447,8 +554,9 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 			return nil, errors.New("tool-call repair disabled")
 		}),
 		fantasy.WithStopConditions(func([]fantasy.StepResult) bool {
-			return state.finalDone || state.validationExhausted ||
-				(state.finalTurn && state.submissionAttempts >= maxAttempts(c.cfg))
+			return state.finalDone || state.validationExhausted || state.halt ||
+				(state.finalTurn && state.submissionAttempts >= maxAttempts(c.cfg)) ||
+				state.deadlinePassedDuringFinalization()
 		}),
 	)
 
@@ -471,13 +579,24 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 		return err
 	}
 	if runErr != nil {
+		if errors.Is(runErr, ErrNoFinalCall) {
+			// The wrap-up call already explained itself, provider error included.
+			return runErr
+		}
 		if state.cutoff != nil {
 			return state.cutoffError("wrap-up turn failed", runErr)
 		}
 		return normalizeProviderError(ctx, c.cfg.Model, runErr)
 	}
+	var cause error
+	if state.stopCause != "" {
+		cause = fmt.Errorf("%s: %s", state.model, state.stopCause)
+	}
 	if state.cutoff != nil {
-		return state.cutoffError("wrap-up turn produced no submission", nil)
+		return state.cutoffError("wrap-up turn produced no submission", cause)
+	}
+	if cause != nil {
+		return fmt.Errorf("%w: %v", ErrNoFinalCall, cause)
 	}
 	return ErrNoFinalCall
 }
@@ -497,6 +616,9 @@ func (t *roastFantasyTool) SetProviderOptions(opts fantasy.ProviderOptions) { t.
 
 func explorationFantasyTool(info fantasy.ToolInfo, definition Tool, state *agentRunState) fantasy.AgentTool {
 	return &roastFantasyTool{info: info, run: func(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		if state.blockExploration != "" && !definition.RecordsResult {
+			return fantasy.NewTextErrorResponse(state.blockExploration), nil
+		}
 		args := decodeArgs(call.Input)
 		var result any
 		var err error
@@ -527,6 +649,19 @@ func finalFantasyTool(info fantasy.ToolInfo, state *agentRunState) fantasy.Agent
 			resp := fantasy.NewTextErrorResponse(state.finalErr.Error())
 			resp.StopTurn = true
 			return resp, nil
+		}
+		if state.rejectFinal != "" {
+			return fantasy.NewTextErrorResponse(state.rejectFinal), nil
+		}
+		if state.finalDone {
+			resp := fantasy.NewTextResponse("Already submitted.")
+			resp.StopTurn = true
+			return resp, nil
+		}
+		// A response may carry several submissions; only the one that was
+		// validated is accepted.
+		if accepted := state.acceptFinal; accepted == nil || accepted.ToolCallID != call.ID || accepted.Input != call.Input {
+			return fantasy.NewTextErrorResponse("Not accepted: call `" + info.Name + "` once per response."), nil
 		}
 		resp := fantasy.NewTextResponse(call.Input)
 		resp.StopTurn = true
@@ -639,10 +774,6 @@ func findTool(tools []Tool, name string) *Tool {
 		}
 	}
 	return nil
-}
-
-func onlyFinalTool(tools []fantasy.Tool, final string) bool {
-	return len(tools) == 1 && tools[0] != nil && tools[0].GetName() == final
 }
 
 func fantasyConversationBytes(messages fantasy.Prompt) int {

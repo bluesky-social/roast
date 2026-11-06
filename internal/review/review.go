@@ -317,6 +317,9 @@ func Find(ctx context.Context, client llm.Client, in FindInput) (*Result, error)
 		Name:        "report_finding",
 		Description: "Report ONE finding the moment you confirm it, instead of holding findings until the end — findings reported here are saved immediately and survive even if the run is cut off by a budget or deadline. Same grounding bar as submit_findings: verbatim code_quote, concrete fixed_code. Re-reporting a finding replaces the earlier version; submit_findings may repeat it safely (deduplicated).",
 		Schema:      reflectSchema(&WireFinding{}),
+		// Recording only touches the accumulator, so it runs on the wrap-up
+		// turn and after the work deadline; that is when it matters most.
+		RecordsResult: true,
 		Run: func(_ context.Context, args map[string]any) (any, error) {
 			raw, err := json.Marshal(args)
 			if err != nil {
@@ -362,7 +365,9 @@ func Find(ctx context.Context, client llm.Client, in FindInput) (*Result, error)
 			} else if errors.Is(err, llm.ErrBudgetExhausted) {
 				stopReason = "token_budget"
 			}
-			note := fmt.Sprintf("interactive review ended without submit_findings (even after the reserved wrap-up turn); stop reason: %s", stopReason)
+			// Keep the cause: it carries the provider's error or the reason the
+			// model stopped, which the stop reason alone does not.
+			note := fmt.Sprintf("interactive review ended without submit_findings (even after the reserved wrap-up turn); stop reason: %s; cause: %v", stopReason, err)
 			if n := len(acc.order); n > 0 {
 				// The governing invariant: no stop path may discard
 				// accumulated work. The incrementally-reported findings ARE

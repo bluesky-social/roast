@@ -33,6 +33,11 @@ type Tool struct {
 	// Run is nil for the final tool (whose arguments are returned to the
 	// caller instead of dispatched).
 	Run ToolFunc
+	// RecordsResult marks a tool that only saves part of the result, such as
+	// a finding reported early, rather than exploring. It still runs on the
+	// wrap-up turn and after the work deadline, where exploration is refused,
+	// and a response that only records does not use up a submission attempt.
+	RecordsResult bool
 }
 
 // TurnInfo surfaces one tool-call round-trip for progress logging.
@@ -137,13 +142,21 @@ func (w *workDeadlineState) callCtx(ctx context.Context) (context.Context, conte
 // loop past the work deadline — at worst its goroutine is abandoned to
 // finish in the background. A dispatch arriving after the deadline latched
 // (later calls in a multi-tool response) short-circuits without starting
-// new exploration. Panics are contained here since Run leaves the caller's
-// stack.
+// new exploration. A RecordsResult tool always runs under the wrap-up window
+// instead, before or after the deadline, so work reported at the cutoff is
+// kept rather than interrupted. Panics are contained here since Run leaves
+// the caller's stack.
 func (w *workDeadlineState) runTool(ctx context.Context, tool *Tool, args map[string]any) (any, error) {
-	if w.check() {
-		return nil, ErrWorkDeadline
+	var toolCtx context.Context
+	var cancel context.CancelFunc
+	if tool.RecordsResult {
+		toolCtx, cancel = context.WithTimeout(ctx, w.window)
+	} else {
+		if w.check() {
+			return nil, ErrWorkDeadline
+		}
+		toolCtx, cancel = w.callCtx(ctx)
 	}
-	toolCtx, cancel := w.callCtx(ctx)
 	defer cancel()
 	type res struct {
 		v   any

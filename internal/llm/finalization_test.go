@@ -5,20 +5,27 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"charm.land/fantasy"
 )
 
+// assertAutomaticFinalCall checks a final-phase request: tool choice stays
+// automatic and the submission tool is offered. The tool set is not narrowed;
+// exploration calls are answered without being run.
 func assertAutomaticFinalCall(t *testing.T, call fantasy.Call) {
 	t.Helper()
 	if call.ToolChoice == nil || *call.ToolChoice != fantasy.ToolChoiceAuto {
 		t.Fatalf("tool choice = %v, want auto", call.ToolChoice)
 	}
-	if len(call.Tools) != 1 || call.Tools[0].GetName() != "submit" {
-		t.Fatalf("tools = %#v, want submit only", call.Tools)
+	for _, tool := range call.Tools {
+		if tool.GetName() == "submit" {
+			return
+		}
 	}
+	t.Fatalf("tools = %#v, want submit offered", call.Tools)
 }
 
 func TestFinalizationUsesAutomaticToolChoice(t *testing.T) {
@@ -298,5 +305,102 @@ func TestAgentFinalizationRetriesInvalidSubmission(t *testing.T) {
 	}, &out)
 	if err != nil || calls != 2 || out.Answer != "corrected" {
 		t.Fatalf("error=%v calls=%d answer=%q", err, calls, out.Answer)
+	}
+}
+
+func recordingTools(records *int, explore func()) []Tool {
+	return []Tool{
+		{Name: "read", Schema: map[string]any{"type": "object"}, Run: func(context.Context, map[string]any) (any, error) {
+			explore()
+			return nil, nil
+		}},
+		{Name: "record", Schema: map[string]any{"type": "object"}, RecordsResult: true, Run: func(context.Context, map[string]any) (any, error) {
+			*records++
+			return map[string]any{"recorded": true}, nil
+		}},
+		{Name: "submit", Schema: map[string]any{"type": "object"}},
+	}
+}
+
+// Recording on the wrap-up turn does not use up submission attempts, but it
+// has its own allowance: a model that only ever records still stops.
+func TestWrapUpRecordRoundsAreBounded(t *testing.T) {
+	calls, records := 0, 0
+	c := testClient(func(context.Context, fantasy.Call) (*fantasy.Response, error) {
+		calls++
+		if calls > 4 {
+			t.Fatal("recording reopened finalization without bound")
+		}
+		return toolCallResponse("record", `{}`), nil
+	})
+	var out struct{}
+	err := c.Converse(t.Context(), "system", "user", ConverseOpts{
+		MaxTurns: 1, FinalTool: "submit", Tools: recordingTools(&records, func() { t.Error("exploration ran on the wrap-up turn") }),
+	}, &out)
+	// One recording round within the allowance, then one that exceeds it:
+	// it still records, and the run stops without spending a submission.
+	if !errors.Is(err, ErrNoFinalCall) || calls != 2 || records != 2 || !strings.Contains(err.Error(), "2 recording rounds") {
+		t.Fatalf("error=%v calls=%d records=%d", err, calls, records)
+	}
+}
+
+// After the work deadline, recording still runs so the reported work is
+// kept, but no further wrap-up call is made.
+// A deadline that passes while a wrap-up response's tools run ends the loop:
+// no new wrap-up call opens after the cutoff.
+func TestDeadlineDuringWrapUpDispatchStopsFinalization(t *testing.T) {
+	calls := 0
+	c := testClient(func(context.Context, fantasy.Call) (*fantasy.Response, error) {
+		calls++
+		return toolCallResponse("record", `{}`), nil
+	})
+	c.cfg.MaxAttempts = 3
+	deadline := time.Now().Add(100 * time.Millisecond)
+	deadlineFired := false
+	var recorded atomic.Bool
+	var out struct{}
+	err := c.Converse(t.Context(), "system", "user", ConverseOpts{
+		MaxTurns: 1, FinalTool: "submit", WorkDeadline: deadline, OnWorkDeadline: func() { deadlineFired = true },
+		Tools: []Tool{
+			{Name: "record", Schema: map[string]any{"type": "object"}, RecordsResult: true, Run: func(ctx context.Context, _ map[string]any) (any, error) {
+				// Straddle the deadline; recording still gets to finish.
+				select {
+				case <-time.After(time.Until(deadline) + 20*time.Millisecond):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				recorded.Store(true)
+				return map[string]any{"recorded": true}, nil
+			}},
+			{Name: "submit", Schema: map[string]any{"type": "object"}},
+		},
+	}, &out)
+	if !errors.Is(err, ErrWorkDeadline) || !errors.Is(err, ErrNoFinalCall) || calls != 1 || !deadlineFired || !recorded.Load() {
+		t.Fatalf("error=%v calls=%d deadline fired=%v recorded=%v", err, calls, deadlineFired, recorded.Load())
+	}
+}
+
+func TestRecordToolRunsAfterDeadlineCutoff(t *testing.T) {
+	for _, withExploration := range []bool{false, true} {
+		t.Run(map[bool]string{false: "record-only", true: "with-exploration"}[withExploration], func(t *testing.T) {
+			calls, records := 0, 0
+			c := testClient(func(context.Context, fantasy.Call) (*fantasy.Response, error) {
+				calls++
+				content := fantasy.ResponseContent{fantasy.ToolCallContent{ToolCallID: "record", ToolName: "record", Input: `{}`}}
+				if withExploration {
+					content = append(fantasy.ResponseContent{fantasy.ToolCallContent{ToolCallID: "read", ToolName: "read", Input: `{}`}}, content...)
+				}
+				return &fantasy.Response{Content: content, FinishReason: fantasy.FinishReasonToolCalls}, nil
+			})
+			c.cfg.MaxAttempts = 3
+			var out struct{}
+			err := c.Converse(t.Context(), "system", "user", ConverseOpts{
+				MaxTurns: 4, FinalTool: "submit", WorkDeadline: time.Now().Add(-time.Second),
+				Tools: recordingTools(&records, func() { t.Error("exploration ran after the deadline") }),
+			}, &out)
+			if !errors.Is(err, ErrWorkDeadline) || !errors.Is(err, ErrNoFinalCall) || calls != 1 || records != 1 {
+				t.Fatalf("error=%v calls=%d records=%d", err, calls, records)
+			}
+		})
 	}
 }

@@ -113,8 +113,9 @@ withheld.
 A review sends its prompt, selected diff or repository manifest, file content,
 tool schemas, and local tool results to the configured finder endpoint. Candidate
 findings and the code needed to adjudicate them are sent to the configured
-verifier endpoint. `roast doctor` makes a small tool-submission inference request to
-each configured role in addition to querying its model-listing endpoint.
+verifier endpoint. `roast doctor` makes two small inference requests to each
+configured role (a fixed probe prompt, one tool call and its result, then a
+submission) in addition to querying its model-listing endpoint.
 
 Each inference request carries only the credential, base URL, and headers from
 Roast's resolved configuration. Roast ignores the provider SDKs' ambient

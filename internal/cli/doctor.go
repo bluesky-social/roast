@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -146,7 +147,8 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 	if maxOutputTokens <= 0 || maxOutputTokens > 512 {
 		maxOutputTokens = 512
 	}
-	probeContext, cancel := context.WithTimeout(ctx, 20*time.Second)
+	// Two requests of at most 15 seconds each, plus setup.
+	probeContext, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	client, err := llm.New(probeContext, llm.ClientConfig{
 		Role: name, BaseURL: role.BaseURL, APIKey: role.APIKey, Model: role.Model,
@@ -156,31 +158,52 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 	if err != nil {
 		return doctorResult{name + "-roundtrip", doctorFail, err.Error()}
 	}
+	// Exercise what a review relies on: a tool call, its result replayed on the
+	// next request, and a final submission made on the reserved wrap-up turn,
+	// all under the same automatic tool choice. A single-call probe passes on
+	// routes that then fail every review.
+	token := "roast-doctor-" + rand.Text()
+	looked := false
+	lookup := llm.Tool{
+		Name: "doctor_lookup", Description: "Return the diagnostic token.",
+		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Run: func(context.Context, map[string]any) (any, error) {
+			looked = true
+			return map[string]any{"token": token}, nil
+		},
+	}
 	final := llm.Tool{
 		Name: "doctor_probe", Description: "Return the diagnostic result.",
 		Schema: map[string]any{
-			"type":       "object",
-			"properties": map[string]any{"ok": map[string]any{"type": "boolean"}},
-			"required":   []string{"ok"}, "additionalProperties": false,
+			"type": "object",
+			"properties": map[string]any{
+				"ok":    map[string]any{"type": "boolean"},
+				"token": map[string]any{"type": "string"},
+			},
+			"required": []string{"ok", "token"}, "additionalProperties": false,
 		},
 	}
 	var output struct {
-		OK bool `json:"ok"`
+		OK    bool   `json:"ok"`
+		Token string `json:"token"`
 	}
 	err = client.Converse(probeContext,
-		"Call doctor_probe exactly once with ok=true.",
-		"Return the diagnostic result now.",
-		llm.ConverseOpts{Tools: []llm.Tool{final}, FinalTool: final.Name, MaxTurns: 1}, &output)
+		"This is a connectivity check. Call doctor_lookup once, then call doctor_probe with ok=true and the token doctor_lookup returned.",
+		"Run the check now.",
+		llm.ConverseOpts{Tools: []llm.Tool{lookup, final}, FinalTool: final.Name, MaxTurns: 2}, &output)
 	if err != nil {
 		if errors.Is(err, llm.ErrAuth) {
 			return doctorResult{name + "-roundtrip", doctorFail, "credential rejected by the configured inference route"}
 		}
-		return doctorResult{name + "-roundtrip", doctorFail, fmt.Sprintf("%s/%s tool-submission probe failed: %v", role.Protocol, role.Model, err)}
+		return doctorResult{name + "-roundtrip", doctorFail, fmt.Sprintf("%s/%s two-turn tool probe failed: %v", role.Protocol, role.Model, err)}
 	}
 	if !output.OK {
 		return doctorResult{name + "-roundtrip", doctorFail, "doctor_probe returned ok=false"}
 	}
-	return doctorResult{name + "-roundtrip", doctorPass, fmt.Sprintf("%s via %s", role.Model, role.Protocol)}
+	if !looked || output.Token != token {
+		return doctorResult{name + "-roundtrip", doctorFail, "doctor_probe did not return the token from doctor_lookup; the tool result did not round-trip"}
+	}
+	return doctorResult{name + "-roundtrip", doctorPass, fmt.Sprintf("%s via %s (two-turn tool loop)", role.Model, role.Protocol)}
 }
 
 func doctorBuildCheck() doctorResult {

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/bluesky-social/roast/internal/config"
-	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestDoctorEndpointCheck(t *testing.T) {
@@ -31,27 +31,7 @@ func TestDoctorEndpointCheck(t *testing.T) {
 }
 
 func TestDoctorJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(`{"data":[]}`))
-			return
-		}
-		_ = testutil.WriteInferenceStream(w, "responses", map[string]any{
-			"id": "resp-doctor", "object": "response", "created_at": 1,
-			"status": "completed", "model": "doctor-model",
-			"output": []any{map[string]any{
-				"id": "fc-doctor", "type": "function_call", "call_id": "call-doctor",
-				"name": "doctor_probe", "arguments": `{"ok":true}`, "status": "completed",
-			}},
-			"usage": map[string]any{
-				"input_tokens": 10, "output_tokens": 3, "total_tokens": 13,
-				"input_tokens_details":  map[string]any{"cached_tokens": 0},
-				"output_tokens_details": map[string]any{"reasoning_tokens": 0},
-			},
-		})
-	}))
-	defer server.Close()
+	server, _ := newDoctorProbeServer(t, "responses")
 	t.Setenv("DOCTOR_KEY", "secret")
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	body := "version: 1\ninference_profiles:\n  finder:\n    endpoint: " + server.URL + "/v1\n    api_key_env: DOCTOR_KEY\n    model: finder-model\n    protocol: responses\n  verifier:\n    endpoint: " + server.URL + "/v1\n    api_key_env: DOCTOR_KEY\n    model: verifier-model\n    protocol: responses\nroles:\n  finder:\n    profile: finder\n  verifier:\n    profile: verifier\n"
@@ -127,37 +107,42 @@ func TestDoctorReportsWithheldAmbientCredential(t *testing.T) {
 }
 
 func TestDoctorRoundtripUsesConfiguredResponsesRoute(t *testing.T) {
-	var calls int
+	_, fixture := newDoctorProbeServer(t, "responses")
+	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		paths = append(paths, r.URL.Path)
 		if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer secret" {
 			t.Errorf("path=%q auth=%q", r.URL.Path, r.Header.Get("Authorization"))
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = testutil.WriteJSONStream(w, "responses", `{"id":"resp","object":"response","created_at":1,"status":"completed","model":"finder-model","output":[{"id":"fc","type":"function_call","call_id":"call","name":"doctor_probe","arguments":"{\"ok\":true}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
+		fixture.ServeHTTP(w, r)
 	}))
 	defer server.Close()
 	result := doctorRoundtripCheck(t.Context(), "finder", config.ResolvedRole{
 		BaseURL: server.URL + "/v1", APIKey: "secret", Model: "finder-model",
 		Protocol: "responses", MaxOutputTokens: 1024,
 	})
-	if result.Status != doctorPass || calls != 1 {
-		t.Fatalf("doctorRoundtripCheck() = %#v, calls=%d", result, calls)
+	if result.Status != doctorPass || len(paths) != 2 {
+		t.Fatalf("doctorRoundtripCheck() = %#v, paths=%v", result, paths)
 	}
 }
 
 func TestDoctorReportsAndSendsSessionHeader(t *testing.T) {
+	probes := map[string]*doctorProbeServer{
+		"finder-model":   {t: t, protocol: "responses"},
+		"verifier-model": {t: t, protocol: "responses"},
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
 			_, _ = w.Write([]byte(`{"data":[]}`))
 			return
 		}
+		body, _ := io.ReadAll(r.Body)
 		var request struct {
 			Model string `json:"model"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if err := json.Unmarshal(body, &request); err != nil || probes[request.Model] == nil {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
 		configured := r.Header.Get("X-Opencode-Session")
@@ -165,7 +150,8 @@ func TestDoctorReportsAndSendsSessionHeader(t *testing.T) {
 			http.Error(w, "session_header was not applied to exactly the finder profile", http.StatusBadRequest)
 			return
 		}
-		_ = testutil.WriteJSONStream(w, "responses", `{"id":"resp","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"fc","type":"function_call","call_id":"call","name":"doctor_probe","arguments":"{\"ok\":true}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		probes[request.Model].ServeHTTP(w, r)
 	}))
 	defer server.Close()
 	t.Setenv("DOCTOR_KEY", "secret")

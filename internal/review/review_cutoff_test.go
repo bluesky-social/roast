@@ -2,6 +2,8 @@ package review
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bluesky-social/roast/internal/llm"
@@ -31,5 +33,21 @@ func TestSuccessfulDeadlineWrapUpIsIncomplete(t *testing.T) {
 	}
 	if !result.Incomplete || result.StopReason != "deadline" {
 		t.Fatalf("incomplete=%v stop_reason=%q", result.Incomplete, result.StopReason)
+	}
+}
+
+type noSubmissionClient struct{ cutoffClient }
+
+func (noSubmissionClient) Converse(context.Context, string, string, llm.ConverseOpts, any) error {
+	return fmt.Errorf("%w: finder-model: the response ended with finish reason %q", llm.ErrNoFinalCall, "length")
+}
+
+func TestNoSubmissionNoteKeepsTheCause(t *testing.T) {
+	result, err := Find(t.Context(), noSubmissionClient{}, FindInput{Interactive: true, MaxTurns: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Incomplete || len(result.Notes) != 1 || !strings.Contains(result.Notes[0], `finish reason "length"`) {
+		t.Fatalf("incomplete=%v notes=%q", result.Incomplete, result.Notes)
 	}
 }

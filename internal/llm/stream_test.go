@@ -70,8 +70,8 @@ func TestStreamCancellationDoesNotDispatchBufferedTool(t *testing.T) {
 						yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: ctx.Err()})
 						return
 					}
-					if len(call.Tools) != 1 || call.Tools[0].GetName() != "submit" || ctx.Err() != nil {
-						t.Error("wrap-up did not get final-only tools and a fresh context")
+					if len(call.Tools) != 2 || call.Tools[1].GetName() != "submit" || ctx.Err() != nil {
+						t.Error("wrap-up did not keep the tool set and get a fresh context")
 					}
 					if yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: "submit", ToolCallName: "submit", ToolCallInput: `{"answer":"partial"}`}) {
 						yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonToolCalls})
