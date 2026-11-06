@@ -50,12 +50,13 @@ not have those sources replaced by the legacy key.
 Releases before 1.1 read `$XDG_CONFIG_HOME/roast/config.yaml`, or
 `~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset, on every
 platform. Current releases use the operating system's user configuration
-directory instead; the README's
-[Config file location](../README.md#config-file-location) table lists the
-default path for each platform. On macOS and Windows the old and new paths
-differ, and Roast consults the old one only while installing from a
-configuration URL; without a URL, move the file to the new path or pass it with
-`--config`.
+directory by default, but also honor an explicitly set `XDG_CONFIG_HOME` on
+macOS. The README's [Config file location](../README.md#config-file-location)
+section lists the paths and overrides. On macOS, set `XDG_CONFIG_HOME` to
+`$HOME/.config` to keep using the old path. Otherwise, on macOS and Windows the
+old and new paths differ, and Roast consults the old one only while installing
+from a configuration URL; without a URL, move the file to the new path or pass
+it with `--config`.
 
 `roast doctor` shows the selected config path. In-place legacy replacement keeps
 a `.pre-v1` backup and writes the new file with owner-only permissions on Unix.

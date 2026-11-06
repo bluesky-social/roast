@@ -195,13 +195,21 @@ directory:
 
 | Platform | Default path |
 | --- | --- |
-| macOS | `~/Library/Application Support/roast/config.yaml` |
+| macOS | `$XDG_CONFIG_HOME/roast/config.yaml` when set, otherwise `~/Library/Application Support/roast/config.yaml` |
 | Linux and other Unix | `$XDG_CONFIG_HOME/roast/config.yaml`, or `~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset |
 | Windows | `%AppData%\roast\config.yaml` |
 
-macOS and Windows ignore `XDG_CONFIG_HOME`; where it applies, it must be an
-absolute path. A missing default file is not an error. `roast doctor` reports
-the path it used.
+Windows ignores `XDG_CONFIG_HOME`. On macOS and other Unix platforms, a non-empty
+`XDG_CONFIG_HOME` must be an absolute path; unset or empty keeps the platform's
+default. An explicit `--config` takes precedence. A missing default file is not
+an error. `roast doctor` reports the path it used.
+
+To keep your configuration under `~/.config` on macOS, add this to your shell's
+startup file:
+
+```sh
+export XDG_CONFIG_HOME="$HOME/.config"
+```
 
 ### Configuration URLs
 
