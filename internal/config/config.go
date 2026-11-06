@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -215,8 +216,16 @@ func Defaults() Config {
 	}
 }
 
-// UserPath returns the default config file path.
+// UserPath returns the default config file path, honoring XDG_CONFIG_HOME on macOS.
 func UserPath() (string, error) {
+	if runtime.GOOS == "darwin" {
+		if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+			if !filepath.IsAbs(dir) {
+				return "", fmt.Errorf("resolve user config directory: XDG_CONFIG_HOME must be an absolute path")
+			}
+			return filepath.Join(dir, "roast", "config.yaml"), nil
+		}
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user config directory: %w", err)

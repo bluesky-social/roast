@@ -50,12 +50,29 @@ not have those sources replaced by the legacy key.
 Releases before 1.1 read `$XDG_CONFIG_HOME/roast/config.yaml`, or
 `~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset, on every
 platform. Current releases use the operating system's user configuration
-directory instead; the README's
-[Config file location](../README.md#config-file-location) table lists the
-default path for each platform. On macOS and Windows the old and new paths
-differ, and Roast consults the old one only while installing from a
-configuration URL; without a URL, move the file to the new path or pass it with
-`--config`.
+directory by default, but also honor an explicitly set `XDG_CONFIG_HOME` on
+macOS. The README's [Config file location](../README.md#config-file-location)
+section lists the paths and overrides. On macOS, set `XDG_CONFIG_HOME` to
+`$HOME/.config` to keep using the old path. Otherwise, on macOS and Windows the
+old and new paths differ, and Roast consults the old one only while installing
+from a configuration URL; without a URL, move the file to the new path or pass
+it with `--config`.
+
+On macOS, an existing non-empty `XDG_CONFIG_HOME` changes the selected path after
+this upgrade, even if you did not change your environment. Roast does not fall
+back to `~/Library/Application Support/roast/config.yaml`. If the selected file
+is missing, Roast uses defaults plus environment variables. Non-interactive
+commands do not warn about the previous file.
+
+If you already export an absolute `XDG_CONFIG_HOME`, move your configuration from
+`~/Library/Application Support/roast/config.yaml` to `$XDG_CONFIG_HOME/roast/config.yaml`.
+To keep the file at its existing location, pass
+`--config "$HOME/Library/Application Support/roast/config.yaml"`.
+Run `roast doctor` to check the selected path before you run reviews, hooks, or agents.
+
+A relative `XDG_CONFIG_HOME` on macOS was previously ignored. After this upgrade,
+commands that use the default path fail with a relative value. Use an absolute
+path, unset the variable, or pass an explicit `--config`.
 
 `roast doctor` shows the selected config path. In-place legacy replacement keeps
 a `.pre-v1` backup and writes the new file with owner-only permissions on Unix.
