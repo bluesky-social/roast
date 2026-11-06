@@ -58,6 +58,22 @@ old and new paths differ, and Roast consults the old one only while installing
 from a configuration URL; without a URL, move the file to the new path or pass
 it with `--config`.
 
+On macOS, an existing non-empty `XDG_CONFIG_HOME` changes the selected path after
+this upgrade, even if you did not change your environment. Roast does not fall
+back to `~/Library/Application Support/roast/config.yaml`. If the selected file
+is missing, Roast uses defaults plus environment variables. Non-interactive
+commands do not warn about the previous file.
+
+If you already export an absolute `XDG_CONFIG_HOME`, move your configuration from
+`~/Library/Application Support/roast/config.yaml` to `$XDG_CONFIG_HOME/roast/config.yaml`.
+To keep the file at its existing location, pass
+`--config "$HOME/Library/Application Support/roast/config.yaml"`.
+Run `roast doctor` to check the selected path before you run reviews, hooks, or agents.
+
+A relative `XDG_CONFIG_HOME` on macOS was previously ignored. After this upgrade,
+commands that use the default path fail with a relative value. Use an absolute
+path, unset the variable, or pass an explicit `--config`.
+
 `roast doctor` shows the selected config path. In-place legacy replacement keeps
 a `.pre-v1` backup and writes the new file with owner-only permissions on Unix.
 When the destination differs, the old file is left untouched. Both the old file

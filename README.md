@@ -204,6 +204,10 @@ Windows ignores `XDG_CONFIG_HOME`. On macOS and other Unix platforms, a non-empt
 default. An explicit `--config` takes precedence. A missing default file is not
 an error. `roast doctor` reports the path it used.
 
+On macOS, this also changes the selected path if you already export
+`XDG_CONFIG_HOME`. See the [upgrade guide](docs/upgrading.md#2-initialize-configuration)
+before upgrading an existing installation.
+
 To keep your configuration under `~/.config` on macOS, add this to your shell's
 startup file:
 
