@@ -30,6 +30,12 @@ it against the published SHA-256 checksums. Or, with Go 1.27.3 or newer:
 go install github.com/bluesky-social/roast/cmd/roast@latest
 ```
 
+Or use the community-maintained AUR packages:
+
+```sh
+yay -S roast # -git
+```
+
 To build from a checkout, run `go build ./cmd/roast`. `roast --version` prints
 the version, commit, and build date.
 
