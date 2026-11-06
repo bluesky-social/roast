@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -272,4 +273,119 @@ func TestNoSubmissionNamesTheCause(t *testing.T) {
 			t.Fatalf("error = %v, want the provider error ahead of a single generic sentinel", err)
 		}
 	})
+}
+
+// newReasoningOnlyServer answers every request the way a thinking model does
+// when its reasoning spends the whole output ceiling: reasoning content only,
+// no text and no tool call, then the given finish reason.
+func newReasoningOnlyServer(t *testing.T, protocol, finish, signature string) (*httptest.Server, *atomic.Int32) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		requests.Add(1)
+		var response map[string]any
+		switch protocol {
+		case "chat":
+			response = map[string]any{
+				"id": "chat", "object": "chat.completion", "model": "deepseek-test",
+				"choices": []any{map[string]any{"index": 0, "finish_reason": finish, "message": map[string]any{
+					"role": "assistant", "reasoning_content": "Checking each call site before deciding",
+				}}},
+				"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 256, "total_tokens": 266},
+			}
+		case "anthropic":
+			response = map[string]any{
+				"id": "msg", "type": "message", "role": "assistant", "model": "deepseek-test",
+				"content": []any{map[string]any{
+					"type": "thinking", "thinking": "Checking each call site before deciding", "signature": signature,
+				}},
+				"stop_reason": finish,
+				"usage":       map[string]any{"input_tokens": 10, "output_tokens": 256},
+			}
+		}
+		_ = testutil.WriteInferenceStream(w, protocol, response)
+	}))
+	t.Cleanup(server.Close)
+	return server, &requests
+}
+
+// A thinking model can spend its whole output ceiling on reasoning and stop
+// with a length finish before calling any tool. The error must name that
+// finish once and point at max_output_tokens, on the exploration turn and on
+// the single-call structured path, without spending retries on it.
+func TestReasoningOnlyLengthFinishNamesTheCeiling(t *testing.T) {
+	type variant struct{ protocol, finish, signature string }
+	for name, v := range map[string]variant{
+		"chat":               {"chat", "length", ""},
+		"anthropic/signed":   {"anthropic", "max_tokens", "ds-1"},
+		"anthropic/unsigned": {"anthropic", "max_tokens", ""},
+	} {
+		for _, mode := range []string{"converse", "structured"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				server, requests := newReasoningOnlyServer(t, v.protocol, v.finish, v.signature)
+				c := deepSeekClient(t, server, v.protocol)
+				var out struct {
+					Answer string `json:"answer"`
+				}
+				var err error
+				if mode == "structured" {
+					err = c.CompleteStructured(t.Context(), "system", "user", "submit", &out)
+				} else {
+					err = c.Converse(t.Context(), "system", "user", ConverseOpts{
+						MaxTurns: 4, FinalTool: "submit", Tools: basicTools(func(context.Context, map[string]any) (any, error) {
+							t.Error("exploration tool ran after a reasoning-only response")
+							return nil, nil
+						}),
+					}, &out)
+				}
+				if err == nil {
+					t.Fatal("reasoning-only response produced no error")
+				}
+				message := err.Error()
+				t.Logf("error: %s", message)
+				if !errors.Is(err, ErrNoFinalCall) || errors.Is(err, ErrEndpoint) {
+					t.Fatalf("error = %v, want a no-submission error, not an endpoint failure", err)
+				}
+				if !strings.Contains(message, "deepseek-test") || !strings.Contains(message, `finish reason "length"`) || !strings.Contains(message, "raise max_output_tokens") {
+					t.Fatalf("error = %v, want the length finish and the max_output_tokens hint", err)
+				}
+				if strings.Count(message, "finish reason") != 1 || strings.Count(message, "max_output_tokens") != 1 {
+					t.Fatalf("error = %v, want the cause stated once", err)
+				}
+				if got := requests.Load(); got != 1 {
+					t.Fatalf("requests = %d, want 1: a length finish is not retried", got)
+				}
+			})
+		}
+	}
+}
+
+// Fantasy maps finish reasons it does not model specifically, such as
+// DeepSeek's insufficient_system_resource, to a generic category. The error
+// must also name the provider's own reason, and only a length finish suggests
+// raising max_output_tokens.
+func TestAbnormalFinishNamesTheProviderReason(t *testing.T) {
+	for finish, category := range map[string]string{
+		"insufficient_system_resource": "error",
+		"content_filter":               "content-filter",
+		"unrecognized_reason":          "unknown",
+	} {
+		t.Run(finish, func(t *testing.T) {
+			server, _ := newReasoningOnlyServer(t, "chat", finish, "")
+			var out struct{ Answer string }
+			err := deepSeekClient(t, server, "chat").CompleteStructured(t.Context(), "system", "user", "submit", &out)
+			if err == nil {
+				t.Fatal("abnormal finish produced no error")
+			}
+			message := err.Error()
+			t.Logf("error: %s", message)
+			want := fmt.Sprintf("finish reason %q (the provider sent %q)", category, finish)
+			if !errors.Is(err, ErrNoFinalCall) || !strings.Contains(message, want) || strings.Count(message, finish) != 1 {
+				t.Fatalf("error = %v, want %s stated once", err, want)
+			}
+			if strings.Contains(message, "max_output_tokens") {
+				t.Fatalf("error = %v, want no output-ceiling hint for a non-length finish", err)
+			}
+		})
+	}
 }

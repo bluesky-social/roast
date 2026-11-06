@@ -50,6 +50,11 @@ never repository content, and skip unless their API key variable is set:
 ROAST_LIVE_ANTHROPIC_API_KEY=... go test ./internal/llm -run TestLive -count=1 -v
 ```
 
+With a DeepSeek key, a second test makes one structured call with a 256-token
+output ceiling, which a thinking model spends on reasoning before it calls a
+tool. It checks that the error names the `length` finish and suggests raising
+`max_output_tokens`, and skips if the model answers within the ceiling.
+
 The Anthropic test also sends the `thinking-binding-controls-2026-08-01` beta
 header without changing the mismatch behavior, so accounts that do not enforce
 thinking-block binding still report a replay whose prefix changed; the test

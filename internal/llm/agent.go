@@ -298,7 +298,18 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 	// is signed over that call), and nothing is dispatched before capture.
 	var held []fantasy.StreamPart
 	var calls []fantasy.ToolCallContent
+	// Fantasy maps provider finish reasons to a few categories. Some adapters
+	// (chat, as of v0.46) also keep the provider's own string, but only on the
+	// warning they attach to an abnormal finish.
+	var rawFinish string
 	for part := range stream {
+		if part.Type == fantasy.StreamPartTypeWarnings {
+			for _, warning := range part.Warnings {
+				if warning.RawFinishReason != "" {
+					rawFinish = warning.RawFinishReason
+				}
+			}
+		}
 		switch part.Type {
 		case fantasy.StreamPartTypeError:
 			return part.Error
@@ -337,6 +348,9 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 		appended, reason = m.reviewResponse(calls)
 	} else {
 		m.state.stopCause = fmt.Sprintf("the response ended with finish reason %q", reason)
+		if rawFinish != "" && rawFinish != string(reason) {
+			m.state.stopCause += fmt.Sprintf(" (the provider sent %q)", rawFinish)
+		}
 		if reason == fantasy.FinishReasonLength {
 			m.state.stopCause += "; raise max_output_tokens if the output was cut off"
 		}
@@ -730,11 +744,47 @@ func fantasyToolInfo(t Tool) (fantasy.ToolInfo, map[string]any, error) {
 	return fantasy.ToolInfo{Name: t.Name, Description: t.Description, Parameters: parameters, Required: required}, schema, nil
 }
 
+// cloneSchema returns a deep copy of schema for one request. Fantasy's
+// Anthropic adapter reads a required list only as []string and sends an empty
+// one for any other shape, so every required list the JSON round trip decoded
+// as []any is restored to []string.
 func cloneSchema(schema map[string]any) map[string]any {
 	data, _ := json.Marshal(schema)
 	var clone map[string]any
 	_ = json.Unmarshal(data, &clone)
+	restoreRequiredLists(clone)
 	return clone
+}
+
+func restoreRequiredLists(node any) {
+	switch node := node.(type) {
+	case map[string]any:
+		for key, child := range node {
+			if list, ok := child.([]any); ok && key == "required" {
+				if names, ok := stringList(list); ok {
+					node[key] = names
+					continue
+				}
+			}
+			restoreRequiredLists(child)
+		}
+	case []any:
+		for _, item := range node {
+			restoreRequiredLists(item)
+		}
+	}
+}
+
+func stringList(items []any) ([]string, bool) {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		name, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		names = append(names, name)
+	}
+	return names, true
 }
 
 func reflectSchema(v any) map[string]any {

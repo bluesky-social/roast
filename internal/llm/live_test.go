@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -208,4 +209,39 @@ func TestLiveDeepSeekTwoTurnReview(t *testing.T) {
 		Model:    liveSetting("ROAST_LIVE_DEEPSEEK_MODEL", "deepseek-v4-pro"),
 		Protocol: liveSetting("ROAST_LIVE_DEEPSEEK_PROTOCOL", "chat"),
 	}, &liveRecorder{target: base})
+}
+
+// A thinking model given too small an output ceiling spends it on reasoning
+// and stops before calling a tool. The error must name the length finish and
+// the setting to raise, not report a generic failure.
+func TestLiveDeepSeekReasoningCeiling(t *testing.T) {
+	key := liveSetting("ROAST_LIVE_DEEPSEEK_API_KEY", "")
+	if key == "" {
+		t.Skip("set ROAST_LIVE_DEEPSEEK_API_KEY to run against a DeepSeek endpoint")
+	}
+	recorder := &liveRecorder{target: strings.TrimRight(liveSetting("ROAST_LIVE_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"), "/")}
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+	c, err := New(t.Context(), ClientConfig{
+		Role: "finder", APIKey: key, BaseURL: server.URL + "/v1",
+		Model:           liveSetting("ROAST_LIVE_DEEPSEEK_MODEL", "deepseek-v4-pro"),
+		Protocol:        liveSetting("ROAST_LIVE_DEEPSEEK_PROTOCOL", "chat"),
+		MaxOutputTokens: 256, MaxAttempts: 1, RequestTimeout: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Primes int `json:"primes"`
+	}
+	err = c.CompleteStructured(t.Context(),
+		"Before calling any tool, think carefully and at length: for each of 2^31-1, 2^61-1, and 2^67-1, decide whether it is prime and check your reasoning. Then call submit with primes set to that count.",
+		"Begin.", "submit", &out)
+	if err == nil {
+		t.Skipf("the model submitted within a 256-token ceiling (primes=%d), so the length path was not exercised", out.Primes)
+	}
+	t.Logf("error: %v", err)
+	if !errors.Is(err, ErrNoFinalCall) || !strings.Contains(err.Error(), `finish reason "length"`) || !strings.Contains(err.Error(), "raise max_output_tokens") {
+		t.Fatalf("error = %v, want the length finish named with the max_output_tokens hint", err)
+	}
 }
