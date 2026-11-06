@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,6 +17,76 @@ func writeConfig(t *testing.T, data string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestUserPath(t *testing.T) {
+	home := t.TempDir()
+	appData := t.TempDir()
+	xdg := filepath.Join(t.TempDir(), "config with spaces")
+	native := filepath.Join(home, ".config")
+	switch runtime.GOOS {
+	case "darwin":
+		native = filepath.Join(home, "Library", "Application Support")
+	case "windows":
+		native = appData
+	}
+	for _, tc := range []struct {
+		name  string
+		xdg   string
+		unset bool
+	}{
+		{name: "unset", unset: true},
+		{name: "empty"},
+		{name: "absolute", xdg: xdg},
+		{name: "relative", xdg: "relative-config"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			t.Setenv("APPDATA", appData)
+			t.Setenv("XDG_CONFIG_HOME", tc.xdg)
+			if tc.unset {
+				if err := os.Unsetenv("XDG_CONFIG_HOME"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path, err := UserPath()
+			if tc.name == "relative" && runtime.GOOS != "windows" {
+				if err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME") {
+					t.Fatalf("UserPath() = %q, %v; want an XDG_CONFIG_HOME error", path, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := native
+			if tc.name == "absolute" && runtime.GOOS != "windows" {
+				root = xdg
+			}
+			if want := filepath.Join(root, "roast", "config.yaml"); path != want {
+				t.Fatalf("UserPath() = %q, want %q", path, want)
+			}
+		})
+	}
+}
+
+func TestLoadExplicitPathOverridesConfigHome(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "relative-config")
+	path := writeConfig(t, `version: 1
+inference_profiles:
+  finder:
+    model: explicit-finder
+roles:
+  finder:
+    profile: finder
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.InferenceProfiles["finder"].Model; got != "explicit-finder" {
+		t.Fatalf("finder model = %q, want explicit-finder", got)
+	}
 }
 
 func TestLoadResolvesNamedProfilesAndRoleEnvironment(t *testing.T) {
