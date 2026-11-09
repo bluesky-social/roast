@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.3 (2026-11-09)
+
+## What's Changed
+* chore(deps): update ci go tools by @renovate[bot] in https://github.com/bluesky-social/roast/pull/143
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.2...v1.4.3
+
 ## 1.4.2 (2026-11-09)
 
 ## What's Changed
