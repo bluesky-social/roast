@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.1 (2026-11-09)
+
+## What's Changed
+* fix(deps): update module github.com/aws/smithy-go to v1.28.8 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/134
+* chore(deps): update dependency goreleaser/goreleaser to v2.20.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/136
+* chore(deps): update module github.com/andybalholm/brotli to v1.2.8 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/137
+* chore(deps): update module github.com/nwaples/rardecode/v2 to v2.4.6 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/139
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/138
+* fix(deps): update golang:1.27.3 docker digest to e519d3b by @renovate[bot] in https://github.com/bluesky-social/roast/pull/141
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.0...v1.4.1
+
 ## 1.4.0 (2026-11-06)
 
 ## What's Changed
