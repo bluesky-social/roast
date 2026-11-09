@@ -9,7 +9,11 @@
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
       "draft": true,
-      "force-tag-creation": true
+      "force-tag-creation": true,
+      "exclude-paths": [
+        "docs",
+        ".github"
+      ]
     }
   }
 }
