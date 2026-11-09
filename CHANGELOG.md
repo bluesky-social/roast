@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.4 (2026-11-09)
+
+## What's Changed
+* chore(deps): update module golang.org/x/sys to v0.50.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/149
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.3...v1.4.4
+
 ## 1.4.3 (2026-11-09)
 
 ## What's Changed
