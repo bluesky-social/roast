@@ -126,6 +126,9 @@ that bot's own verified commits, and only from the hourly scheduled run on
 weekdays 09:00-16:00 PT. Required CI checks and strict branch protection still
 apply. Any human-authored change, including a `fix:` or a commit that would
 not release on its own, waits for a maintainer to merge the Release PR.
+A commit that changes only files under `docs/` or `.github/`
+(`exclude-paths` in `release-please-config.json`) neither releases on its
+own nor counts as human-authored; root files like `README.md` still count.
 Renovate supplies the dependency aging policy (three days for ordinary
 updates, no delay for advisory-driven updates). Maintainers can run the
 workflow manually to queue an eligible release immediately or reconcile a
