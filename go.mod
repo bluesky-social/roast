@@ -1,6 +1,6 @@
 module github.com/bluesky-social/roast
 
-go 1.27.3
+go 1.27.4
 
 require (
 	charm.land/fantasy v0.46.0

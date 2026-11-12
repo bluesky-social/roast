@@ -1,6 +1,6 @@
 module github.com/bluesky-social/roast/tools/staticcheck
 
-go 1.27.3
+go 1.27.4
 
 tool honnef.co/go/tools/cmd/staticcheck
 
