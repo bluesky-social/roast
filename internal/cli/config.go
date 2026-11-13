@@ -199,6 +199,13 @@ func writeProvisionSummary(w io.Writer, plan *config.ProvisionPlan) {
 			_, _ = fmt.Fprintf(w, "  %-9s author %s -> %s\n", "", textsafe.Line(route), describeProfile(cfg, name, role.AuthorRoutes[route], plan.ImportedLegacyCredential))
 		}
 	}
+	for _, name := range cfg.DiceRoll.Profiles {
+		if _, ok := cfg.InferenceProfiles[name]; !ok {
+			_, _ = fmt.Fprintf(w, "  %-9s unknown profile %s\n", "dice:", textsafe.Line(name))
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "  %-9s %s\n", "dice:", describeProfile(cfg, "", name, plan.ImportedLegacyCredential))
+	}
 	_, _ = fmt.Fprintf(w, "  %-9s %s\n", "upload:", describeUpload(cfg.Upload, plan.ImportedLegacyCredential))
 }
 

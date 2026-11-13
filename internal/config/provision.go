@@ -494,6 +494,11 @@ func rejectControlCharacters(cfg Config) error {
 			return err
 		}
 	}
+	for i, profile := range cfg.DiceRoll.Profiles {
+		if err := check(field{fmt.Sprintf("dice_roll.profiles[%d]", i), profile}); err != nil {
+			return err
+		}
+	}
 	upload := cfg.Upload
 	return check(
 		field{"upload.backend", upload.Backend}, field{"upload.endpoint", upload.Endpoint},

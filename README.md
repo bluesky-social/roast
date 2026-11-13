@@ -183,6 +183,35 @@ roles:
 
 `roles.finder.pin: true` keeps the configured finder anyway, with a warning.
 
+### Dice roll
+
+A pool is a list of inference profiles that Roast can choose from. Keep both
+fixed roles in your configuration and add a pool of profiles:
+
+```yaml
+roles:
+  finder:
+    profile: claude
+  verifier:
+    profile: verifier
+dice_roll:
+  profiles: [claude, verifier]
+```
+
+Both `roles.finder.profile` and `roles.verifier.profile` are required when a
+pool is configured. Reviews without `--dice-roll` use those fixed roles.
+
+Run `roast review --dice-roll` to choose a finder and verifier at random from
+the pool. The two models must have different names. Each role uses the selected
+profile's endpoint, protocol, and credentials. Roast prints the choices to
+standard error (`stderr`) and saves them with the run. Random choices can repeat.
+
+Dice roll ignores fixed roles, finder author routes, and `ROAST_FINDER_*` /
+`ROAST_VERIFIER_*` overrides. You cannot combine role-specific CLI flags with
+`--dice-roll`. Profile credentials and provider environment fallbacks still
+apply. If you use `--quick` or `--no-verify`, Roast selects only a finder. In
+that case, the pool can contain one profile.
+
 ### Other settings
 
 | Key | Default | Effect |
@@ -250,6 +279,7 @@ roast review --task 'add retry handling'   # review the current changes
 roast review --staged --max-severity HIGH  # staged changes; exit 1 on HIGH+
 roast review --interactive                 # let the finder navigate the repo
 roast review --quick                       # finder only, no verification
+roast review --dice-roll                   # choose models from the configured pool
 roast review --scope repo                  # survey the whole repository
 roast runs                                 # list local runs
 roast runs show <run-id>
