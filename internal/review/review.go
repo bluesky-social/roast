@@ -77,6 +77,8 @@ func ClassifyLangs(files []string) []string {
 // Verdict and DropReason are post-hoc fields never exposed to the model;
 // separating them prevents the model from fabricating verdict/drop data and
 // keeps invopop from including them in the JSON Schema required array.
+// Field order matters: reasoning first lets the model commit to its
+// justification before choosing a severity.
 type WireFinding struct {
 	Reasoning        string   `json:"reasoning"`
 	Severity         Severity `json:"severity" jsonschema:"enum=INFO,enum=LOW,enum=MEDIUM,enum=HIGH,enum=CRITICAL"`
