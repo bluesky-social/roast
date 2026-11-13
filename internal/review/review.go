@@ -87,11 +87,15 @@ type WireFinding struct {
 	Lines            []int    `json:"lines"`
 	CodeQuote        string   `json:"code_quote" jsonschema_description:"Verbatim copy of the cited lines, exactly as they appear in <files>"`
 	FixedCode        string   `json:"fixed_code" jsonschema_description:"Concrete replacement for code_quote that resolves the issue"`
-	FrontendCategory string   `json:"frontend_category" jsonschema:"enum=,enum=hooks,enum=security,enum=a11y,enum=perf,enum=ts" jsonschema_description:"Which frontend-addendum dimension produced this finding; empty for non-frontend findings"`
+	FrontendCategory string   `json:"frontend_category" jsonschema:"enum=none,enum=hooks,enum=security,enum=a11y,enum=perf,enum=ts" jsonschema_description:"Which frontend-addendum dimension produced this finding; use none for other findings"`
 }
 
 // ToFinding converts a WireFinding to a Finding with empty post-hoc fields.
 func (w WireFinding) ToFinding() Finding {
+	category := w.FrontendCategory
+	if category == "none" {
+		category = ""
+	}
 	return Finding{
 		Reasoning:        w.Reasoning,
 		Severity:         w.Severity,
@@ -102,7 +106,7 @@ func (w WireFinding) ToFinding() Finding {
 		Lines:            append([]int(nil), w.Lines...),
 		CodeQuote:        w.CodeQuote,
 		FixedCode:        w.FixedCode,
-		FrontendCategory: w.FrontendCategory,
+		FrontendCategory: category,
 	}
 }
 
