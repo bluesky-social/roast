@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.7 (2026-11-14)
+
+## What's Changed
+* chore(renovate): drop the gitleaks lipgloss major rule by @amckinley in https://github.com/bluesky-social/roast/pull/165
+* fix(deps): update module charm.land/fantasy to v0.48.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/164
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.6...v1.4.7
+
 ## 1.4.6 (2026-11-14)
 
 ## What's Changed
