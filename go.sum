@@ -1,5 +1,5 @@
-charm.land/fantasy v0.47.0 h1:xXyXQ8mjOlbPL1dekqMlRrvWQMn4a4ubd4TzutCYHu8=
-charm.land/fantasy v0.47.0/go.mod h1:mlQPOIZl/4CLecpnBTjvttB397UiyIsB9h8vJ4W6ygM=
+charm.land/fantasy v0.48.0 h1:/Hyp0cooUP2DbyZuRpVBdQtfCd8+RNSp3TtIS5YJfAo=
+charm.land/fantasy v0.48.0/go.mod h1:yMRO+5VDULO66s1UedaXDF8rCMwgolrJA5QJhsTzDdQ=
 cloud.google.com/go/auth v0.24.4 h1:m49juFKXOaeRwmLgcrd3e4hrwqLDe1+4g8fH0EoznUU=
 cloud.google.com/go/auth v0.24.4/go.mod h1:p4UXqfSXnMVUDutk9xePzI8lj8yyoJ3BLsKWv0NSvQk=
 cloud.google.com/go/auth/oauth2adapt v0.3.1 h1:BKLDdbWS7pafd820dsyFDF6fPEzIGqr7ny6hbTzCCgE=
@@ -112,6 +112,8 @@ github.com/minio/minio-go/v7 v7.4.1 h1:PtU/zIOfQRWZ+QydXAZysc+xZYHdG+BBR4Z6TUvy7
 github.com/minio/minio-go/v7 v7.4.1/go.mod h1:nQnQi7zTfXR4lREtYXZQWqo5aw0Rqv+ZqCGrTORygRk=
 github.com/modelcontextprotocol/go-sdk v1.3.1 h1:TfqtNKOIWN4Z1oqmPAiWDC2Jq7K9OdJaooe0teoXASI=
 github.com/modelcontextprotocol/go-sdk v1.3.1/go.mod h1:DgVX498dMD8UJlseK1S5i1T4tFz2fkBk4xogC3D15nw=
+github.com/molecule-man/go-brrr v1.3.1 h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w=
+github.com/molecule-man/go-brrr v1.3.1/go.mod h1:7ybW6/7gA3oKY45jOfVNjSJDtrr6ea4tzbsTkjmQDC4=
 github.com/pb33f/go-yaml v0.1.1 h1:yWGmhVdwzionRnSc/hEJwcfq6PaZL2QdYzyReXBbX7Q=
 github.com/pb33f/go-yaml v0.1.1/go.mod h1:QvWdkHP5VjFYAeHMQUkaPQqREaQnBNOXmWzAjNrnSdo=
 github.com/pb33f/ordered-map/v2 v2.3.2 h1:wDyaZ2Pv9QLh64X4utCeD5Zoi9nIv2aW3lwv172O5PQ=
@@ -198,6 +200,8 @@ golang.org/x/text v0.44.0 h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo=
 golang.org/x/text v0.44.0/go.mod h1:S4FR1waQ9LbjQTls97SyRjDaUUVkaM+cXwwuG/G+MwY=
 golang.org/x/time v0.16.0 h1:vMb6ptszcQMkcwiRTAuNNU50gom6++Q/6gY2hDM6VDE=
 golang.org/x/time v0.16.0/go.mod h1:rVKOqvZeKvrDKTQiAHJ7wmwP0RzleSphoEA9RcdLA0s=
+golang.org/x/tools v0.52.0 h1:ryxg4U63oaUYk7uOLTF37n43f4qgtGvqV4Ioit1BaEs=
+golang.org/x/tools v0.52.0/go.mod h1:ItcP5UNaVGG+Yc4eIYmaFLNJ4soEopkx5Y2d4lcEurs=
 gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
 gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=
 google.golang.org/api v0.312.0 h1:c6EbM0/irOk8MemsYRO3ewSQWxVk2QYQJ/rYHXwEYh0=

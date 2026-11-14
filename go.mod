@@ -3,7 +3,7 @@ module github.com/bluesky-social/roast
 go 1.27.4
 
 require (
-	charm.land/fantasy v0.47.0
+	charm.land/fantasy v0.48.0
 	github.com/charmbracelet/openai-go v0.0.0-20260921175203-216db9e71b83
 	github.com/invopop/jsonschema v0.14.0
 	github.com/klauspost/compress v1.20.4
@@ -55,6 +55,7 @@ require (
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
+	github.com/molecule-man/go-brrr v1.3.1 // indirect
 	github.com/pb33f/go-yaml v0.1.1 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.2 // indirect
 	github.com/philhofer/fwd v1.2.1 // indirect
