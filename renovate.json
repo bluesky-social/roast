@@ -16,14 +16,6 @@
       "matchFileNames": [".github/tools/actionlint/go.mod"],
       "matchDepNames": ["go.yaml.in/yaml/v4"],
       "enabled": false
-    },
-    {
-      "description": "Gitleaks must migrate its Lipgloss import upstream; replacing the indirect module path alone does not migrate its code.",
-      "matchManagers": ["gomod"],
-      "matchFileNames": [".github/tools/gitleaks/go.mod"],
-      "matchDepNames": ["github.com/charmbracelet/lipgloss"],
-      "matchUpdateTypes": ["major"],
-      "enabled": false
     }
   ]
 }
