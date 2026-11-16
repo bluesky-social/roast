@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.6 (2026-11-14)
+
+## What's Changed
+* ci: exclude docs and .github from releases by @sarahmaeve in https://github.com/bluesky-social/roast/pull/146
+* fix(deps): update go toolchain to v1.27.4 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/156
+* fix(deps): update module golang.org/x/crypto to v0.59.0 [security] by @renovate[bot] in https://github.com/bluesky-social/roast/pull/154
+* chore(deps): update module github.com/minio/minlz to v1.2.4 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/157
+* chore(deps): update ci go tools by @renovate[bot] in https://github.com/bluesky-social/roast/pull/158
+* chore(deps): update module github.com/andybalholm/brotli to v1.3.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/159
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/155
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/162
+* chore(deps): update dependency goreleaser/goreleaser to v2.20.1 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/163
+
+## New Contributors
+* @sarahmaeve made their first contribution in https://github.com/bluesky-social/roast/pull/146
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.5...v1.4.6
+
 ## 1.4.5 (2026-11-09)
 
 ## What's Changed
