@@ -85,18 +85,28 @@ func TestPrepareChecksOutHeadAgainstFreshRemoteBase(t *testing.T) {
 	assertNoResidue(t, fx.local, c)
 }
 
-func TestPrepareUsesExplicitBaseWithoutFetchingOne(t *testing.T) {
+func TestPrepareFetchesExplicitBaseFromRemote(t *testing.T) {
 	fx := newFixture(t)
-	c, err := Prepare(t.Context(), fx.local, "origin", 7, "origin/main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = c.Close() }()
-	if c.Base != fx.staleMain || c.BaseRef != "origin/main" {
-		t.Errorf("Base = %s (%s), want explicit origin/main %s", c.Base, c.BaseRef, fx.staleMain)
-	}
-	if refs := run(t, fx.local, "for-each-ref", RefPrefix); strings.Contains(refs, "/base") {
-		t.Errorf("explicit base still fetched a base ref:\n%s", refs)
+	run(t, fx.upstream, "branch", "release", fx.upstreamMain)
+	run(t, fx.upstream, "update-ref", "refs/heads/main", fx.staleMain)
+	run(t, fx.local, "update-ref", "refs/remotes/origin/release", fx.staleMain)
+	for _, base := range []string{"release", "origin/release", "refs/heads/release"} {
+		t.Run(base, func(t *testing.T) {
+			c, err := Prepare(t.Context(), fx.local, "origin", 7, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Base != fx.upstreamMain || c.BaseRef != base {
+				t.Errorf("Base = %s (%s), want remote release %s (%s)", c.Base, c.BaseRef, fx.upstreamMain, base)
+			}
+			if got := run(t, fx.local, "rev-parse", "origin/release"); got != fx.staleMain {
+				t.Errorf("review updated origin/release to %s", got)
+			}
+			if err := c.Close(); err != nil {
+				t.Fatal(err)
+			}
+			assertNoResidue(t, fx.local, c)
+		})
 	}
 }
 
@@ -135,7 +145,8 @@ func TestPrepareRejectsWithoutLeavingResidue(t *testing.T) {
 		"option as remote":  {remote: "--upload-pack=touch " + injected, number: 7, usage: true},
 		"zero number":       {remote: "origin", number: 0, usage: true},
 		"option as base":    {remote: "origin", number: 7, base: "--output=x", usage: true},
-		"unresolvable base": {remote: "origin", number: 7, base: "no-such-ref", usage: true},
+		"invalid base":      {remote: "origin", number: 7, base: "release:other", usage: true},
+		"unresolvable base": {remote: "origin", number: 7, base: "no-such-ref"},
 		"missing pr":        {remote: "origin", number: 8},
 	} {
 		t.Run(name, func(t *testing.T) {

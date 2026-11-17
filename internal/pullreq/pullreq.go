@@ -52,8 +52,8 @@ type Checkout struct {
 }
 
 // Prepare fetches pull request number from remote and checks its head out
-// into a temporary linked worktree of repo. base, when non-empty, is a local
-// ref used as-is; otherwise the remote's HEAD is fetched alongside the head.
+// into a temporary linked worktree of repo. The same fetch gets the named
+// base branch from that remote, or its HEAD when base is empty.
 // The caller must Close the result. On error nothing is left behind.
 func Prepare(ctx context.Context, repo, remote string, number int, base string) (*Checkout, error) {
 	for _, name := range redirectingGitEnv {
@@ -67,8 +67,24 @@ func Prepare(ctx context.Context, repo, remote string, number int, base string) 
 	if err := checkRemote(repo, remote); err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(base, "-") {
-		return nil, &UsageError{msg: fmt.Sprintf("base ref %q cannot start with '-'", base)}
+	baseSource := "HEAD"
+	baseLabel := remote + "/HEAD"
+	if base != "" {
+		branch, qualified := strings.CutPrefix(base, "refs/heads/")
+		if !qualified {
+			branch = strings.TrimPrefix(base, remote+"/")
+		}
+		baseSource = "refs/heads/" + branch
+		if strings.HasPrefix(branch, "-") {
+			return nil, &UsageError{msg: fmt.Sprintf("base branch %q cannot start with '-'", branch)}
+		}
+		if _, err := git(ctx, repo, "check-ref-format", baseSource); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, &UsageError{msg: fmt.Sprintf("invalid base branch %q", base)}
+		}
+		baseLabel = base
 	}
 
 	tmp, err := os.MkdirTemp("", "roast-pr-")
@@ -89,42 +105,23 @@ func Prepare(ctx context.Context, repo, remote string, number int, base string) 
 	// The temp directory's random suffix keys this review's refs.
 	ns := RefPrefix + filepath.Base(tmp) + "/"
 	headRef := ns + "head"
-	refspecs := []string{fmt.Sprintf("+refs/pull/%d/head:%s", number, headRef)}
-	baseRef := ""
-	if base == "" {
-		baseRef = ns + "base"
-		refspecs = append(refspecs, "+HEAD:"+baseRef)
-	}
-	// Record the refs before fetching: a fetch can fail after writing one of
-	// them, and Close must still delete it.
-	c.refs = append(c.refs, headRef)
-	if baseRef != "" {
-		c.refs = append(c.refs, baseRef)
-	}
+	baseRef := ns + "base"
+	c.refs = []string{headRef, baseRef}
 	// --refmap= stops remote.<name>.fetch mappings from also updating
 	// remote-tracking refs, and --no-prune stops fetch.prune from deleting
 	// any. Only the per-run refs above change.
-	fetchArgs := append([]string{
-		"-c", "fetch.recurseSubmodules=false",
-		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--no-prune", remote,
-	}, refspecs...)
-	if _, err := git(ctx, repo, fetchArgs...); err != nil {
-		return nil, fmt.Errorf("fetch pull request #%d from %s (the remote must publish refs/pull/<n>/head, as GitHub does): %w", number, remote, err)
+	if _, err := git(ctx, repo, "-c", "fetch.recurseSubmodules=false",
+		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--no-prune", "--", remote,
+		fmt.Sprintf("+refs/pull/%d/head:%s", number, headRef), "+"+baseSource+":"+baseRef); err != nil {
+		return nil, fmt.Errorf("fetch pull request #%d and base %s from %s: %w", number, baseSource, remote, err)
 	}
 
 	if c.Head, err = commitOID(repo, headRef); err != nil {
 		return nil, err
 	}
-	if base == "" {
-		c.BaseRef = remote + "/HEAD"
-		if c.Base, err = commitOID(repo, baseRef); err != nil {
-			return nil, err
-		}
-	} else {
-		c.BaseRef = base
-		if c.Base, err = commitOID(repo, base); err != nil {
-			return nil, &UsageError{msg: fmt.Sprintf("base ref %q does not resolve to a commit in this repository", base)}
-		}
+	c.BaseRef = baseLabel
+	if c.Base, err = commitOID(repo, baseRef); err != nil {
+		return nil, err
 	}
 
 	// Without a merge base, the diff from base to head would include every

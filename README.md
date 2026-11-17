@@ -266,15 +266,18 @@ skipped with a note on stderr. JSON goes to stdout and Markdown to stderr;
 
 `--pr <n>` reviews pull request number `<n>` instead of the local checkout. It
 needs a remote that publishes `refs/pull/<n>/head`, as GitHub does. Roast
-fetches that ref and the remote's `HEAD` from `origin` (`--pr-remote <name>`
-picks another configured remote) and checks the head out into a temporary
-worktree. It then reviews the diff from the merge base to the head, using the
-remote's `HEAD` as the base; a head with no merge base, as in a shallow
-clone, is an error. Your checkout, index, and uncommitted changes are
-not read or modified. For a pull request that targets a branch other than the
-remote's default, pass that branch as `--base`. The worktree and fetched refs
-are removed when the review ends. The run record keeps the pull request
-number and its head and base commits. `--pr` cannot be combined with
+fetches the PR head and its comparison base together from `origin` (or the
+remote named by `--pr-remote`). The base defaults to the remote's `HEAD`.
+For a PR targeting another branch, use `--base release-1.4` or
+`--base origin/release-1.4`. Both fetch `refs/heads/release-1.4` from
+`origin` without reading or updating the local `origin/release-1.4` ref.
+
+Roast checks the PR head out into a temporary worktree and reviews the diff
+from the merge base to the head. A missing merge base, as can happen in a
+shallow clone, is an error. Roast leaves your checkout and index untouched
+and removes the temporary worktree and refs when the review ends. The run
+record keeps the pull request number and its head and base commits.
+`--pr` cannot be combined with
 `--staged`, `--uncommitted-only`, or `--scope repo`, or run with `GIT_DIR`,
 `GIT_WORK_TREE`, `GIT_INDEX_FILE`, or `GIT_COMMON_DIR` set.
 `--interactive` gives the finder several turns with the navigation tools. Small
