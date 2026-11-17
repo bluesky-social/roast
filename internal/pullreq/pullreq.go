@@ -70,8 +70,15 @@ func Prepare(ctx context.Context, repo, remote string, number int, base string) 
 	baseSource := "HEAD"
 	baseLabel := remote + "/HEAD"
 	if base != "" {
-		branch, qualified := strings.CutPrefix(base, "refs/heads/")
-		if !qualified {
+		var branch string
+		switch {
+		case strings.HasPrefix(base, "refs/heads/"):
+			branch = strings.TrimPrefix(base, "refs/heads/")
+		case strings.HasPrefix(base, "refs/remotes/"+remote+"/"):
+			branch = strings.TrimPrefix(base, "refs/remotes/"+remote+"/")
+		case strings.HasPrefix(base, "refs/"):
+			return nil, &UsageError{msg: fmt.Sprintf("base %q must name a branch on remote %q", base, remote)}
+		default:
 			branch = strings.TrimPrefix(base, remote+"/")
 		}
 		baseSource = "refs/heads/" + branch

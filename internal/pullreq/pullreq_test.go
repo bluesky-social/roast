@@ -90,7 +90,7 @@ func TestPrepareFetchesExplicitBaseFromRemote(t *testing.T) {
 	run(t, fx.upstream, "branch", "release", fx.upstreamMain)
 	run(t, fx.upstream, "update-ref", "refs/heads/main", fx.staleMain)
 	run(t, fx.local, "update-ref", "refs/remotes/origin/release", fx.staleMain)
-	for _, base := range []string{"release", "origin/release", "refs/heads/release"} {
+	for _, base := range []string{"release", "origin/release", "refs/heads/release", "refs/remotes/origin/release"} {
 		t.Run(base, func(t *testing.T) {
 			c, err := Prepare(t.Context(), fx.local, "origin", 7, base)
 			if err != nil {
@@ -146,6 +146,7 @@ func TestPrepareRejectsWithoutLeavingResidue(t *testing.T) {
 		"zero number":       {remote: "origin", number: 0, usage: true},
 		"option as base":    {remote: "origin", number: 7, base: "--output=x", usage: true},
 		"invalid base":      {remote: "origin", number: 7, base: "release:other", usage: true},
+		"foreign base":      {remote: "origin", number: 7, base: "refs/remotes/upstream/main", usage: true},
 		"unresolvable base": {remote: "origin", number: 7, base: "no-such-ref"},
 		"missing pr":        {remote: "origin", number: 8},
 	} {
