@@ -5,11 +5,16 @@ go 1.27.4
 require (
 	charm.land/fantasy v0.48.1
 	github.com/charmbracelet/openai-go v0.0.0-20260921175203-216db9e71b83
+	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/go-jose/go-jose/v4 v4.1.9
+	github.com/gofrs/flock v0.13.2
 	github.com/invopop/jsonschema v0.14.0
 	github.com/klauspost/compress v1.20.4
 	github.com/minio/minio-go/v7 v7.4.1
 	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v4 v4.0.0
+	golang.org/x/oauth2 v0.38.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 )
 
@@ -79,9 +84,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/net v0.63.0 // indirect
-	golang.org/x/oauth2 v0.38.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
-	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/api v0.316.0 // indirect
