@@ -370,3 +370,11 @@ func TestDiagnosticTokenResponseDoesNotSupplyCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestMisnamedRotatedTokenIsOnlyReturnedForCleanup(t *testing.T) {
+	var tokens TokenResponse
+	err := readTokenResponse(strings.NewReader(`{"access_token":"new-access","Refresh_Token":"rotated","token_type":"Bearer","expires_in":3600}`), "previous", &tokens)
+	if err == nil || tokens.RefreshToken != "rotated" {
+		t.Fatalf("malformed rotation did not return its cleanup token: %v", err)
+	}
+}

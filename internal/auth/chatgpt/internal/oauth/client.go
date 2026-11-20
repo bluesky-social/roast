@@ -132,7 +132,7 @@ func extractCleanupTokens(data []byte, previousRefresh string) (TokenResponse, b
 		return issued, false
 	}
 	seen := make(map[string]bool, 2)
-	duplicates := false
+	rejected := false
 	for decoder.More() {
 		key, err := decoder.Token()
 		name, ok := key.(string)
@@ -152,9 +152,9 @@ func extractCleanupTokens(data []byte, previousRefresh string) (TokenResponse, b
 		if name == "" {
 			continue
 		}
-		duplicates = duplicates || seen[name]
+		rejected = rejected || seen[name] || name != wireName
 		seen[name] = true
-		if name != wireName || (name != "access_token" && name != "refresh_token") {
+		if name != "access_token" && name != "refresh_token" {
 			continue
 		}
 		var token string
@@ -172,7 +172,7 @@ func extractCleanupTokens(data []byte, previousRefresh string) (TokenResponse, b
 			}
 		}
 	}
-	return issued, duplicates
+	return issued, rejected
 }
 
 func tokenResponseField(name string) string {
