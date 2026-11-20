@@ -32,6 +32,7 @@ require (
 	github.com/huandu/xstrings v1.6.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.4 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.2 // indirect
 	github.com/klauspost/pgzip v1.3.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-colorable v0.1.16 // indirect
@@ -39,7 +40,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.31 // indirect
 	github.com/mholt/archives v0.1.5 // indirect
 	github.com/mikelolasagasti/xz v1.0.1 // indirect
-	github.com/minio/minlz v1.2.4 // indirect
+	github.com/minio/minlz v1.3.0 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
@@ -60,6 +61,7 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/ulikunitz/xz v0.5.17 // indirect
 	github.com/wasilibs/go-re2 v1.13.0 // indirect
+	github.com/zeebo/xxh3 v1.1.1-0.20260908150653-f7225998cebf // indirect
 	github.com/zricethezav/gitleaks/v8 v8.30.1 // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
