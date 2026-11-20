@@ -78,7 +78,15 @@ func (c Client) request(ctx context.Context, method, target string, form url.Val
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode != http.StatusOK:
-		err = responseError(resp, target == modelsURL)
+		if tokens, ok := out.(*TokenResponse); ok && resp.StatusCode/100 == 2 {
+			// A nonstandard success is never accepted as a grant. The issuer
+			// may still have rotated a token, even if the body is incomplete.
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, tokenResponseLimit+1))
+			*tokens, _ = extractCleanupTokens(data, form.Get("refresh_token"))
+			err = fmt.Errorf("%w: unexpected ChatGPT token response (HTTP %d)", ErrNetwork, resp.StatusCode)
+		} else {
+			err = responseError(resp, target == modelsURL)
+		}
 	case out != nil:
 		if tokens, ok := out.(*TokenResponse); ok {
 			previous := form.Get("refresh_token")
@@ -111,11 +119,12 @@ func readJSON(body io.Reader, limit int64, dst any) error {
 	return nil
 }
 
+const tokenResponseLimit = 2 << 20
+
 func readTokenResponse(body io.Reader, previousRefresh string, tokens *TokenResponse) error {
-	const limit = 2 << 20
-	data, readErr := io.ReadAll(io.LimitReader(body, limit+1))
+	data, readErr := io.ReadAll(io.LimitReader(body, tokenResponseLimit+1))
 	issued, rejected := extractCleanupTokens(data, previousRefresh)
-	if readErr != nil || len(data) > limit || rejected || !json.Valid(data) || josejson.Unmarshal(data, tokens) != nil ||
+	if readErr != nil || len(data) > tokenResponseLimit || rejected || !json.Valid(data) || josejson.Unmarshal(data, tokens) != nil ||
 		!ValidAccessToken(tokens.AccessToken) || !ValidRefreshToken(tokens.RefreshToken) {
 		*tokens = issued
 		return errors.New("invalid ChatGPT response")

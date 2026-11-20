@@ -384,3 +384,15 @@ func TestMisnamedRotatedTokenIsOnlyReturnedForCleanup(t *testing.T) {
 		}
 	}
 }
+
+func TestUnexpectedSuccessfulStatusOnlyReturnsCleanupEvidence(t *testing.T) {
+	c := NewClient()
+	c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		body := io.NopCloser(strings.NewReader(`{"refresh_token":"replacement","expires_in":"broken"}`))
+		return &http.Response{StatusCode: http.StatusCreated, Header: make(http.Header), Body: body}, nil
+	})
+	tokens, err := c.Refresh(t.Context(), "registered", "previous")
+	if !errors.Is(err, ErrNetwork) || tokens.RefreshToken != "replacement" {
+		t.Fatalf("unexpected success was accepted or lost the replacement: %v", err)
+	}
+}
