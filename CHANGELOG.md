@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.9 (2026-11-20)
+
+## What's Changed
+* fix(deps): update golang:1.27.4 docker digest to 205c763 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/175
+* chore(deps): update actions/setup-go action to v7.1.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/178
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/177
+* chore(deps): update ci go tools by @renovate[bot] in https://github.com/bluesky-social/roast/pull/176
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.8...v1.4.9
+
 ## 1.4.8 (2026-11-17)
 
 ## What's Changed
