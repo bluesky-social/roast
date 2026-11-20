@@ -126,7 +126,7 @@ func readTokenResponse(body io.Reader, previousRefresh string, tokens *TokenResp
 // Fully read token fields in a rejected response are evidence for cleanup
 // only. Retain a distinct replacement even when a duplicate obscures it.
 func extractCleanupTokens(data []byte, previousRefresh string) (TokenResponse, bool) {
-	var issued TokenResponse
+	var issued, aliases TokenResponse
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
 		return issued, false
@@ -161,17 +161,30 @@ func extractCleanupTokens(data []byte, previousRefresh string) (TokenResponse, b
 		if json.Unmarshal(raw, &token) != nil || token == "" {
 			continue
 		}
+		candidate := &issued
+		if wireName != name {
+			candidate = &aliases
+		}
 		switch name {
 		case "access_token":
-			if issued.AccessToken == "" && ValidAccessToken(token) {
-				issued.AccessToken = token
+			if candidate.AccessToken == "" && ValidAccessToken(token) {
+				candidate.AccessToken = token
 			}
 		case "refresh_token":
-			if (issued.RefreshToken == "" || issued.RefreshToken == previousRefresh) && ValidRefreshToken(token) {
-				issued.RefreshToken = token
+			if (candidate.RefreshToken == "" || candidate.RefreshToken == previousRefresh) && ValidRefreshToken(token) {
+				candidate.RefreshToken = token
 			}
 		}
 	}
+	// Prefer an exact-name replacement in either field order. An alias is
+	// only a fallback for cleanup, never evidence for publishing a grant.
+	if issued.AccessToken == "" {
+		issued.AccessToken = aliases.AccessToken
+	}
+	if (issued.RefreshToken == "" || issued.RefreshToken == previousRefresh) && aliases.RefreshToken != "" {
+		issued.RefreshToken = aliases.RefreshToken
+	}
+
 	return issued, rejected
 }
 
