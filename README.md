@@ -248,6 +248,7 @@ Run Roast inside a Git repository:
 ```sh
 roast review --task 'add retry handling'   # review the current changes
 roast review --staged --max-severity HIGH  # staged changes; exit 1 on HIGH+
+roast review --pr 123                      # a GitHub pull request, fetched from origin
 roast review --interactive                 # let the finder navigate the repo
 roast review --quick                       # finder only, no verification
 roast review --scope repo                  # survey the whole repository
@@ -263,6 +264,26 @@ plus uncommitted and untracked changes. Untracked files that look like secrets
 skipped with a note on stderr. JSON goes to stdout and Markdown to stderr;
 `--format` selects one.
 
+`--pr <n>` reviews pull request number `<n>` instead of the local checkout. It
+needs a remote that publishes `refs/pull/<n>/head`, as GitHub does. Roast
+fetches the PR head and its comparison base together from `origin` (or the
+remote named by `--pr-remote`). The base defaults to the remote's `HEAD`.
+For a PR targeting another branch, use `--base release-1.4` or
+`--base origin/release-1.4`. Both fetch `refs/heads/release-1.4` from
+`origin` without reading or updating the local `origin/release-1.4` ref.
+With `--pr`, `--base` otherwise takes a tag on that remote, written
+`refs/tags/v1.4.0`, or the ID of a commit already in your repository. A bare
+name is always read as a branch, and a branch of another remote, such as
+`upstream/main`, is a usage error.
+
+Roast checks the PR head out into a temporary worktree and reviews the diff
+from the merge base to the head. A missing merge base, as can happen in a
+shallow clone, is an error. Roast leaves your checkout and index untouched
+and removes the temporary worktree and refs when the review ends. The run
+record keeps the pull request number and its head and base commits.
+`--pr` cannot be combined with
+`--staged`, `--uncommitted-only`, or `--scope repo`, or run with `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_INDEX_FILE`, or `GIT_COMMON_DIR` set.
 `--interactive` gives the finder several turns with the navigation tools. Small
 diffs (under 80 lines and 4 files) get a single structured call instead, and
 Roast says so; `ROAST_INTERACTIVE_MIN_DIFF_LINES` and
@@ -285,7 +306,8 @@ machine-readable output.
 Source code, diffs, prompts, tool schemas, and tool results go to the inference
 endpoints you configure, and run bundles go to your upload destination if you
 enable uploads. Review data goes nowhere else; Roast's only other network calls
-are the release check and configuration URLs you ask it to fetch.
+are the release check, configuration URLs you ask it to fetch, and the
+`git fetch` that `--pr` runs against your own remote.
 Review your providers' data-handling terms before using Roast on sensitive
 code. The [security model](docs/security-model.md) covers trust boundaries and
 artifacts in full.
