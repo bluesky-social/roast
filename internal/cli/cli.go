@@ -140,6 +140,7 @@ type reviewFlags struct {
 	mode            string
 	quick           bool
 	noVerify        bool
+	diceRoll        bool
 	interactive     bool
 	maxTurns        int
 	deadline        time.Duration
@@ -363,6 +364,7 @@ func addReviewFlags(cmd *cobra.Command, f *reviewFlags) {
 	fl.StringVar(&f.mode, "mode", "auto", "code|prose|mixed|auto")
 	fl.BoolVar(&f.quick, "quick", false, "single-shot finder pass without verification")
 	fl.BoolVar(&f.noVerify, "no-verify", false, "skip cross-model verification")
+	fl.BoolVar(&f.diceRoll, "dice-roll", false, "choose models from the configured dice roll profile pool")
 	fl.BoolVar(&f.interactive, "interactive", false, "let the finder navigate the local checkout")
 	fl.IntVar(&f.maxTurns, "max-turns", defaultMaxTurns, fmt.Sprintf("maximum interactive finder turns (%d with --scope repo)", surveyMaxTurnsDefault))
 	fl.DurationVar(&f.deadline, "deadline", 0, fmt.Sprintf("interactive finder work deadline (default %s, %s with --scope repo; 0 disables)", shortDuration(defaultDeadline), shortDuration(surveyDeadlineDefault)))
@@ -433,6 +435,15 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	if f.maxAttempts < 1 {
 		return &usageError{msg: "max-attempts must be positive"}
 	}
+	if f.diceRoll {
+		for _, role := range []string{"finder", "verifier"} {
+			for _, field := range []string{"model", "base-url", "protocol", "max-output-tokens"} {
+				if flag := role + "-" + field; changed(flag) {
+					return &usageError{msg: fmt.Sprintf("--dice-roll cannot be combined with --%s; configure the profile in dice_roll.profiles instead", flag)}
+				}
+			}
+		}
+	}
 	if f.scope != "diff" && f.scope != "repo" {
 		return &usageError{msg: fmt.Sprintf("invalid --scope %q (diff|repo)", f.scope)}
 	}
@@ -464,38 +475,50 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 			_ = runupload.EnsureEnrolled(recordDir)
 		}
 	}
-	finderRole, err := cfg.ResolveRole("finder")
-	if err != nil {
-		return &usageError{msg: err.Error()}
-	}
-	verifierRole, err := cfg.ResolveRole("verifier")
-	if err != nil {
-		return &usageError{msg: err.Error()}
-	}
-	finderRole = applyRoleFlags(changed, "finder", finderRole, f.finder)
-	verifierRole = applyRoleFlags(changed, "verifier", verifierRole, f.verifier)
-	authorModel := f.authorModel
-	if !changed("author-model") {
-		authorModel = config.AuthorModel()
-	}
-	flip, err := cfg.ResolveFinderFlip(finderRole, authorModel)
-	if err != nil {
-		return &usageError{msg: err.Error()}
-	}
-	if flip.Note != "" {
-		logf(stderr, "%s", flip.Note)
-	}
-	if flip.Warn != "" {
-		logf(stderr, "%s", flip.Warn)
-	}
-	finderRole = flip.Role
-	if err := config.ValidateRole("finder", finderRole); err != nil {
-		return &usageError{msg: err.Error()}
-	}
 	doVerify := !f.quick && !f.noVerify
-	if doVerify {
-		if err := config.ValidateRole("verifier", verifierRole); err != nil {
+	var finderRole, verifierRole config.ResolvedRole
+	if f.diceRoll {
+		finderRole, verifierRole, err = cfg.ResolveDiceRoll(doVerify)
+		if err != nil {
 			return &usageError{msg: err.Error()}
+		}
+		logf(stderr, "dice roll selected finder=%s profile=%s", finderRole.Model, finderRole.Profile)
+		if doVerify {
+			logf(stderr, "dice roll selected verifier=%s profile=%s", verifierRole.Model, verifierRole.Profile)
+		}
+	} else {
+		finderRole, err = cfg.ResolveRole("finder")
+		if err != nil {
+			return &usageError{msg: err.Error()}
+		}
+		verifierRole, err = cfg.ResolveRole("verifier")
+		if err != nil {
+			return &usageError{msg: err.Error()}
+		}
+		finderRole = applyRoleFlags(changed, "finder", finderRole, f.finder)
+		verifierRole = applyRoleFlags(changed, "verifier", verifierRole, f.verifier)
+		authorModel := f.authorModel
+		if !changed("author-model") {
+			authorModel = config.AuthorModel()
+		}
+		flip, err := cfg.ResolveFinderFlip(finderRole, authorModel)
+		if err != nil {
+			return &usageError{msg: err.Error()}
+		}
+		if flip.Note != "" {
+			logf(stderr, "%s", flip.Note)
+		}
+		if flip.Warn != "" {
+			logf(stderr, "%s", flip.Warn)
+		}
+		finderRole = flip.Role
+		if err := config.ValidateRole("finder", finderRole); err != nil {
+			return &usageError{msg: err.Error()}
+		}
+		if doVerify {
+			if err := config.ValidateRole("verifier", verifierRole); err != nil {
+				return &usageError{msg: err.Error()}
+			}
 		}
 	}
 
@@ -712,6 +735,10 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		scopeHeadOID = snapshotMeta.Head
 	}
 	envValues, envNames := record.CaptureEnv(cfg.CredentialEnvNames()...)
+	roleMetadata := map[string]record.RoleMeta{"finder": roleMeta(finderRole, system)}
+	if doVerify || !f.diceRoll {
+		roleMetadata["verifier"] = roleMeta(verifierRole, verifierSystem)
+	}
 	meta := record.Meta{
 		RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Repo: repo,
 		Argv:  append([]string(nil), os.Args[1:]...),
@@ -729,10 +756,7 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 			DoVerify: doVerify, Task: f.task, MaxSeverity: f.maxSeverity,
 			MaxDiffBytes: maxDiff, MaxFileCtxBytes: maxFileContext,
 		},
-		Roles: map[string]record.RoleMeta{
-			"finder":   roleMeta(finderRole, system),
-			"verifier": roleMeta(verifierRole, verifierSystem),
-		},
+		Roles:    roleMetadata,
 		Snapshot: snapshotMeta,
 		Digests: record.DigestMeta{
 			InputKind: inputKind, Input: record.Digest(reviewedInput), InputBytes: len(reviewedInput),

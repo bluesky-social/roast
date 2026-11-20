@@ -125,6 +125,11 @@ type Review struct {
 	Excludes             []string `yaml:"excludes"`
 }
 
+// DiceRoll names the complete profiles eligible for random role selection.
+type DiceRoll struct {
+	Profiles []string `yaml:"profiles"`
+}
+
 // Prompts optionally replaces embedded prompt templates with user-owned files.
 type Prompts struct {
 	FinderCode  string `yaml:"finder_code"`
@@ -170,6 +175,7 @@ type Config struct {
 	Provisioning      *Provisioning               `yaml:"provisioning,omitempty"`
 	InferenceProfiles map[string]InferenceProfile `yaml:"inference_profiles"`
 	Roles             map[string]Role             `yaml:"roles"`
+	DiceRoll          DiceRoll                    `yaml:"dice_roll,omitempty"`
 	Review            Review                      `yaml:"review"`
 	Prompts           Prompts                     `yaml:"prompts"`
 	Upload            Upload                      `yaml:"upload"`
@@ -331,6 +337,13 @@ func normalize(cfg Config) (Config, error) {
 	}
 	if cfg.Version != CurrentVersion {
 		return Config{}, fmt.Errorf("unsupported config version %d (this build supports version %d)", cfg.Version, CurrentVersion)
+	}
+	if len(cfg.DiceRoll.Profiles) > 0 {
+		for _, name := range []string{"finder", "verifier"} {
+			if role, ok := cfg.Roles[name]; !ok || strings.TrimSpace(role.Profile) == "" {
+				return Config{}, fmt.Errorf("dice_roll.profiles requires a fixed roles.%s.profile", name)
+			}
+		}
 	}
 
 	defaults := Defaults()
@@ -587,8 +600,22 @@ func (p InferenceProfile) DescribeEndpoint() string {
 // DescribeCredential states, without resolving any secret, where the profile
 // obtains its credential when selected for role.
 func (p InferenceProfile) DescribeCredential(role string) string {
-	roleVar := roleEnvPrefix(role) + "API_KEY"
 	keyVar := providerAPIKeyEnv(p.Protocol)
+	if role == "" {
+		switch {
+		case p.APIKeyEnv != "":
+			return "env " + p.APIKeyEnv
+		case p.APIKey != "":
+			return "api_key in the config file"
+		case p.BaseURL == "":
+			return fmt.Sprintf("none named; %s with the default endpoint or %s", keyVar, pairedBaseURLEnv(keyVar))
+		case sameEndpoint(p.BaseURL, DefaultBaseURL(p.Protocol)):
+			return "none named; " + keyVar
+		default:
+			return "none named; set api_key_env or the provider key with its matching base URL"
+		}
+	}
+	roleVar := roleEnvPrefix(role) + "API_KEY"
 	switch {
 	case p.APIKeyEnv != "":
 		return "env " + p.APIKeyEnv
@@ -675,12 +702,18 @@ func resolveCredential(roleName string, profile InferenceProfile, role ResolvedR
 		return value, CredentialSource{Kind: CredentialRoleEnv, Env: roleVar}
 	}
 	if !crossedProvider {
-		if profile.APIKeyEnv != "" {
-			return os.Getenv(profile.APIKeyEnv), CredentialSource{Kind: CredentialProfileEnv, Env: profile.APIKeyEnv}
-		}
-		if profile.APIKey != "" {
-			return profile.APIKey, CredentialSource{Kind: CredentialProfileKey}
-		}
+		return profileCredential(profile, role)
+	}
+	return ambientCredential(role.Protocol, role.BaseURL)
+}
+
+// profileCredential resolves a complete profile without role-specific keys.
+func profileCredential(profile InferenceProfile, role ResolvedRole) (string, CredentialSource) {
+	if profile.APIKeyEnv != "" {
+		return os.Getenv(profile.APIKeyEnv), CredentialSource{Kind: CredentialProfileEnv, Env: profile.APIKeyEnv}
+	}
+	if profile.APIKey != "" {
+		return profile.APIKey, CredentialSource{Kind: CredentialProfileKey}
 	}
 	return ambientCredential(role.Protocol, role.BaseURL)
 }
