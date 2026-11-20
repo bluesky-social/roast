@@ -92,7 +92,7 @@ export ROAST_VERIFIER_MODEL='verifier-model'
 export ROAST_VERIFIER_PROTOCOL='responses'
 ```
 
-Protocols are `chat`, `responses`, and `anthropic` (native Messages, which
+API-key protocols are `chat`, `responses`, and `anthropic` (native Messages, which
 authenticates with `x-api-key` and defaults to `https://api.anthropic.com/v1`):
 
 ```sh
@@ -101,8 +101,41 @@ export ROAST_FINDER_MODEL='claude-model-name'
 export ROAST_FINDER_PROTOCOL='anthropic'
 ```
 
-Any base URL works, so a role can point at a hosted provider, a gateway, or a
-local server that implements the selected protocol.
+These protocols accept a custom base URL for a hosted provider, gateway, or local
+server.
+
+On macOS and Linux, `roast chatgpt signin` prints a browser link to request access
+to your ChatGPT plan. Roast enables plan usage when OpenAI lists the required
+permissions in its sign-in response. Run `roast chatgpt models` to list available models.
+If plan access is disabled, run `roast chatgpt signin --account CLIENT_ID
+--enable-plan` with the displayed account ID to request consent again.
+
+To try a plan-backed review alongside an existing API-key setup, save this
+as `~/chatgpt.yaml`, outside the repository you want to review. Replace the
+model value with one from the list.
+
+```yaml
+version: 1
+inference_profiles:
+  plan:
+    protocol: chatgpt
+    model: model-from-the-list
+    max_output_tokens: 32768
+roles:
+  finder: {profile: plan}
+  verifier: {profile: plan}
+```
+
+Run `roast review --config ~/chatgpt.yaml --task 'add retry handling'` from
+the repository with your code changes, in a shell without role-specific
+environment overrides. Use `roast chatgpt status` to see the active account
+and `roast chatgpt select CLIENT_ID` to switch. To resume a pending sign-in,
+run `roast chatgpt signin --account CLIENT_ID`.
+
+Reviews and `roast doctor` spend plan usage. The output-token setting is a
+local budget estimate. OpenAI controls the response limit. Roast uses fixed
+OpenAI endpoints and stores credentials in an owner-only local file.
+[ChatGPT credential storage](docs/security-model.md#direct-chatgpt-plan-usage)
 
 ### Config file
 
@@ -295,19 +328,19 @@ The finder and verifier must submit schema-validated results through a tool
 call. A role that never does gets bounded reminders within its limits; if it
 still fails, the run is reported incomplete, never clean.
 
-`roast doctor` validates profiles and credentials, lists each provider's
-models, runs a small two-turn tool loop per configured model (a tool call, its
-result, and the final submission, as a review does), and reports
-Git, gate, Agent Skill, upload, and release status. `--json` gives
-machine-readable output.
+`roast doctor` validates profiles and runs a small two-turn tool loop per
+configured model. For API-key profiles it also checks credentials and queries
+the model-listing endpoint. It reports Git, gate, Agent Skill, upload, and
+release status. `--json` gives machine-readable output.
 
 ### What is sent where
 
 Source code, diffs, prompts, tool schemas, and tool results go to the inference
-endpoints you configure, and run bundles go to your upload destination if you
-enable uploads. Review data goes nowhere else; Roast's only other network calls
-are the release check, configuration URLs you ask it to fetch, and the
-`git fetch` that `--pr` runs against your own remote.
+endpoint for each role. A `chatgpt` profile sends that material to
+`api.openai.com` and can contact `auth.openai.com` to refresh credentials and
+verify account identity. When you enable uploads, run bundles also go to your
+upload destination. Other network calls include the release check, configuration
+URLs you ask Roast to fetch, and the `git fetch` that `--pr` runs against your remote.
 Review your providers' data-handling terms before using Roast on sensitive
 code. The [security model](docs/security-model.md) covers trust boundaries and
 artifacts in full.
@@ -324,7 +357,7 @@ yours to change:
 
 | Control | Default | Override |
 | --- | ---: | --- |
-| Output tokens per model call | 32,768 | Profile `max_output_tokens`, `ROAST_{FINDER,VERIFIER}_MAX_OUTPUT_TOKENS`, or `--{finder,verifier}-max-output-tokens` |
+| Output tokens per model call (local estimate for ChatGPT) | 32,768 | Profile `max_output_tokens`, `ROAST_{FINDER,VERIFIER}_MAX_OUTPUT_TOKENS`, or `--{finder,verifier}-max-output-tokens` |
 | Timeout per inference request | 10 minutes | `--request-timeout` / `ROAST_REQUEST_TIMEOUT`; `0` disables |
 | Interactive finder work deadline | 10 minutes | `--deadline` / `ROAST_DEADLINE`; `0` disables |
 | Repository-survey work deadline | 25 minutes | `--deadline` / `ROAST_DEADLINE`; `0` disables |

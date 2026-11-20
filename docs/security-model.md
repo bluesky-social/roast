@@ -12,6 +12,49 @@ does not load repository-local configuration. A checked-out repository therefore
 cannot select a network destination or credential merely by adding a config
 file.
 
+## Direct ChatGPT plan usage
+
+On macOS and Linux, run `roast chatgpt signin` and select a `chatgpt` profile.
+Roast uses `https://auth.openai.com` for sign-in, refresh, and revocation
+and sends access tokens to `https://api.openai.com/v1` for model listing
+and inference. Leave `endpoint`, `api_key`, `api_key_env`, and `session_header`
+unset. Roast rejects role overrides for the endpoint and API key and ignores
+`OPENAI_BASE_URL` and `OPENAI_API_KEY` for this protocol.
+
+Roast stores registrations, tokens, and pending refresh responses in an
+owner-only plaintext file on a supported local filesystem.
+
+- **macOS** uses `$HOME/Library/Application Support/roast/chatgpt-plan/accounts.json`
+  on APFS or HFS+ with ownership enabled and no extended ACLs on the store.
+- **Linux** uses `$XDG_CONFIG_HOME/roast/chatgpt-plan/accounts.json`, falling back
+  to `$HOME/.config/roast/chatgpt-plan/accounts.json`. Supported filesystems are
+  ext2/3/4, XFS, Btrfs, bcachefs, F2FS, ZFS, tmpfs, ramfs, and OverlayFS.
+
+A cross-process lock covers token renewal and account updates. Roast replaces
+the file atomically. Use a persistent mount with normal sync behavior to retain
+completed writes across crashes and reboots. tmpfs and ramfs lose the store on
+reboot, and volatile OverlayFS can lose recent writes after a crash.
+
+Keep the entire `chatgpt-plan` directory out of shared or synced folders.
+Include it in a backup or snapshot only if the copy is encrypted and has the
+same access restrictions as the live store.
+
+When an unusable refresh reply contains a complete, distinct replacement
+refresh token, Roast asks OpenAI to revoke it. It ignores credentials echoed
+in OAuth errors. If revocation cannot be confirmed, disconnect Roast in ChatGPT
+Settings. If OpenAI's identity verification keys are temporarily unavailable,
+Roast saves the replacement and retries verification on the next request.
+
+If the connection drops after OpenAI rotates a token but before Roast receives
+the replacement, or Roast exits before saving it, you may need to sign in again.
+To revoke that unseen replacement, disconnect Roast in ChatGPT Settings.
+Signing out asks OpenAI to revoke the grant, then clears the local credentials
+even if OpenAI cannot be reached. To reconnect a saved account, fix any reported
+storage problem, then run `roast chatgpt signin --account CLIENT_ID` with the ID from
+`roast chatgpt status`. If you used the fork preview, sign in to this installation.
+To revoke the old registration, sign out through the fork or disconnect it in
+ChatGPT Settings.
+
 ## Configuration templates
 
 An organization can publish a configuration template at a URL. A template is
@@ -73,9 +116,8 @@ stderr, so redirected review output is never mixed with them.
 
 ## Credentials and endpoints
 
-Each inference profile binds a model, endpoint, protocol, and credential
-source as one unit. Provider environment variables are a fallback, never an
-override:
+API-key profiles bind a model, endpoint, protocol, and credential source.
+Provider environment variables supply fallback values.
 
 - `ROAST_FINDER_*` and `ROAST_VERIFIER_*` variables override the selected
   profile's fields, and command-line role flags override both.
@@ -113,19 +155,25 @@ withheld.
 A review sends its prompt, selected diff or repository manifest, file content,
 tool schemas, and local tool results to the configured finder endpoint. Candidate
 findings and the code needed to adjudicate them are sent to the configured
-verifier endpoint. `roast doctor` makes two small inference requests to each
-configured role (a fixed probe prompt, one tool call and its result, then a
-submission) in addition to querying its model-listing endpoint.
+verifier endpoint. For each valid role, `roast doctor` runs a two-turn probe
+with a fixed prompt, a diagnostic tool call and result, and a final submission.
+It also queries the model list for API-key profiles.
 
-Each inference request carries only the credential, base URL, and headers from
+Each `chatgpt` inference request sends the conversation so far, including
+prior replies, completed reasoning, and tool results. Roast sets `store: false`
+to ask OpenAI to skip saving the response. It validates the completed response
+before running local tools. Reviews and the `roast doctor` probe count toward
+your plan. The output-token budget is a local estimate.
+
+API-key inference requests use only the credential, base URL, and headers from
 Roast's resolved configuration. Roast ignores the provider SDKs' ambient
 defaults, such as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, Anthropic
 profile files, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, and
 `OPENAI_CUSTOM_HEADERS`; `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the
 `*_BASE_URL` variables apply only as inputs to Roast's own configuration.
-A profile's `session_header`, which a template may also set, only adds one more
-header carrying the per-conversation session ID; it cannot name a credential or
-framing header, or one Roast or the provider SDK sets.
+An API-key profile's `session_header`, which a template may also set, adds a
+header carrying the per-conversation session ID. Roast rejects names reserved
+for credentials or framing and names set by Roast or the provider SDK.
 
 Roast does not infer trust from a model name. An OpenAI-compatible gateway,
 hosted provider, and local server are all treated as the operator-configured

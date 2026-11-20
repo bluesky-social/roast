@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 	"github.com/bluesky-social/roast/internal/buildinfo"
 	"github.com/bluesky-social/roast/internal/config"
 	rcontext "github.com/bluesky-social/roast/internal/context"
@@ -76,9 +77,9 @@ func ErrorCategoryFor(code int, err error) ErrorCategory {
 		return ErrorFindings
 	case errors.Is(err, context.Canceled):
 		return ErrorCancelled
-	case errors.Is(err, llm.ErrAuth):
+	case errors.Is(err, llm.ErrAuth), errors.Is(err, chatgpt.ErrAuth):
 		return ErrorAuth
-	case errors.Is(err, llm.ErrEndpoint):
+	case errors.Is(err, llm.ErrEndpoint), errors.Is(err, chatgpt.ErrNetwork):
 		return ErrorEndpoint
 	case errors.Is(err, llm.ErrBudgetExhausted), errors.Is(err, llm.ErrWorkDeadline), errors.Is(err, llm.ErrNoFinalCall):
 		return ErrorResource
@@ -212,7 +213,7 @@ func exitCode(err error) int {
 		return ExitClean
 	case errors.Is(err, context.Canceled):
 		return ExitCancelled
-	case errors.Is(err, llm.ErrAuth):
+	case errors.Is(err, llm.ErrAuth), errors.Is(err, chatgpt.ErrAuth):
 		return ExitAuth
 	}
 	var usage *usageError
@@ -277,6 +278,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(newConfigCommand(stdout, stderr))
 	root.AddCommand(newSkillCommand(stdout))
 	root.AddCommand(newDoctorCommand(stdout))
+	root.AddCommand(newChatGPTCommand(stdout))
 	return root
 }
 
@@ -400,7 +402,7 @@ func addRoleFlags(fl interface {
 }, name string, role *roleFlags) {
 	fl.StringVar(&role.baseURL, name+"-base-url", "", name+" inference API base URL")
 	fl.StringVar(&role.model, name+"-model", "", name+" model name")
-	fl.StringVar(&role.protocol, name+"-protocol", "", name+" protocol: chat|responses|anthropic")
+	fl.StringVar(&role.protocol, name+"-protocol", "", name+" protocol: chat|responses|anthropic|chatgpt")
 	fl.IntVar(&role.maxOutputTokens, name+"-max-output-tokens", 0, name+" output-token ceiling")
 }
 
@@ -504,6 +506,11 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		if err := config.ValidateRole("verifier", verifierRole); err != nil {
 			return &usageError{msg: err.Error()}
 		}
+	}
+	if finderRole.Protocol == "chatgpt" || (doVerify && verifierRole.Protocol == "chatgpt") {
+		// Capture selection once before any review work. A verifier created
+		// after the finder must use this operation's account, not a later one.
+		ctx = llm.WithPinnedChatGPTAccount(ctx)
 	}
 
 	repo, err := scope.GitRoot(".")
