@@ -139,6 +139,9 @@ func (c *client) addUsage(providerUsage fantasy.Usage) Usage {
 	uncached := input
 	// OpenAI-shaped protocols report cached input as a subset of input_tokens;
 	// Anthropic reports input, cache-read, and cache-creation as disjoint counts.
+	// chatgpt deliberately stays out of this branch: the pinned Fantasy
+	// Responses adapter already subtracts cached input in responsesUsage.
+	// Its end-to-end wire test guards against subtracting that cache twice.
 	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" {
 		cacheRead = min(cacheRead, input)
 		cacheWrite = min(cacheWrite, input-cacheRead)
@@ -183,7 +186,20 @@ type sessionContextKey struct{}
 // reading at a terminal SSE event rather than EOF. Never share bodies between
 // concurrent verifier calls.
 type responseBodyKey struct{}
-type responseBody struct{ body io.ReadCloser }
+type responseBody struct {
+	body io.ReadCloser
+	// A direct plan-usage request retains its precise failure independently
+	// of SDK error mapping. Each attempt owns this state.
+	failure       error
+	terminalUsage *fantasy.Usage
+}
+
+func (b *responseBody) recordFailure(err error) error {
+	if b != nil {
+		b.failure = err
+	}
+	return err
+}
 
 func (b *responseBody) close() error {
 	if b.body == nil {
@@ -352,6 +368,12 @@ func normalizeProviderError(ctx context.Context, modelName string, err error) er
 		return err
 	}
 	if status, ok := errorStatus(err); ok && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		var planErr *chatGPTError
+		if errors.As(err, &planErr) {
+			// Direct plan usage has its own OAuth/eligibility recovery. Preserve
+			// that error and never suggest an API key for this route.
+			return fmt.Errorf("%w: %w", ErrAuth, err)
+		}
 		return fmt.Errorf("%w: %v; check the configured API key", ErrAuth, err)
 	}
 	return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)
