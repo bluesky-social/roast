@@ -40,8 +40,10 @@ func (c *Client) loadStore() (*accountStore, error) {
 		return nil, errors.New("active ChatGPT registration is missing from the account store")
 	}
 	for id, saved := range s.Accounts {
-		if saved.PendingRegistration && (saved.Subject != "" || saved.IDToken != "" || saved.AccessToken != "" || saved.RefreshToken != "" || saved.Pending != nil) {
-			return nil, errors.New("pending ChatGPT registration contains credentials")
+		if saved.PendingRegistration && (id == s.Active || saved.Subject != "" || saved.Email != "" ||
+			saved.IDToken != "" || saved.AccessToken != "" || saved.RefreshToken != "" || saved.Pending != nil ||
+			saved.Scopes != "" || !saved.ExpiresAt.IsZero() || saved.EarliestRefreshAt != 0) {
+			return nil, errors.New("pending ChatGPT registration is active or contains identity or grant data")
 		}
 		if !ValidAccountID(id) || saved.ClientID != id || saved.Generation == "" {
 			return nil, errors.New("invalid ChatGPT registration in the account store")

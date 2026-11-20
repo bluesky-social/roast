@@ -79,7 +79,7 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 	rotated := tokens.RefreshToken != "" && tokens.RefreshToken != saved.RefreshToken
 	if err != nil {
 		if rotated {
-			cause := fmt.Errorf("ChatGPT returned a malformed refresh response with a replacement token: %w", err)
+			cause := fmt.Errorf("%w: ChatGPT returned a malformed refresh response with a replacement token: %v", ErrAuth, err)
 			cause = c.revokeDiscardedToken(ctx, saved.ClientID, tokens.RefreshToken, "refresh_token", cause)
 			return "", accounts.clearStoredGrant(&saved, cause)
 		}

@@ -681,16 +681,18 @@ func TestIdentityOnlyRefreshKeepsThePriorGrant(t *testing.T) {
 
 func TestPartiallyDecodedRefreshCannotReuseRotatedGrant(t *testing.T) {
 	for _, tc := range []struct {
+		tokenStatus  int
 		body         string
 		revokeStatus int
 	}{
-		{`{"refresh_token":"rotated","expires_in":"invalid"}`, http.StatusOK},
-		{`{"refresh_token":"rotated","expires_in":`, http.StatusOK},
-		{`{"refresh_token":"rotated","expires_in":`, http.StatusForbidden},
-		{`{"refresh_token":"rotated"} trailing data`, http.StatusOK},
-		{`{"access_token":"replacement","refresh_token":"rotated","refresh_token":"","token_type":"Bearer","expires_in":3600}`, http.StatusOK},
-		{`{"access_token":"replacement","refresh_token":"rotated","refreſh_token":"","token_type":"Bearer","expires_in":3600}`, http.StatusOK},
-		{`{"access_token":"replacement","refresh_token":"rotated","scope":"scope-one","SCOPE":"scope-two","token_type":"Bearer","expires_in":3600}`, http.StatusOK},
+		{http.StatusOK, `{"refresh_token":"rotated","expires_in":"invalid"}`, http.StatusOK},
+		{http.StatusOK, `{"refresh_token":"rotated","expires_in":`, http.StatusOK},
+		{http.StatusOK, `{"refresh_token":"rotated","expires_in":`, http.StatusForbidden},
+		{http.StatusOK, `{"refresh_token":"rotated"} trailing data`, http.StatusOK},
+		{http.StatusOK, `{"access_token":"replacement","refresh_token":"rotated","refresh_token":"","token_type":"Bearer","expires_in":3600}`, http.StatusOK},
+		{http.StatusOK, `{"access_token":"replacement","refresh_token":"rotated","refreſh_token":"","token_type":"Bearer","expires_in":3600}`, http.StatusOK},
+		{http.StatusOK, `{"access_token":"replacement","refresh_token":"rotated","scope":"scope-one","SCOPE":"scope-two","token_type":"Bearer","expires_in":3600}`, http.StatusOK},
+		{http.StatusCreated, `{"refresh_token":"rotated"}`, http.StatusOK},
 	} {
 		c := testClient(t)
 		seed(t, c, time.Now().Add(-time.Minute))
@@ -698,7 +700,7 @@ func TestPartiallyDecodedRefreshCannotReuseRotatedGrant(t *testing.T) {
 		c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 			switch r.URL.String() {
 			case tokenURL:
-				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+				return &http.Response{StatusCode: tc.tokenStatus, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
 			case discoveryURL:
 				return jsonResponse(http.StatusOK, map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": oauth.Issuer + "/revoke"})
 			case oauth.Issuer + "/revoke":
