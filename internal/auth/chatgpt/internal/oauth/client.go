@@ -115,7 +115,7 @@ func readTokenResponse(body io.Reader, previousRefresh string, tokens *TokenResp
 	const limit = 2 << 20
 	data, readErr := io.ReadAll(io.LimitReader(body, limit+1))
 	issued, rejected := extractCleanupTokens(data, previousRefresh)
-	if readErr != nil || len(data) > limit || rejected || josejson.Unmarshal(data, tokens) != nil ||
+	if readErr != nil || len(data) > limit || rejected || !json.Valid(data) || josejson.Unmarshal(data, tokens) != nil ||
 		!ValidAccessToken(tokens.AccessToken) || !ValidRefreshToken(tokens.RefreshToken) {
 		*tokens = issued
 		return errors.New("invalid ChatGPT response")
@@ -181,7 +181,10 @@ func extractCleanupTokens(data []byte, previousRefresh string) (TokenResponse, b
 	if issued.AccessToken == "" {
 		issued.AccessToken = aliases.AccessToken
 	}
-	if (issued.RefreshToken == "" || issued.RefreshToken == previousRefresh) && aliases.RefreshToken != "" {
+	if issued.RefreshToken == previousRefresh {
+		issued.RefreshToken = ""
+	}
+	if issued.RefreshToken == "" && aliases.RefreshToken != previousRefresh {
 		issued.RefreshToken = aliases.RefreshToken
 	}
 
