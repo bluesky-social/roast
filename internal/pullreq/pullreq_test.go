@@ -110,6 +110,100 @@ func TestPrepareFetchesExplicitBaseFromRemote(t *testing.T) {
 	}
 }
 
+func TestPrepareFetchesTagBaseFromRemote(t *testing.T) {
+	fx := newFixture(t)
+	// An annotated tag, which the base must peel to its commit. The local
+	// clone has a stale lightweight tag of the same name.
+	run(t, fx.upstream, "tag", "-a", "-m", "release", "v1", fx.upstreamMain)
+	run(t, fx.local, "tag", "v1", fx.staleMain)
+	c, err := Prepare(t.Context(), fx.local, "origin", 7, "refs/tags/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Base != fx.upstreamMain || c.BaseRef != "refs/tags/v1" {
+		t.Errorf("Base = %s (%s), want the remote tag's commit %s", c.Base, c.BaseRef, fx.upstreamMain)
+	}
+	if got := run(t, fx.local, "rev-parse", "v1"); got != fx.staleMain {
+		t.Errorf("review updated the local tag to %s", got)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoResidue(t, fx.local, c)
+}
+
+func TestPrepareUsesCommitIDBaseWithoutFetchingIt(t *testing.T) {
+	fx := newFixture(t)
+	for name, base := range map[string]string{
+		"full":        fx.staleMain,
+		"abbreviated": fx.staleMain[:4],
+		"upper case":  strings.ToUpper(fx.staleMain[:8]),
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := Prepare(t.Context(), fx.local, "origin", 7, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Base != fx.staleMain || c.BaseRef != base {
+				t.Errorf("Base = %s (%s), want commit %s", c.Base, c.BaseRef, fx.staleMain)
+			}
+			if len(c.refs) != 1 {
+				t.Errorf("refs = %v, want only the head ref", c.refs)
+			}
+			if err := c.Close(); err != nil {
+				t.Fatal(err)
+			}
+			assertNoResidue(t, fx.local, c)
+		})
+	}
+}
+
+// A branch whose name looks like a commit ID is still fetched as a branch,
+// even when a local ref of that name resolves to some other commit.
+func TestPrepareFetchesHexNamedBranchFromRemote(t *testing.T) {
+	fx := newFixture(t)
+	run(t, fx.upstream, "branch", "deadbeef", fx.upstreamMain)
+	run(t, fx.local, "branch", "deadbeef", fx.staleMain)
+	c, err := Prepare(t.Context(), fx.local, "origin", 7, "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if c.Base != fx.upstreamMain {
+		t.Errorf("Base = %s, want the remote branch's commit %s", c.Base, fx.upstreamMain)
+	}
+}
+
+func TestPrepareRejectsBaseOnAnotherRemote(t *testing.T) {
+	fx := newFixture(t)
+	run(t, fx.local, "remote", "add", "fork", fx.upstream)
+	_, err := Prepare(t.Context(), fx.local, "origin", 7, "fork/main")
+	var usage *UsageError
+	if !errors.As(err, &usage) || !strings.Contains(err.Error(), `remote "fork"`) {
+		t.Fatalf("err = %v, want a usage error naming the other remote", err)
+	}
+	// The fully qualified form still reaches a branch of that literal name.
+	run(t, fx.upstream, "branch", "fork/main", fx.upstreamMain)
+	c, err := Prepare(t.Context(), fx.local, "origin", 7, "refs/heads/fork/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if c.Base != fx.upstreamMain {
+		t.Errorf("Base = %s, want %s", c.Base, fx.upstreamMain)
+	}
+}
+
+func TestPrepareExplainsBaseFormsWhenTheBaseFetchFails(t *testing.T) {
+	fx := newFixture(t)
+	run(t, fx.upstream, "tag", "v1", fx.upstreamMain)
+	// A bare tag name is read as a branch, which the remote does not have.
+	_, err := Prepare(t.Context(), fx.local, "origin", 7, "v1")
+	if err == nil || !strings.Contains(err.Error(), "refs/heads/v1") || !strings.Contains(err.Error(), "refs/tags/<tag>") {
+		t.Fatalf("err = %v, want it to show the branch it looked for and the accepted forms", err)
+	}
+}
+
 func TestPrepareConcurrentReviewsOfOnePullRequestAreIndependent(t *testing.T) {
 	fx := newFixture(t)
 	first, err := Prepare(t.Context(), fx.local, "origin", 7, "")
@@ -145,6 +239,8 @@ func TestPrepareRejectsWithoutLeavingResidue(t *testing.T) {
 		"option as remote":  {remote: "--upload-pack=touch " + injected, number: 7, usage: true},
 		"zero number":       {remote: "origin", number: 0, usage: true},
 		"option as base":    {remote: "origin", number: 7, base: "--output=x", usage: true},
+		"option as tag":     {remote: "origin", number: 7, base: "refs/tags/--output=x", usage: true},
+		"unknown commit":    {remote: "origin", number: 7, base: "0123456789abcdef0123456789abcdef01234567"},
 		"invalid base":      {remote: "origin", number: 7, base: "release:other", usage: true},
 		"foreign base":      {remote: "origin", number: 7, base: "refs/remotes/upstream/main", usage: true},
 		"unresolvable base": {remote: "origin", number: 7, base: "no-such-ref"},

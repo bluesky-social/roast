@@ -353,7 +353,7 @@ func flagUsageError(_ *cobra.Command, err error) error {
 func addReviewFlags(cmd *cobra.Command, f *reviewFlags) {
 	fl := cmd.Flags()
 	fl.StringVar(&f.configPath, "config", "", "config file (default: user config directory/roast/config.yaml)")
-	fl.StringVar(&f.base, "base", "", "diff base ref (default: origin/main with fallbacks)")
+	fl.StringVar(&f.base, "base", "", "diff base ref (default: origin/main with fallbacks); with --pr, a branch or refs/tags/<tag> on the PR remote, or a commit ID (default: that remote's HEAD)")
 	fl.BoolVar(&f.uncommittedOnly, "uncommitted-only", false, "only review uncommitted changes")
 	fl.BoolVar(&f.staged, "staged", false, "review exactly the staged set")
 	fl.IntVar(&f.pr, "pr", 0, "review pull request N, fetched from refs/pull/N/head into a temporary worktree")

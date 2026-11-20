@@ -4,8 +4,9 @@
 // The head comes from the GitHub-style refs/pull/<n>/head ref on a configured
 // remote. It is fetched into a ref under refs/roast/pull/, checked out into a
 // throwaway linked worktree, and both are removed by Close. The base defaults
-// to the remote's HEAD, fetched in the same call so a stale remote-tracking
-// branch cannot widen the diff with commits that landed after the PR forked.
+// to the remote's HEAD, and a named base is a branch or tag on that remote.
+// Either is fetched in the same call, so a stale remote-tracking branch cannot
+// widen the diff with commits that landed after the PR forked.
 package pullreq
 
 import (
@@ -15,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -52,8 +54,9 @@ type Checkout struct {
 }
 
 // Prepare fetches pull request number from remote and checks its head out
-// into a temporary linked worktree of repo. The same fetch gets the named
-// base branch from that remote, or its HEAD when base is empty.
+// into a temporary linked worktree of repo. The same fetch gets the base from
+// that remote: the branch or tag that base names, or the remote's HEAD when
+// base is empty. A base that is a commit ID is used without fetching it.
 // The caller must Close the result. On error nothing is left behind.
 func Prepare(ctx context.Context, repo, remote string, number int, base string) (*Checkout, error) {
 	for _, name := range redirectingGitEnv {
@@ -64,34 +67,9 @@ func Prepare(ctx context.Context, repo, remote string, number int, base string) 
 	if number <= 0 {
 		return nil, &UsageError{msg: fmt.Sprintf("pull request number must be positive, got %d", number)}
 	}
-	if err := checkRemote(repo, remote); err != nil {
+	src, err := resolveBase(ctx, repo, remote, base)
+	if err != nil {
 		return nil, err
-	}
-	baseSource := "HEAD"
-	baseLabel := remote + "/HEAD"
-	if base != "" {
-		var branch string
-		switch {
-		case strings.HasPrefix(base, "refs/heads/"):
-			branch = strings.TrimPrefix(base, "refs/heads/")
-		case strings.HasPrefix(base, "refs/remotes/"+remote+"/"):
-			branch = strings.TrimPrefix(base, "refs/remotes/"+remote+"/")
-		case strings.HasPrefix(base, "refs/"):
-			return nil, &UsageError{msg: fmt.Sprintf("base %q must name a branch on remote %q", base, remote)}
-		default:
-			branch = strings.TrimPrefix(base, remote+"/")
-		}
-		baseSource = "refs/heads/" + branch
-		if strings.HasPrefix(branch, "-") {
-			return nil, &UsageError{msg: fmt.Sprintf("base branch %q cannot start with '-'", branch)}
-		}
-		if _, err := git(ctx, repo, "check-ref-format", baseSource); err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, &UsageError{msg: fmt.Sprintf("invalid base branch %q", base)}
-		}
-		baseLabel = base
 	}
 
 	tmp, err := os.MkdirTemp("", "roast-pr-")
@@ -113,22 +91,35 @@ func Prepare(ctx context.Context, repo, remote string, number int, base string) 
 	ns := RefPrefix + filepath.Base(tmp) + "/"
 	headRef := ns + "head"
 	baseRef := ns + "base"
-	c.refs = []string{headRef, baseRef}
+	c.refs = []string{headRef}
+	refspecs := []string{fmt.Sprintf("+refs/pull/%d/head:%s", number, headRef)}
+	if src.fetch != "" {
+		c.refs = append(c.refs, baseRef)
+		refspecs = append(refspecs, "+"+src.fetch+":"+baseRef)
+	}
 	// --refmap= stops remote.<name>.fetch mappings from also updating
 	// remote-tracking refs, and --no-prune stops fetch.prune from deleting
 	// any. Only the per-run refs above change.
-	if _, err := git(ctx, repo, "-c", "fetch.recurseSubmodules=false",
-		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--no-prune", "--", remote,
-		fmt.Sprintf("+refs/pull/%d/head:%s", number, headRef), "+"+baseSource+":"+baseRef); err != nil {
-		return nil, fmt.Errorf("fetch pull request #%d and base %s from %s: %w", number, baseSource, remote, err)
+	fetch := append([]string{"-c", "fetch.recurseSubmodules=false",
+		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--no-prune", "--", remote}, refspecs...)
+	if _, err := git(ctx, repo, fetch...); err != nil {
+		switch {
+		case ctx.Err() != nil || src.fetch == "":
+			return nil, fmt.Errorf("fetch pull request #%d from %s: %w", number, remote, err)
+		case base == "":
+			return nil, fmt.Errorf("fetch pull request #%d and base %s from %s: %w", number, src.fetch, remote, err)
+		}
+		return nil, fmt.Errorf("fetch pull request #%d and base %s from %s: %w (with --pr, --base names a branch or refs/tags/<tag> on %s, or a commit already in this repository)", number, src.fetch, remote, err, remote)
 	}
 
 	if c.Head, err = commitOID(repo, headRef); err != nil {
 		return nil, err
 	}
-	c.BaseRef = baseLabel
-	if c.Base, err = commitOID(repo, baseRef); err != nil {
-		return nil, err
+	c.BaseRef = src.label
+	if c.Base = src.commit; c.Base == "" {
+		if c.Base, err = commitOID(repo, baseRef); err != nil {
+			return nil, err
+		}
 	}
 
 	// Without a merge base, the diff from base to head would include every
@@ -189,20 +180,79 @@ func (c *Checkout) Close() error {
 	return errors.Join(errs...)
 }
 
-// checkRemote accepts only a configured remote name. That rules out URLs and
-// option-shaped arguments reaching `git fetch`, and gives a clear error before
-// any network call.
-func checkRemote(repo, remote string) error {
-	out, err := git(context.Background(), repo, "remote")
+// baseSource is where a pull request review's comparison base comes from.
+type baseSource struct {
+	fetch  string // ref to fetch from the remote; empty when commit is set
+	commit string // a commit already in the repository, named by its ID
+	label  string // what the base was resolved from, for display and run records
+}
+
+// resolveBase validates remote and decides how to obtain base. A branch or
+// tag is always fetched from remote, never read from a local ref that may be
+// stale. A commit ID names the same commit everywhere, so it is used as is.
+func resolveBase(ctx context.Context, repo, remote, base string) (baseSource, error) {
+	remotes, err := git(ctx, repo, "remote")
 	if err != nil {
-		return fmt.Errorf("list remotes: %w", err)
+		return baseSource{}, fmt.Errorf("list remotes: %w", err)
 	}
-	for _, name := range strings.Fields(out) {
-		if name == remote {
-			return nil
+	names := strings.Fields(remotes)
+	// Accepting only a configured remote name rules out URLs and
+	// option-shaped arguments reaching `git fetch`, and gives a clear error
+	// before any network call.
+	if !slices.Contains(names, remote) {
+		return baseSource{}, &UsageError{msg: fmt.Sprintf("remote %q is not configured in this repository; pass --pr-remote", remote)}
+	}
+	if base == "" {
+		return baseSource{fetch: "HEAD", label: remote + "/HEAD"}, nil
+	}
+	var ref string
+	switch {
+	case strings.HasPrefix(base, "refs/heads/"), strings.HasPrefix(base, "refs/tags/"):
+		ref = base
+	case strings.HasPrefix(base, "refs/remotes/"+remote+"/"):
+		ref = "refs/heads/" + strings.TrimPrefix(base, "refs/remotes/"+remote+"/")
+	case strings.HasPrefix(base, "refs/"):
+		return baseSource{}, &UsageError{msg: fmt.Sprintf("base %q must name a branch or tag on remote %q", base, remote)}
+	default:
+		if oid := commitID(ctx, repo, base); oid != "" {
+			return baseSource{commit: oid, label: base}, nil
 		}
+		if ctx.Err() != nil {
+			return baseSource{}, ctx.Err()
+		}
+		// Read as a branch of the pull request's remote, another remote's
+		// branch would fail to fetch or, worse, match an unrelated branch.
+		for _, other := range names {
+			if other != remote && strings.HasPrefix(base, other+"/") {
+				return baseSource{}, &UsageError{msg: fmt.Sprintf("base %q is on remote %q, but the pull request is fetched from %q; name a branch on %q, or pass refs/heads/%s if that is the branch's full name there", base, other, remote, remote, base)}
+			}
+		}
+		ref = "refs/heads/" + strings.TrimPrefix(base, remote+"/")
 	}
-	return &UsageError{msg: fmt.Sprintf("remote %q is not configured in this repository; pass --pr-remote", remote)}
+	if _, name, _ := strings.Cut(strings.TrimPrefix(ref, "refs/"), "/"); strings.HasPrefix(name, "-") {
+		return baseSource{}, &UsageError{msg: fmt.Sprintf("base %q cannot start with '-'", name)}
+	}
+	if _, err := git(ctx, repo, "check-ref-format", ref); err != nil {
+		if ctx.Err() != nil {
+			return baseSource{}, ctx.Err()
+		}
+		return baseSource{}, &UsageError{msg: fmt.Sprintf("invalid base %q", base)}
+	}
+	return baseSource{fetch: ref, label: base}, nil
+}
+
+// commitID returns the full ID of the commit that base names when base is a
+// commit ID, abbreviated or not, of a commit in the repository. It returns ""
+// for anything else, including a ref whose name merely looks like one.
+func commitID(ctx context.Context, repo, base string) string {
+	if len(base) < 4 || len(base) > 64 || strings.Trim(base, "0123456789abcdefABCDEF") != "" {
+		return ""
+	}
+	oid, err := git(ctx, repo, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{commit}")
+	if err != nil || !strings.HasPrefix(oid, strings.ToLower(base)) {
+		return ""
+	}
+	return oid
 }
 
 func commitOID(repo, ref string) (string, error) {

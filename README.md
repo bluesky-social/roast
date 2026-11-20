@@ -271,6 +271,10 @@ remote named by `--pr-remote`). The base defaults to the remote's `HEAD`.
 For a PR targeting another branch, use `--base release-1.4` or
 `--base origin/release-1.4`. Both fetch `refs/heads/release-1.4` from
 `origin` without reading or updating the local `origin/release-1.4` ref.
+With `--pr`, `--base` otherwise takes a tag on that remote, written
+`refs/tags/v1.4.0`, or the ID of a commit already in your repository. A bare
+name is always read as a branch, and a branch of another remote, such as
+`upstream/main`, is a usage error.
 
 Roast checks the PR head out into a temporary worktree and reviews the diff
 from the merge base to the head. A missing merge base, as can happen in a
