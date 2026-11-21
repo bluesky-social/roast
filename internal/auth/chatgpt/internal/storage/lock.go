@@ -73,7 +73,7 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	}()
 	// Resolve known cleanup failures before a callback can consume a refresh
 	// token whose replacement would otherwise fail at the same cleanup step.
-	m, err := s.readManifest()
+	m, err := s.readManifest(ctx)
 	if err != nil {
 		return err
 	}

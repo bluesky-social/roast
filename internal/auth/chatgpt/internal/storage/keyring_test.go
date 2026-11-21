@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -80,7 +81,7 @@ func save(store Store, ctx context.Context, value string) error {
 func assertSnapshot(t *testing.T, store Store, want string) {
 	t.Helper()
 	var got string
-	if err := store.ReadJSON(&got); err != nil || got != want {
+	if err := store.ReadJSON(t.Context(), &got); err != nil || got != want {
 		t.Fatalf("unexpected credential snapshot: %v", err)
 	}
 }
@@ -88,14 +89,14 @@ func assertSnapshot(t *testing.T, store Store, want string) {
 func TestKeyringReadsDistinguishMissingAndUnavailable(t *testing.T) {
 	store, ring := testStore(t)
 	var got string
-	if err := store.ReadJSON(&got); !errors.Is(err, os.ErrNotExist) {
+	if err := store.ReadJSON(t.Context(), &got); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("empty keyring = %v", err)
 	}
 	if _, err := os.Stat(store.lockPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a read created the lock file: %v", err)
 	}
 	ring.onGet = func(string) (string, error) { return "", errors.New("private backend output") }
-	if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "private backend output") {
+	if err := store.ReadJSON(t.Context(), &got); err == nil || errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "private backend output") {
 		t.Fatalf("unavailable keyring = %v", err)
 	}
 }
@@ -139,10 +140,10 @@ func TestKeyringSplitsLargeSnapshots(t *testing.T) {
 	otherRoot := t.TempDir()
 	other := newStore(filepath.Join(otherRoot, "storage"), otherRoot, ring)
 	var got string
-	if err := other.ReadJSON(&got); !errors.Is(err, os.ErrNotExist) {
+	if err := other.ReadJSON(t.Context(), &got); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("another namespace could read the snapshot: %v", err)
 	}
-	first, err := store.readManifest()
+	first, err := store.readManifest(t.Context())
 	if err != nil || first.Current.Chunks < 2 {
 		t.Fatalf("snapshot did not span several entries: %v", err)
 	}
@@ -209,7 +210,7 @@ func TestInterruptedWritePreservesCurrentSnapshot(t *testing.T) {
 		t.Fatalf("incomplete write = %v", err)
 	}
 	assertSnapshot(t, store, "current")
-	m, err := store.readManifest()
+	m, err := store.readManifest(t.Context())
 	if err != nil || m.Discard.Chunks < 2 {
 		t.Fatalf("abandoned entries were not tracked: %v", err)
 	}
@@ -228,7 +229,7 @@ func TestUncertainPublicationPreservesReplacement(t *testing.T) {
 	if err := save(store, t.Context(), "current"); err != nil {
 		t.Fatal(err)
 	}
-	m, err := store.readManifest()
+	m, err := store.readManifest(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +261,7 @@ func TestPublicationRetriesAfterTransientFailure(t *testing.T) {
 			if err := save(store, t.Context(), "current"); err != nil {
 				t.Fatal(err)
 			}
-			m, err := store.readManifest()
+			m, err := store.readManifest(t.Context())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -340,7 +341,7 @@ func TestReadRetriesIfSnapshotWasRetired(t *testing.T) {
 	if err := save(store, t.Context(), "current"); err != nil {
 		t.Fatal(err)
 	}
-	m, err := store.readManifest()
+	m, err := store.readManifest(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,18 +362,22 @@ func TestMissingCommittedEntryIsNotAnEmptyStore(t *testing.T) {
 	if err := save(store, t.Context(), "current"); err != nil {
 		t.Fatal(err)
 	}
-	m, err := store.readManifest()
+	m, err := store.readManifest(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	delete(ring.items, store.chunkItem(m.Current, 0))
 	var got string
-	if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) {
+	if err := store.ReadJSON(t.Context(), &got); err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("incomplete credential snapshot = %v", err)
 	}
 	ring.items[store.chunkItem(m.Current, 0)] = strings.Repeat("A", 2*chunkSize)
-	if err := store.ReadJSON(&got); err == nil || !strings.Contains(err.Error(), "oversized") {
+	if err := store.ReadJSON(t.Context(), &got); err == nil || !strings.Contains(err.Error(), "oversized") {
 		t.Fatalf("oversized credential entry = %v", err)
+	}
+	ring.items[store.chunkItem(m.Current, 0)] = base64.RawStdEncoding.EncodeToString([]byte(`"changed"`))
+	if err := store.ReadJSON(t.Context(), &got); err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("modified credential entry = %v", err)
 	}
 }
 
@@ -385,7 +390,7 @@ func TestMalformedManifestIsNotAnEmptyStore(t *testing.T) {
 	for _, raw := range []string{"{}", string(oversized), "{}" + strings.Repeat(" ", maxManifestSize)} {
 		ring.items[store.manifestItem()] = raw
 		var got string
-		if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) {
+		if err := store.ReadJSON(t.Context(), &got); err == nil || errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("malformed credential index = %v", err)
 		}
 	}
