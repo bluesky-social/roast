@@ -153,7 +153,9 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 		if token != "" {
 			// A crash during revocation must never leave a locally usable grant.
 			if err := accounts.markForRevocation(&saved, token, tokenType, unknownRefresh); err != nil {
-				return errors.Join(fmt.Errorf("could not confirm saving the pending sign-out; repair credential storage and retry: %w", err), unconfirmedRevocation(id))
+				if !errors.Is(err, storage.ErrPublished) || !accounts.confirmRevocationCheckpoint(saved) {
+					return errors.Join(fmt.Errorf("could not confirm saving the pending sign-out: %w. Repair credential storage and retry with roast chatgpt signout -- %s", err, id), unconfirmedRevocation(id))
+				}
 			}
 			// Revocation precedes local cleanup. Bound it across discovery and
 			// retries so another command can acquire the session lock.
@@ -179,4 +181,15 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 		}
 		return nil
 	})
+}
+
+// Verify the checkpoint before revoking when the keyring could not confirm its
+// write or finish cleanup. The caller still holds the account lock.
+func (s *accountStore) confirmRevocationCheckpoint(saved credential) bool {
+	current, err := loadAccountStore(s.storage)
+	if err != nil {
+		return false
+	}
+	checkpoint := current.Accounts[saved.ClientID]
+	return checkpoint.Generation == saved.Generation && checkpoint.Pending != nil && checkpoint.Pending.RevokeOnly
 }

@@ -32,6 +32,7 @@ API-key profile. A locked collection can prompt for unlock.
 Roast uses a private lock file to serialize account updates and token renewal.
 On macOS it lives in the system's per-user directory. On Linux it lives in the
 user's home, which must be user-owned and have no shared write permissions.
+Leave the lock file in place while any Roast command is running.
 Each update saves new keyring entries before publishing the snapshot that
 readers use. Roast cleans up entries left by an interruption before attempting
 another token renewal.
