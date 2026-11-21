@@ -22,7 +22,8 @@ const (
 	// CurrentVersion is the durable public configuration schema version.
 	CurrentVersion = 1
 
-	defaultOpenAIBaseURL    = "https://api.openai.com/v1"
+	// OpenAIBaseURL is the public API endpoint used by OpenAI profiles and ChatGPT plan tokens.
+	OpenAIBaseURL           = "https://api.openai.com/v1"
 	defaultAnthropicBaseURL = "https://api.anthropic.com/v1"
 )
 
@@ -31,7 +32,7 @@ func DefaultBaseURL(protocol string) string {
 	if protocol == "anthropic" {
 		return defaultAnthropicBaseURL
 	}
-	return defaultOpenAIBaseURL
+	return OpenAIBaseURL
 }
 
 // InferenceProfile is one named model, endpoint, protocol, and credential
