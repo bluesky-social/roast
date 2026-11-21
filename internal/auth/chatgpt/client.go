@@ -156,9 +156,11 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 		}
 		if token != "" {
 			// A crash during revocation must never leave a locally usable grant.
-			if err := accounts.markForRevocation(&saved, token, tokenType, unknownRefresh); err != nil {
-				if !errors.Is(err, storage.ErrPublished) || !accounts.confirmRevocationCheckpoint(saved) {
-					return errors.Join(fmt.Errorf("could not confirm saving the pending sign-out: %w. Repair credential storage and retry with roast chatgpt signout -- %s", err, id), unconfirmedRevocation(id))
+			if saved.Pending == nil || !saved.Pending.RevokeOnly {
+				if err := accounts.markForRevocation(&saved, token, tokenType, unknownRefresh); err != nil {
+					if !errors.Is(err, storage.ErrPublished) || !accounts.confirmRevocationCheckpoint(saved) {
+						return errors.Join(fmt.Errorf("could not confirm saving the pending sign-out: %w. Repair credential storage and retry with roast chatgpt signout -- %s", err, id), unconfirmedRevocation(id))
+					}
 				}
 			}
 			// Revocation precedes local cleanup. Bound it across discovery and

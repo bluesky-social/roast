@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/zalando/go-keyring"
 )
@@ -62,11 +63,29 @@ type keyringStore struct {
 
 // Open prepares a handle without accessing the vault or creating the lock directory.
 func Open() (Store, error) {
+	return openStore()
+}
+
+var openStore = openSystemStore
+
+func openSystemStore() (Store, error) {
 	lockRoot, err := userLockRoot()
 	if err != nil {
 		return nil, err
 	}
 	return OpenWithKeyring(systemKeyring{}, lockRoot)
+}
+
+// UseTestKeyring isolates both the operating-system keyring and the lock
+// location. Tests using the library's process-wide mock must run serially.
+func UseTestKeyring(lockRoot string) (restore func()) {
+	keyring.MockInit()
+	previous := openStore
+	openStore = func() (Store, error) {
+		// Use the library mock instead of the native macOS mutation path.
+		return OpenWithKeyring(struct{ systemKeyring }{}, lockRoot)
+	}
+	return func() { openStore = previous }
 }
 
 func userLockRoot() (string, error) {
@@ -256,6 +275,9 @@ func (s keyringStore) readSnapshot(v snapshot) (string, error) {
 	var data strings.Builder
 	for i := range v.Chunks {
 		raw, err := s.ring.Get(service, s.chunkItem(v, i))
+		if err != nil && !errors.Is(err, keyring.ErrNotFound) {
+			raw, err = s.ring.Get(service, s.chunkItem(v, i))
+		}
 		if errors.Is(err, keyring.ErrNotFound) {
 			return "", keyring.ErrNotFound
 		}
@@ -447,8 +469,10 @@ func (s keyringStore) deleteItem(item string) error {
 }
 
 func (s keyringStore) runSecurityMutation(cmd *exec.Cmd) error {
-	// The child must keep the flock until it completes, even if Roast exits.
+	// Keep the flock until the child finishes, even if Roast exits or the
+	// foreground process group receives a terminal interrupt.
 	cmd.ExtraFiles = []*os.File{s.lock.file}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd.Run()
 }
 
