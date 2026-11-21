@@ -512,14 +512,19 @@ func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
 	reader, writer := io.Pipe()
-	defer reader.Close()
-	signedIn := make(chan error, 1)
+	signedIn := make(chan struct{})
+	var signInErr error
 	go func() {
 		_, err := ExecuteContext(ctx, []string{"chatgpt", "signin"}, writer, io.Discard)
 		_ = writer.CloseWithError(err)
-		signedIn <- err
+		signInErr = err
+		close(signedIn)
+	}()
+	defer func() {
+		cancel()
+		reader.Close()
+		<-signedIn
 	}()
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
@@ -551,8 +556,9 @@ func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
 			t.Fatalf("callback HTTP %d", resp.StatusCode)
 		}
 	}
-	if err := <-signedIn; err != nil {
-		t.Fatal(err)
+	<-signedIn
+	if signInErr != nil {
+		t.Fatal(signInErr)
 	}
 	var out bytes.Buffer
 	if _, err := ExecuteContext(ctx, []string{"chatgpt", "models"}, &out, io.Discard); err != nil || out.String() != "finder-model\tFinder\\nlabel\\tvalue\n" {
