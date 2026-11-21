@@ -416,6 +416,12 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 		}
 		return err
 	}
+	if published.Discard.ID == "" {
+		// A first save has no predecessor to verify before cleanup.
+		if _, err := s.readSnapshot(ctx, next); err != nil {
+			return errors.Join(ErrPublished, fmt.Errorf("verify the published ChatGPT credential snapshot: %w", err))
+		}
+	}
 	if err := s.cleanupDiscarded(ctx, published); err != nil {
 		return errors.Join(ErrPublished, err)
 	}
