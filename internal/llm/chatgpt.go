@@ -54,7 +54,7 @@ type chatGPTAccountSnapshot struct {
 // requests. Initialization errors are deferred until a ChatGPT role is
 // used, so an unused verifier cannot fail an otherwise successful review.
 func WithPinnedChatGPTAccount(ctx context.Context) context.Context {
-	client, err := chatgpt.New()
+	client, err := chatgpt.New(ctx)
 	return context.WithValue(ctx, chatGPTAccountKey{}, chatGPTAccountSnapshot{client, err})
 }
 
@@ -62,5 +62,5 @@ func chatGPTAccount(ctx context.Context) (*chatgpt.Client, error) {
 	if account, ok := ctx.Value(chatGPTAccountKey{}).(chatGPTAccountSnapshot); ok {
 		return account.client, account.err
 	}
-	return chatgpt.New()
+	return chatgpt.New(ctx)
 }

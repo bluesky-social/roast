@@ -158,7 +158,7 @@ func accountFixture(t *testing.T) (configPath string, selectAccount func(string)
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
 	chatgpttest.SeedAccounts(t, "account-a", "account-b")
-	selector, err := chatgpt.New()
+	selector, err := chatgpt.New(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}

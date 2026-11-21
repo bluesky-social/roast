@@ -50,7 +50,7 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := chatgpt.New()
+			client, err := chatgpt.New(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -79,12 +79,12 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 // Open the account selected when the command starts and bound the operation.
 func runAccountCommand(timeout time.Duration, run func(context.Context, *chatgpt.Client, []string) error) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
-		client, err := chatgpt.New()
+		ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+		defer cancel()
+		client, err := chatgpt.New(ctx)
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
-		defer cancel()
 		return run(ctx, client, args)
 	}
 }

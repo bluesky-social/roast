@@ -16,7 +16,7 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if c.selected == "" {
-		accounts, err := c.loadStore()
+		accounts, err := c.loadStore(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -167,7 +167,7 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 // replacement that may be visible so the next call can resume its validation.
 func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountStore, saved *credential, previousGeneration string, writeErr error) error {
 	cause := fmt.Errorf("ChatGPT refresh completed for account %q but saving its replacement could not be confirmed: %w", saved.ClientID, writeErr)
-	current, err := loadAccountStore(accounts.storage)
+	current, err := loadAccountStore(context.WithoutCancel(ctx), accounts.storage)
 	if err == nil && current.HostID == accounts.HostID && current.Accounts[saved.ClientID].Generation == previousGeneration {
 		retryErr := accounts.saveCredential(saved)
 		if retryErr == nil {
