@@ -1,10 +1,13 @@
 package loopback
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,6 +35,101 @@ func TestReauthorizationCallbackParameters(t *testing.T) {
 				t.Fatal("malformed callback supplied a code for exchange")
 			}
 		})
+	}
+}
+
+func TestNewRegistrationRequiresIssuedID(t *testing.T) {
+	for _, tc := range []struct {
+		id    string
+		valid bool
+	}{
+		{"issued-client-v2", true}, {"oaiapp_example", true}, {"", false},
+		{"dynamic_agent_client", false}, {"has space", false}, {"line\nbreak", false},
+		{strings.Repeat("a", 257), false}, {"\xff", false},
+	} {
+		result, err := parseCallback(url.Values{"code": {"code"}, "client_id": {tc.id}}, "")
+		if tc.valid {
+			if err != nil || result.ClientID != tc.id {
+				t.Errorf("issued ID %q did not round trip: %v", tc.id, err)
+			}
+		} else if err == nil || result != (Result{}) {
+			t.Errorf("invalid ID %q produced a result", tc.id)
+		}
+	}
+}
+
+func TestCallbackIgnoresUnrelatedRequests(t *testing.T) {
+	const host = "127.0.0.1:1234"
+	callbacks := make(chan callback, 1)
+	handler := callbackHandler(host, "expected", "account", callbacks)
+	for _, tc := range []struct {
+		method, host, target string
+		status               int
+	}{
+		{"POST", host, "/auth/callback?state=expected", http.StatusNotFound},
+		{"GET", "wrong.invalid", "/auth/callback?state=expected", http.StatusNotFound},
+		{"GET", host, "/other?state=expected", http.StatusNotFound},
+		{"GET", host, "/auth/callback?state=wrong", http.StatusBadRequest},
+		{"GET", host, "/auth/callback?state=expected&state=expected", http.StatusBadRequest},
+		{"GET", host, "/auth/callback?state=expected&code=one-use", http.StatusOK},
+	} {
+		r := httptest.NewRequest(tc.method, "http://"+host+tc.target, nil)
+		r.Host = tc.host
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("%s %s: status %d, want %d", tc.method, tc.target, w.Code, tc.status)
+		}
+	}
+	if len(callbacks) != 1 || (<-callbacks).result.Code != "one-use" {
+		t.Fatal("an unrelated request consumed the callback")
+	}
+}
+
+func TestCallbackPageAndDiagnosticsKeepGrantDataPrivate(t *testing.T) {
+	const host, state = "127.0.0.1:1234", "private-state"
+	const script = "history.replaceState(null,'','/auth/complete');"
+	hash := sha256.Sum256([]byte(script))
+	policy := "default-src 'none'; script-src 'sha256-" + base64.StdEncoding.EncodeToString(hash[:]) + "'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	for _, tc := range []struct{ code, category string }{
+		{"", ""}, {"access_denied", "access_denied"}, {"server_error", "server_error"},
+		{"private-error", "oauth_error"}, {"access_denied\nprivate-error", "oauth_error"},
+	} {
+		callbacks := make(chan callback, 1)
+		query := url.Values{"state": {state}, "code": {"private-code"}, "error_description": {"private-description"}, "error_uri": {"https://private.invalid/"}}
+		if tc.code != "" {
+			query.Set("error", tc.code)
+		}
+		r := httptest.NewRequest(http.MethodGet, "http://"+host+"/auth/callback?"+query.Encode(), nil)
+		w := httptest.NewRecorder()
+		callbackHandler(host, state, "account", callbacks)(w, r)
+		if w.Code != http.StatusOK || len(callbacks) != 1 {
+			t.Fatalf("callback returned %d without completing", w.Code)
+		}
+		got := <-callbacks
+		if tc.category == "" {
+			if got.err != nil || got.result.Code != "private-code" {
+				t.Fatal("valid callback did not reach the exchange")
+			}
+		} else if got.err == nil || got.err.Error() != "ChatGPT authorization failed ("+tc.category+")" || got.result != (Result{}) {
+			t.Fatal("OAuth error did not stop the exchange with a safe diagnostic")
+		}
+		if !strings.Contains(w.Body.String(), "<script>"+script+"</script>") || strings.Contains(w.Body.String(), "private") {
+			t.Fatal("callback page must clear its URL and keep request data private")
+		}
+		for key, want := range map[string]string{
+			"Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": policy,
+			"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
+		} {
+			if values := w.Header().Values(key); len(values) != 1 || values[0] != want {
+				t.Errorf("unexpected callback header %s", key)
+			}
+		}
+		for key, values := range w.Header() {
+			if key == "Location" || key == "Set-Cookie" || strings.Contains(strings.Join(values, " "), "private") {
+				t.Errorf("unexpected callback response header %s", key)
+			}
+		}
 	}
 }
 

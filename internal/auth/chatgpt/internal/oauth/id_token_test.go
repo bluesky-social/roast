@@ -114,64 +114,34 @@ func TestCanceledVerificationDoesNotRejectGrant(t *testing.T) {
 	}
 }
 
-func TestIDTokenRejectsUnsignedBeforeFetchingKeys(t *testing.T) {
-	c := NewClient()
-	c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
-		t.Error("requested signing keys for an unsigned token")
-		return nil, errors.New("unexpected key request")
-	})
+func TestIDTokenRejectsMalformedTokensBeforeFetchingKeys(t *testing.T) {
 	payload, err := json.Marshal(idTokenClaims(time.Now()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	encode := base64.RawURLEncoding.EncodeToString
-	token := encode([]byte(`{"alg":"none","kid":"test"}`)) + "." + encode(payload) + "."
-	_, err = c.ValidateID(t.Context(), token, "oaiapp_test", "nonce", time.Now)
-	if !errors.Is(err, ErrInvalidID) {
-		t.Fatalf("ValidateID returned %v for an unsigned token", err)
-	}
-}
-
-func TestUnencodedIDPayloadIsRejectedBeforeFetchingKeys(t *testing.T) {
-	c := NewClient()
-	c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
-		t.Error("requested signing keys for an unencoded JWT")
-		return nil, errors.New("unexpected request")
-	})
-	payload, err := json.Marshal(idTokenClaims(time.Now()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encode := base64.RawURLEncoding.EncodeToString
-	raw := encode([]byte(`{"alg":"RS256","kid":"test","b64":false}`)) + "." + encode(payload) + "." + encode([]byte("signature"))
-	if _, err := c.ValidateID(t.Context(), raw, "oaiapp_test", "nonce", time.Now); !errors.Is(err, ErrInvalidID) {
-		t.Fatalf("unencoded JWT was not rejected: %v", err)
-	}
-}
-
-func TestMalformedIDPayloadIsRejectedBeforeFetchingKeys(t *testing.T) {
-	c := NewClient()
-	c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
-		t.Error("requested signing keys for a malformed ID token")
-		return nil, errors.New("unexpected key request")
-	})
-	encode := base64.RawURLEncoding.EncodeToString
-	now := time.Now()
-	validClaims, err := json.Marshal(idTokenClaims(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ payload, signature string }{
-		{"{", "signature"},
-		{"null", "signature"},
-		{`{"sub":"subject","aud":42}`, "signature"},
-		{string(validClaims), ""},
-		{strings.TrimSuffix(string(validClaims), "}") + `,"sub":null}`, "signature"},
+	const header = `{"alg":"RS256","kid":"unknown"}`
+	claims := string(payload)
+	for _, tc := range []struct{ name, header, payload, signature string }{
+		{"unsigned", `{"alg":"none","kid":"test"}`, claims, ""},
+		{"unencoded", `{"alg":"RS256","kid":"test","b64":false}`, claims, "signature"},
+		{"incomplete payload", header, "{", "signature"},
+		{"null payload", header, "null", "signature"},
+		{"wrong audience type", header, `{"sub":"subject","aud":42}`, "signature"},
+		{"missing signature", header, claims, ""},
+		{"duplicate subject", header, strings.TrimSuffix(claims, "}") + `,"sub":null}`, "signature"},
 	} {
-		token := encode([]byte(`{"alg":"RS256","kid":"unknown"}`)) + "." + encode([]byte(tc.payload)) + "." + encode([]byte(tc.signature))
-		if _, err := c.ValidateID(t.Context(), token, "oaiapp_test", "nonce", time.Now); !errors.Is(err, ErrInvalidID) {
-			t.Fatalf("ValidateID returned %v for a malformed payload", err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewClient()
+			c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("requested signing keys for a malformed token")
+				return nil, errors.New("unexpected key request")
+			})
+			encode := base64.RawURLEncoding.EncodeToString
+			token := encode([]byte(tc.header)) + "." + encode([]byte(tc.payload)) + "." + encode([]byte(tc.signature))
+			if _, err := c.ValidateID(t.Context(), token, "oaiapp_test", "nonce", time.Now); !errors.Is(err, ErrInvalidID) {
+				t.Fatalf("ValidateID returned %v, want ErrInvalidID", err)
+			}
+		})
 	}
 }
 
@@ -179,32 +149,26 @@ func TestSigningKeySetSkipsIneligibleRecords(t *testing.T) {
 	key := testutil.NewRSAKey(t)
 	now := time.Now()
 	token := testutil.SignRS256(t, key, idTokenClaims(now))
-	for _, name := range []string{"KEYS", "KID", "overlong exponent", "disallowed key operation"} {
-		t.Run(name, func(t *testing.T) {
-			keySet := testutil.RS256KeySet(key)
-			switch name {
-			case "KEYS":
-				keySet["KEYS"] = keySet["keys"]
-				delete(keySet, "keys")
-			case "KID":
-				record := keySet["keys"][0]
-				record["KID"] = record["kid"]
-				delete(record, "kid")
-			case "overlong exponent":
-				keySet["keys"][0]["e"] = base64.RawURLEncoding.EncodeToString([]byte{0, 0, 1, 0, 1})
-			}
-			body, err := json.Marshal(keySet)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if name == "disallowed key operation" {
-				body = bytes.Replace(body, []byte(`"kty":"RSA"`), []byte(`"kty":"RSA","key_ops":["encrypt"]`), 1)
+	valid, err := json.Marshal(testutil.RS256KeySet(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, field, substitute string }{
+		{"KEYS", `"keys"`, `"KEYS"`},
+		{"KID", `"kid"`, `"KID"`},
+		{"overlong exponent", `"e":"AQAB"`, `"e":"AAABAAE"`},
+		{"disallowed key operation", `"kty":"RSA"`, `"kty":"RSA","key_ops":["encrypt"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := bytes.Replace(valid, []byte(tc.field), []byte(tc.substitute), 1)
+			if bytes.Equal(valid, body) {
+				t.Fatal("fixture did not contain the expected field")
 			}
 			c := NewClient()
 			c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body))}, nil
 			})
-			_, err = c.ValidateID(t.Context(), token, "oaiapp_test", "nonce", func() time.Time { return now })
+			_, err := c.ValidateID(t.Context(), token, "oaiapp_test", "nonce", func() time.Time { return now })
 			if !errors.Is(err, ErrNetwork) {
 				t.Fatalf("ineligible signing key was treated as a usable key: %v", err)
 			}

@@ -216,7 +216,7 @@ func TestCanceledTerminalRefreshCleanup(t *testing.T) {
 	}
 }
 
-func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
+func TestInterruptedRefreshPreservesGrantAndScope(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
 	key := testutil.NewRSAKey(t)
@@ -225,7 +225,7 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 		switch r.URL.String() {
 		case tokenURL:
 			refreshes++
-			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: testutil.SignRS256(t, key, claims("")), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: testutil.SignRS256(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600})
 		case jwksURL:
 			fetches++
 			if fetches == 1 {
@@ -241,7 +241,7 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 		t.Fatalf("pending tokens must not escape: %v", err)
 	}
 	saved, err := c.loadCredential(c.selected)
-	if err != nil || saved.Pending == nil || saved.Pending.Response.RefreshToken != "rotated-refresh" || saved.AccessToken != "access" {
+	if err != nil || saved.Pending == nil || saved.Pending.Response.RefreshToken != "rotated-refresh" || saved.Pending.Response.Scope != nil || saved.AccessToken != "access" || saved.Scopes != oauth.Scope {
 		t.Fatal("rotation not durably staged")
 	}
 	resumed := *c
@@ -253,7 +253,7 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Pending != nil || saved.RefreshToken != "rotated-refresh" {
+	if saved.Pending != nil || saved.RefreshToken != "rotated-refresh" || saved.Scopes != oauth.Scope {
 		t.Fatal("pending token not committed")
 	}
 }
@@ -952,44 +952,6 @@ func TestRefreshScopePresence(t *testing.T) {
 				t.Fatalf("refresh result not committed correctly: %v", err)
 			}
 		})
-	}
-}
-
-func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
-	c := testClient(t)
-	seed(t, c, time.Now().Add(-time.Minute))
-	key := testutil.NewRSAKey(t)
-	var refreshes, fetches int
-	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
-		switch r.URL.String() {
-		case tokenURL:
-			refreshes++
-			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: testutil.SignRS256(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600})
-		case jwksURL:
-			fetches++
-			if fetches == 1 {
-				return nil, errors.New("temporary failure")
-			}
-			return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
-		default:
-			t.Fatal("unexpected request")
-			return nil, nil
-		}
-	})
-	if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
-		t.Fatalf("pending result escaped: %v", err)
-	}
-	v, err := c.loadCredential(c.selected)
-	if err != nil || v.Pending == nil || v.Pending.Response.Scope != nil || v.Scopes != oauth.Scope || v.Pending.Response.RefreshToken != "rotated-refresh" {
-		t.Fatal("pending response lost scope absence or rotation")
-	}
-	resumed := *c
-	if token, err := resumed.Token(context.Background()); err != nil || token != "rotated-access" || refreshes != 1 {
-		t.Fatalf("pending recovery failed: %v", err)
-	}
-	v, err = c.loadCredential(c.selected)
-	if err != nil || v.Scopes != oauth.Scope || v.Pending != nil || v.RefreshToken != "rotated-refresh" {
-		t.Fatal("pending scope was not preserved")
 	}
 }
 

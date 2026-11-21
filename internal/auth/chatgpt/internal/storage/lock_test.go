@@ -50,7 +50,7 @@ func TestLockedWriteStaysWithItsDirectory(t *testing.T) {
 		if err := os.Rename(dir, moved); err != nil {
 			return err
 		}
-		if err := files.ensureDir(dir); err != nil {
+		if err := os.Mkdir(dir, 0700); err != nil {
 			return err
 		}
 		return locked.WriteJSON(t.Context(), path, "original")
@@ -151,7 +151,7 @@ func TestLockReleasedOnProcessDeath(t *testing.T) {
 func testStorageDir(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "credentials")
-	if err := testStore(t).ensureDir(dir); err != nil {
+	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	return dir

@@ -296,15 +296,11 @@ func scanTokenResponse(data []byte, previousRefresh string) (grant, issued Token
 	return grant, issued, nil
 }
 
-// ValidAccessToken accepts an omitted value or the Bearer token syntax.
+var bearerToken = regexp.MustCompile(`^[-A-Za-z0-9._~+/]+=*$`)
+
+// ValidAccessToken accepts an omitted value or the RFC 6750 bearer token syntax.
 func ValidAccessToken(token string) bool {
-	if token == "" {
-		return true
-	}
-	base := strings.TrimRight(token, "=")
-	return base != "" && strings.IndexFunc(base, func(r rune) bool {
-		return !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~+/", r)
-	}) < 0
+	return token == "" || bearerToken.MatchString(token)
 }
 
 // ValidRefreshToken accepts an omitted value or a nonblank opaque OAuth token.

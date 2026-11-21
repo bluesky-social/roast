@@ -13,10 +13,6 @@ import (
 
 const signInTimeout = 30 * time.Minute
 
-func signInContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, signInTimeout)
-}
-
 // SignIn performs an explicit user-initiated authorization. An empty clientID
 // registers a new account; a saved ID reauthorizes that registration. showURL
 // receives a browser URL containing no saved ID token or other credential.
@@ -33,7 +29,7 @@ func (c *Client) EnablePlan(ctx context.Context, clientID string, showURL func(s
 }
 
 func (c *Client) signIn(ctx context.Context, clientID string, consent bool, showURL func(string) error) (err error) {
-	ctx, cancel := signInContext(ctx)
+	ctx, cancel := context.WithTimeout(ctx, signInTimeout)
 	defer cancel()
 	// Detached cleanup can finish after the user cancels. Report both
 	// failures, including when recovering a pending grant before opening a browser.
