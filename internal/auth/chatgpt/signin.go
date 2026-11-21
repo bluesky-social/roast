@@ -134,7 +134,7 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 			if err := accounts.saveCredentialContext(storeCtx, &previous); err != nil {
 				if errors.Is(err, storage.ErrPublished) {
 					checkpointed = true
-					return registrationRecovery(fmt.Errorf("registration %q was written but its location or durability could not be confirmed. Repair credential storage before retrying: %w", previous.ClientID, err))
+					return registrationRecovery(fmt.Errorf("saving registration %q in the keyring could not be confirmed. Repair credential storage before retrying: %w", previous.ClientID, err))
 				}
 				return err
 			}
@@ -215,8 +215,7 @@ func (c *Client) finishSignIn(ctx context.Context, accounts *accountStore, previ
 	if err := publication.saveCredentialContext(ctx, &next); err != nil {
 		cause := fmt.Errorf("could not confirm saving ChatGPT credentials for account %q: %w", next.ClientID, err)
 		if errors.Is(err, storage.ErrPublished) {
-			// The original directory contains the grant. Its configured path may
-			// have moved, and revoking here could end the saved session.
+			// The grant may already be saved. Revoking it could end that session.
 			return registrationRecovery(cause)
 		}
 		return c.revokeUnpublishedGrant(ctx, accounts, previous, token, kind, cause)

@@ -163,18 +163,17 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 	return saved.AccessToken, nil
 }
 
-// A directory sync can report failure after publishing the checkpoint. Keep
-// a published replacement so the next call can resume its validation.
+// The keyring can report a failure after saving the checkpoint. Keep a
+// replacement that may be visible so the next call can resume its validation.
 func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountStore, saved *credential, previousGeneration string, writeErr error) error {
-	cause := fmt.Errorf("ChatGPT refresh completed but its replacement could not be durably saved: %w", writeErr)
+	cause := fmt.Errorf("ChatGPT refresh completed but saving its replacement could not be confirmed: %w", writeErr)
 	if errors.Is(writeErr, storage.ErrPublished) {
 		return fmt.Errorf("%w. Repair credential storage and retry", cause)
 	}
 
-	// The atomic rename did not happen. The replacement cannot be recovered
-	// from disk, even when a storage failure also prevents reading the old file.
+	// Publication failed. A later read can only recover the earlier grant.
 	cause = c.revokeDiscardedToken(ctx, saved.ClientID, saved.Pending.Response.RefreshToken, "refresh_token", cause)
-	current, err := loadAccountStore(accounts.files, accounts.path)
+	current, err := loadAccountStore(accounts.storage)
 	if err == nil && current.HostID == accounts.HostID && current.Accounts[saved.ClientID].Generation == previousGeneration {
 		return accounts.clearStoredGrant(saved, cause)
 	}

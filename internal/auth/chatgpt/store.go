@@ -6,32 +6,26 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
 type accountStore struct {
-	files     storage.Store
-	path      string
+	storage   storage.Store
 	HostID    string                `json:"host_id"`
 	Active    string                `json:"active"`
 	Selection string                `json:"selection_version,omitempty"`
 	Accounts  map[string]credential `json:"accounts"`
 }
 
-func (c *Client) storePath() string {
-	return filepath.Join(c.dir, "accounts.json")
-}
-
 func (c *Client) loadStore() (*accountStore, error) {
-	return loadAccountStore(c.files, c.storePath())
+	return loadAccountStore(c.store)
 }
 
-func loadAccountStore(files storage.Store, path string) (*accountStore, error) {
-	s := &accountStore{files: files, path: path}
-	err := s.files.ReadJSON(s.path, s)
+func loadAccountStore(store storage.Store) (*accountStore, error) {
+	s := &accountStore{storage: store}
+	err := store.ReadJSON(s)
 	if errors.Is(err, os.ErrNotExist) {
 		s.Accounts = make(map[string]credential)
 		return s, nil
@@ -60,8 +54,8 @@ func loadAccountStore(files storage.Store, path string) (*accountStore, error) {
 
 // withStore serializes updates and token rotation across Roast processes.
 func (c *Client) withStore(ctx context.Context, fn func(*accountStore) error) error {
-	return c.files.WithLock(ctx, c.dir, func(locked storage.Store) error {
-		s, err := loadAccountStore(locked, c.storePath())
+	return c.store.WithLock(ctx, func(locked storage.Store) error {
+		s, err := loadAccountStore(locked)
 		if err != nil {
 			return err
 		}
@@ -73,7 +67,7 @@ func (c *Client) withStore(ctx context.Context, fn func(*accountStore) error) er
 }
 
 func (s *accountStore) save(ctx context.Context) error {
-	return s.files.WriteJSON(ctx, s.path, s)
+	return s.storage.WriteJSON(ctx, s)
 }
 
 // Track explicit selections even when the active account stays the same.
@@ -98,7 +92,7 @@ func (s *accountStore) saveCredential(saved *credential) error {
 func (s *accountStore) saveCredentialContext(ctx context.Context, saved *credential) error {
 	saved.Generation = rand.Text()
 	s.Accounts[saved.ClientID] = *saved
-	return s.files.WriteJSON(ctx, s.path, s)
+	return s.save(ctx)
 }
 
 func (s *accountStore) ensureHost(ctx context.Context) error {
