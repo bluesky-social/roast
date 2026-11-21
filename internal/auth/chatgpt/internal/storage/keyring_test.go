@@ -224,6 +224,41 @@ func TestInterruptedWritePreservesCurrentSnapshot(t *testing.T) {
 	}
 }
 
+func TestInvalidReplacementPreservesPredecessor(t *testing.T) {
+	store, ring := testStore(t)
+	if err := save(store, t.Context(), "current"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.readManifest(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ring.onSet = func(item, value string) error {
+		ring.items[item] = value
+		if item == store.manifestItem() {
+			var index manifest
+			if err := json.Unmarshal([]byte(value), &index); err != nil {
+				t.Fatal(err)
+			}
+			if index.Current != before.Current {
+				delete(ring.items, store.chunkItem(index.Current, 0))
+			}
+		}
+		return nil
+	}
+	if err := save(store, t.Context(), "replacement"); !errors.Is(err, ErrPublished) {
+		t.Fatalf("publication with missing chunk = %v", err)
+	}
+	after, err := store.readManifest(t.Context())
+	if err != nil || after.Discard != before.Current {
+		t.Fatalf("publication lost the index of its predecessor: %v", err)
+	}
+	data, err := store.readSnapshot(t.Context(), before.Current)
+	if err != nil || data != `"current"` {
+		t.Fatalf("publication lost the previous snapshot: %v", err)
+	}
+}
+
 func TestUncertainPublicationPreservesReplacement(t *testing.T) {
 	store, ring := testStore(t)
 	if err := save(store, t.Context(), "current"); err != nil {
