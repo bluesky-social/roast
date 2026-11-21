@@ -46,7 +46,7 @@ func TestLockRejectsSymlinkDirectory(t *testing.T) {
 }
 
 func TestReplacingConfigDirectoryKeepsKeyringLock(t *testing.T) {
-	root := t.TempDir()
+	root := privateTestHome(t)
 	profile := filepath.Join(root, "config")
 	if err := os.Mkdir(profile, 0700); err != nil {
 		t.Fatal(err)

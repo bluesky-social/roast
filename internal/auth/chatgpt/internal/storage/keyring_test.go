@@ -58,8 +58,17 @@ func (m *memoryKeyring) Delete(_, item string) error {
 func testStore(t *testing.T) (keyringStore, *memoryKeyring) {
 	t.Helper()
 	ring := &memoryKeyring{items: make(map[string]string)}
-	root := t.TempDir()
+	root := privateTestHome(t)
 	return newStore(filepath.Join(root, "storage"), root, ring), ring
+}
+
+func privateTestHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func save(store Store, ctx context.Context, value string) error {
