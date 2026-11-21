@@ -79,8 +79,11 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	}
 	if m.Discard.ID != "" && m.Current.ID != "" {
 		// Keep the previous entries if the current snapshot is unreadable.
-		data, err := s.readSnapshot(m.Current)
-		if err != nil || !json.Valid([]byte(data)) {
+		data, err := s.readSnapshot(ctx, m.Current)
+		if err != nil {
+			return fmt.Errorf("verify the current ChatGPT credential snapshot before recovery: %w", err)
+		}
+		if !json.Valid([]byte(data)) {
 			return errors.New("could not verify the current ChatGPT credential snapshot before recovery")
 		}
 	}
