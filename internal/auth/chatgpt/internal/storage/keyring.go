@@ -469,7 +469,10 @@ func (s keyringStore) setVerified(ctx context.Context, item, value string) (bool
 		if err == nil && got == value {
 			return false, nil
 		}
-		uncertain = err != nil && !errors.Is(err, keyring.ErrNotFound)
+		// A failed provider call may still complete later. An older value
+		// observed by a retry cannot rule out that earlier publication.
+		uncertain = uncertain || (setErr != nil && !errors.Is(setErr, keyring.ErrSetDataTooBig)) ||
+			(err != nil && !errors.Is(err, keyring.ErrNotFound))
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return uncertain, ctxErr
 		}
