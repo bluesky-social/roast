@@ -18,12 +18,14 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/zalando/go-keyring"
 )
 
 const (
-	service = "roast-chatgpt-plan-v1"
+	service        = "roast-chatgpt-plan-v1"
+	keychainPrefix = "go-keyring-base64:"
 	// Encode each chunk separately so it is valid UTF-8 on every backend.
 	// On macOS, go-keyring base64-encodes it again. Leave room for both
 	// encodings and the item name under the security command's 4096-byte limit.
@@ -287,11 +289,37 @@ func (s keyringStore) getItem(ctx context.Context, item string) (string, error) 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	value, err := s.ring.Get(service, item)
+	value, err := s.lookupItem(ctx, item)
 	if err != nil && !errors.Is(err, keyring.ErrNotFound) && ctx.Err() == nil {
-		return s.ring.Get(service, item)
+		return s.lookupItem(ctx, item)
 	}
 	return value, err
+}
+
+func (s keyringStore) lookupItem(ctx context.Context, item string) (string, error) {
+	if _, native := s.ring.(systemKeyring); runtime.GOOS != "darwin" || !native {
+		return s.ring.Get(service, item)
+	}
+	// A Keychain permission prompt can block a lookup. It is safe to stop a
+	// read on cancellation, while mutations must retain the lock until done.
+	out, err := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-w", "-s", service, "-a", item).Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
+	if err != nil {
+		var exit *exec.ExitError
+		// security returns 44 for errSecItemNotFound.
+		if errors.As(err, &exit) && exit.ExitCode() == 44 {
+			return "", keyring.ErrNotFound
+		}
+		return "", err
+	}
+	encoded, ok := strings.CutPrefix(strings.TrimSpace(string(out)), keychainPrefix)
+	if !ok {
+		return "", errors.New("invalid macOS ChatGPT keyring entry encoding")
+	}
+	value, err := base64.StdEncoding.DecodeString(encoded)
+	return string(value), err
 }
 
 func (s keyringStore) readSnapshot(ctx context.Context, v snapshot) (string, error) {
@@ -356,7 +384,7 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 	if err != nil {
 		return err
 	}
-	if err := s.recoverDiscarded(ctx, m); err != nil {
+	if err := s.cleanupDiscarded(ctx, m); err != nil {
 		return err
 	}
 	next := snapshot{ID: rand.Text(), Chunks: 1 + (len(data)-1)/chunkSize, Digest: fmt.Sprintf("%x", sha256.Sum256(data))}
@@ -381,7 +409,7 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 		}
 		return err
 	}
-	if err := s.removeDiscarded(ctx, published); err != nil {
+	if err := s.cleanupDiscarded(ctx, published); err != nil {
 		return errors.Join(ErrPublished, err)
 	}
 	return nil
@@ -417,6 +445,12 @@ func (s keyringStore) setVerified(ctx context.Context, item, value string) (bool
 		if err := s.lock.checkName(); err != nil {
 			return uncertain, err
 		}
+		if err := ctx.Err(); err != nil {
+			return uncertain, err
+		}
+		if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+			return uncertain, context.DeadlineExceeded
+		}
 		setErr := s.setItem(item, value)
 		got, err := s.getItem(ctx, item)
 		if err == nil && got == value {
@@ -442,9 +476,20 @@ func (s keyringStore) discard(ctx context.Context, v snapshot) error {
 	return nil
 }
 
-func (s keyringStore) removeDiscarded(ctx context.Context, m manifest) error {
+func (s keyringStore) cleanupDiscarded(ctx context.Context, m manifest) error {
 	if m.Discard.ID == "" {
 		return nil
+	}
+	if m.Current.ID != "" {
+		// Check the complete replacement before deleting its predecessor,
+		// including when resuming cleanup after an interruption.
+		data, err := s.readSnapshot(ctx, m.Current)
+		if err != nil {
+			return fmt.Errorf("verify the current ChatGPT credential snapshot before cleanup: %w", err)
+		}
+		if !json.Valid([]byte(data)) {
+			return errors.New("could not verify the current ChatGPT credential snapshot before cleanup")
+		}
 	}
 	if err := s.discard(ctx, m.Discard); err != nil {
 		return err
@@ -457,25 +502,15 @@ func (s keyringStore) removeDiscarded(ctx context.Context, m manifest) error {
 	return s.deleteVerified(ctx, s.manifestItem())
 }
 
-func (s keyringStore) recoverDiscarded(ctx context.Context, m manifest) error {
-	if m.Discard.ID != "" && m.Current.ID != "" {
-		data, err := s.readSnapshot(ctx, m.Current)
-		if err != nil {
-			return fmt.Errorf("verify the current ChatGPT credential snapshot before recovery: %w", err)
-		}
-		if !json.Valid([]byte(data)) {
-			return errors.New("could not verify the current ChatGPT credential snapshot before recovery")
-		}
-	}
-	return s.removeDiscarded(ctx, m)
-}
-
 func (s keyringStore) deleteVerified(ctx context.Context, item string) error {
 	for range 2 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := s.lock.checkName(); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		// A provider may report an error even after deleting the item.
@@ -493,7 +528,7 @@ func (s keyringStore) deleteVerified(ctx context.Context, item string) error {
 func (s keyringStore) setItem(item, value string) error {
 	if _, native := s.ring.(systemKeyring); runtime.GOOS == "darwin" && native {
 		// Match go-keyring's encoding without putting the value in argv.
-		encoded := "go-keyring-base64:" + base64.StdEncoding.EncodeToString([]byte(value))
+		encoded := keychainPrefix + base64.StdEncoding.EncodeToString([]byte(value))
 		line := fmt.Sprintf("add-generic-password -U -s %s -a %s -w %s\n", service, item, encoded)
 		if len(line) >= 4096 {
 			return keyring.ErrSetDataTooBig
