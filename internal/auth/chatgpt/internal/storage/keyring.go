@@ -128,6 +128,11 @@ func resolveProfilePath(path string) (string, error) {
 		if !errors.Is(err, os.ErrNotExist) || parent == filepath.Dir(parent) {
 			return "", err
 		}
+		// Don't fall back to hashing a dangling symlink's spelling. Once
+		// its target exists, the same profile must use the resolved path.
+		if _, statErr := os.Lstat(parent); !errors.Is(statErr, os.ErrNotExist) {
+			return "", err
+		}
 	}
 }
 
@@ -140,9 +145,9 @@ func checkPreviewFiles(profile string) error {
 		return fmt.Errorf("check for previous ChatGPT credential files: %w", err)
 	}
 	for _, entry := range entries {
-		name := entry.Name()
+		name := strings.ToLower(entry.Name())
 		if name == "accounts.json" || strings.HasPrefix(name, ".credentials-") {
-			return fmt.Errorf("found a previous ChatGPT credential file at %q. Sign out with your previous Roast version or disconnect the old registration in ChatGPT Settings, then remove the old credential files and sign in again", filepath.Join(profile, name))
+			return fmt.Errorf("found a previous ChatGPT credential file at %q. Sign out with your previous Roast version or disconnect the old registration in ChatGPT Settings, then remove the old credential files and sign in again", filepath.Join(profile, entry.Name()))
 		}
 	}
 	return nil
@@ -209,6 +214,11 @@ func (s keyringStore) readManifest() (manifest, error) {
 }
 
 func (s keyringStore) ReadJSON(dst any) error {
+	if s.lock != nil {
+		if err := s.lock.checkName(); err != nil {
+			return err
+		}
+	}
 	for range 3 {
 		m, err := s.readManifest()
 		if err != nil {
@@ -314,10 +324,11 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 	}
 	published := manifest{Current: next, Discard: m.Current}
 	uncertain, err := s.writeManifest(ctx, published)
-	if err != nil && !uncertain && ctx.Err() == nil {
+	if err != nil && ctx.Err() == nil {
 		// All chunks are verified. Retry a failed publication before giving
 		// up a replacement token the issuer may have already rotated.
-		uncertain, err = s.writeManifest(ctx, published)
+		retryUncertain, retryErr := s.writeManifest(ctx, published)
+		uncertain, err = uncertain || retryUncertain, retryErr
 	}
 	if err != nil {
 		if uncertain {
@@ -342,7 +353,11 @@ func (s keyringStore) writeManifest(ctx context.Context, m manifest) (bool, erro
 	if err != nil {
 		return false, err
 	}
-	return s.setVerified(s.manifestItem(), string(data))
+	uncertain, err := s.setVerified(s.manifestItem(), string(data))
+	if lockErr := s.lock.checkName(); lockErr != nil {
+		return true, errors.Join(err, lockErr)
+	}
+	return uncertain, err
 }
 
 // A provider can acknowledge a write without saving it, or fail after saving.
