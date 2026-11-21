@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -32,7 +33,7 @@ func TestWriteRequiresCurrentLock(t *testing.T) {
 
 func TestLockRejectsSymlinkDirectory(t *testing.T) {
 	store, _ := testStore(t)
-	if err := os.Symlink(t.TempDir(), store.dir); err != nil {
+	if err := os.Symlink(t.TempDir(), store.lockDir); err != nil {
 		t.Fatal(err)
 	}
 	err := store.WithLock(t.Context(), func(Store) error {
@@ -44,9 +45,39 @@ func TestLockRejectsSymlinkDirectory(t *testing.T) {
 	}
 }
 
+func TestReplacingConfigDirectoryKeepsKeyringLock(t *testing.T) {
+	root := t.TempDir()
+	profile := filepath.Join(root, "config")
+	if err := os.Mkdir(profile, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := newStore(profile, root, &memoryKeyring{})
+	if err := store.WithLock(t.Context(), func(Store) error {
+		if err := os.Rename(profile, profile+".old"); err != nil {
+			return err
+		}
+		if err := os.Mkdir(profile, 0700); err != nil {
+			return err
+		}
+		contender := newStore(profile, root, store.ring)
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		err := contender.WithLock(ctx, func(Store) error {
+			t.Error("replacing the config directory bypassed the keyring lock")
+			return nil
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("waiting for the original keyring lock: %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLockReleasedOnProcessDeath(t *testing.T) {
 	if dir := os.Getenv("ROAST_TEST_LOCK_DIR"); dir != "" {
-		store := newStore(dir, nil)
+		store := keyringStore{lockDir: dir, ring: &memoryKeyring{}}
 		if err := store.WithLock(t.Context(), func(Store) error {
 			fmt.Println("locked")
 			time.Sleep(time.Minute)
@@ -58,7 +89,7 @@ func TestLockReleasedOnProcessDeath(t *testing.T) {
 	}
 	store, _ := testStore(t)
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestLockReleasedOnProcessDeath$")
-	cmd.Env = append(os.Environ(), "ROAST_TEST_LOCK_DIR="+store.dir)
+	cmd.Env = append(os.Environ(), "ROAST_TEST_LOCK_DIR="+store.lockDir)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

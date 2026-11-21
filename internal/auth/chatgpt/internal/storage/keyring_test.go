@@ -58,7 +58,8 @@ func (m *memoryKeyring) Delete(_, item string) error {
 func testStore(t *testing.T) (keyringStore, *memoryKeyring) {
 	t.Helper()
 	ring := &memoryKeyring{items: make(map[string]string)}
-	return newStore(filepath.Join(t.TempDir(), "storage"), ring), ring
+	root := t.TempDir()
+	return newStore(filepath.Join(root, "storage"), root, ring), ring
 }
 
 func save(store Store, ctx context.Context, value string) error {
@@ -81,7 +82,7 @@ func TestKeyringReadsDistinguishMissingAndUnavailable(t *testing.T) {
 	if err := store.ReadJSON(&got); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("empty keyring = %v", err)
 	}
-	if _, err := os.Stat(store.dir); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(store.lockDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a read created the lock directory: %v", err)
 	}
 	ring.onGet = func(string) (string, error) { return "", errors.New("private backend output") }
@@ -97,7 +98,8 @@ func TestKeyringSplitsLargeSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSnapshot(t, store, value)
-	other := newStore(filepath.Join(t.TempDir(), "storage"), ring)
+	otherRoot := t.TempDir()
+	other := newStore(filepath.Join(otherRoot, "storage"), otherRoot, ring)
 	var got string
 	if err := other.ReadJSON(&got); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("another namespace could read the snapshot: %v", err)
@@ -106,7 +108,7 @@ func TestKeyringSplitsLargeSnapshots(t *testing.T) {
 	if err != nil || first.Current.Chunks < 2 {
 		t.Fatalf("snapshot did not span several entries: %v", err)
 	}
-	entries, err := os.ReadDir(store.dir)
+	entries, err := os.ReadDir(store.lockDir)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("storing credentials wrote files to the lock directory: %v", err)
 	}
@@ -139,11 +141,10 @@ func TestInterruptedWritePreservesCurrentSnapshot(t *testing.T) {
 		t.Fatalf("abandoned entries were not tracked: %v", err)
 	}
 	ring.onSet = nil
-	reopened := newStore(store.dir, ring)
-	if err := save(reopened, t.Context(), "retry"); err != nil {
+	if err := save(store, t.Context(), "retry"); err != nil {
 		t.Fatal(err)
 	}
-	assertSnapshot(t, reopened, "retry")
+	assertSnapshot(t, store, "retry")
 	if len(ring.items) != 2 {
 		t.Fatal("retry left abandoned credential entries")
 	}
@@ -176,7 +177,7 @@ func TestUncertainPublicationPreservesReplacement(t *testing.T) {
 		t.Fatalf("unconfirmed commit = %v", err)
 	}
 	ring.onGet = nil
-	assertSnapshot(t, newStore(store.dir, ring), "replacement")
+	assertSnapshot(t, store, "replacement")
 }
 
 func TestUnconfirmedCleanupIsRetried(t *testing.T) {
@@ -189,6 +190,12 @@ func TestUnconfirmedCleanupIsRetried(t *testing.T) {
 		t.Fatalf("unconfirmed removal = %v", err)
 	}
 	assertSnapshot(t, store, "replacement")
+	if err := store.WithLock(t.Context(), func(Store) error {
+		t.Error("account operation started with outstanding keyring cleanup")
+		return nil
+	}); err == nil {
+		t.Fatal("accepted a keyring with outstanding cleanup")
+	}
 	ring.onDrop = nil
 	if err := save(store, t.Context(), "next"); err != nil {
 		t.Fatal(err)
@@ -233,6 +240,40 @@ func TestMissingCommittedEntryIsNotAnEmptyStore(t *testing.T) {
 	var got string
 	if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("incomplete credential snapshot = %v", err)
+	}
+}
+
+func TestMalformedManifestIsNotAnEmptyStore(t *testing.T) {
+	store, ring := testStore(t)
+	ring.items[store.manifestItem()] = "{}"
+	var got string
+	if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("malformed credential index = %v", err)
+	}
+}
+
+func TestInterruptedFirstWriteCleansUpBeforeRetry(t *testing.T) {
+	store, ring := testStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ring.onSet = func(item, value string) error {
+		ring.items[item] = value
+		if item != store.manifestItem() {
+			cancel()
+		}
+		return nil
+	}
+	if err := save(store, ctx, "abandoned"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("abandoned update = %v", err)
+	}
+	ring.onSet = nil
+	if err := store.WithLock(t.Context(), func(locked Store) error {
+		if len(ring.items) != 0 {
+			t.Error("first write left unpublished credentials in the keyring")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

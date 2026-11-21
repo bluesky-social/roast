@@ -29,10 +29,10 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	if s.lock != nil {
 		return errors.New("WithLock cannot be nested on a locked credential store")
 	}
-	if err := os.MkdirAll(s.dir, 0700); err != nil {
+	if err := os.Mkdir(s.lockDir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	dir, err := os.OpenFile(s.dir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	dir, err := os.OpenFile(s.lockDir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
@@ -64,6 +64,18 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 		s.lock.closed = true
 		<-s.lock.writes
 	}()
+	// Resolve known cleanup failures before a callback can consume a refresh
+	// token whose replacement would otherwise fail at the same cleanup step.
+	m, err := s.readManifest()
+	if err != nil {
+		return err
+	}
+	if err := s.removeDiscarded(ctx, m); err != nil {
+		return fmt.Errorf("recover interrupted ChatGPT credential update: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return fn(s)
 }
 
