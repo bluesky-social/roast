@@ -143,10 +143,6 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 			return err
 		}
 
-		// Include an explicit sign-out's deselection in any recovery checkpoint.
-		if accounts.Active == id {
-			accounts.setActive("")
-		}
 		token, tokenType := saved.revocationToken()
 		unknownRefresh := saved.Pending != nil && saved.Pending.UnknownRefresh
 		var remoteErr error
@@ -169,9 +165,14 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 			}
 		}
 
+		// Keep the registration selected until the final save so a sign-out
+		// interrupted at its revocation checkpoint can be retried without an ID.
+		if accounts.Active == id {
+			accounts.setActive("")
+		}
 		saved.clearGrant()
 		if err := accounts.saveCredential(&saved); err != nil {
-			return errors.Join(fmt.Errorf("could not confirm local sign-out from ChatGPT account %q: %w", id, err), remoteErr)
+			return errors.Join(fmt.Errorf("could not confirm local sign-out from ChatGPT account %q: %w. Repair credential storage and retry with roast chatgpt signout -- %s", id, err, id), remoteErr)
 		}
 		if remoteErr != nil {
 			return fmt.Errorf("ChatGPT account %q signed out locally. %w", id, remoteErr)

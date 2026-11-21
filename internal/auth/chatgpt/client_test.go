@@ -116,7 +116,7 @@ func (k *testKeyring) Delete(_, item string) error {
 }
 
 type storeFaults struct {
-	write error
+	write, afterWrite error
 }
 
 type testAccountStore struct {
@@ -128,7 +128,10 @@ func (s testAccountStore) WriteJSON(ctx context.Context, value any) error {
 	if s.faults.write != nil {
 		return s.faults.write
 	}
-	return s.Store.WriteJSON(ctx, value)
+	if err := s.Store.WriteJSON(ctx, value); err != nil {
+		return err
+	}
+	return s.faults.afterWrite
 }
 
 func (s testAccountStore) WithLock(ctx context.Context, fn func(storage.Store) error) error {
@@ -231,6 +234,30 @@ func TestSignOutRevokesAccessOnlyGrant(t *testing.T) {
 	saved, err = c.loadCredential(c.selected)
 	if err != nil || saved.signedIn() {
 		t.Fatalf("sign-out did not clear the local grant: %v", err)
+	}
+}
+
+func TestSignOutResumesAfterPublishedCheckpointError(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	faults := c.testStoreFaults()
+	faults.afterWrite = storage.ErrPublished
+	if err := c.SignOut(t.Context(), ""); !errors.Is(err, storage.ErrPublished) {
+		t.Fatalf("unconfirmed sign-out checkpoint = %v", err)
+	}
+	faults.afterWrite = nil
+	accounts, err := c.loadStore()
+	if err != nil || accounts.Active != c.selected {
+		t.Fatalf("interrupted sign-out lost the active registration: %v", err)
+	}
+	c.selected = accounts.Active
+	c.provider.HTTP.Transport = mockSignInTransport(t, nil)
+	if err := c.SignOut(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err = c.loadStore()
+	if err != nil || accounts.Active != "" || accounts.Accounts[c.selected].signedIn() {
+		t.Fatalf("sign-out retry did not clear the saved grant: %v", err)
 	}
 }
 
