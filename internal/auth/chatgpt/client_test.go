@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,12 +32,12 @@ func TestNewDoesNotCreateCredentials(t *testing.T) {
 	if _, err = c.Token(context.Background()); !errors.Is(err, ErrAuth) {
 		t.Fatal("missing login not classified")
 	}
-	dir, err := os.UserConfigDir()
+	store, err := storage.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = os.Stat(filepath.Join(dir, "roast", "chatgpt-plan")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("read-only action created the keyring lock directory")
+	if _, err = os.Stat(store.(interface{ LockPath() string }).LockPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("read-only action created the keyring lock file")
 	}
 }
 
@@ -116,12 +115,20 @@ func (k *testKeyring) Delete(_, item string) error {
 }
 
 type storeFaults struct {
-	write, afterWrite error
+	read, write error
+	afterWrite  func() error
 }
 
 type testAccountStore struct {
 	storage.Store
 	faults *storeFaults
+}
+
+func (s testAccountStore) ReadJSON(dst any) error {
+	if s.faults.read != nil {
+		return s.faults.read
+	}
+	return s.Store.ReadJSON(dst)
 }
 
 func (s testAccountStore) WriteJSON(ctx context.Context, value any) error {
@@ -131,7 +138,10 @@ func (s testAccountStore) WriteJSON(ctx context.Context, value any) error {
 	if err := s.Store.WriteJSON(ctx, value); err != nil {
 		return err
 	}
-	return s.faults.afterWrite
+	if s.faults.afterWrite != nil {
+		return s.faults.afterWrite()
+	}
+	return nil
 }
 
 func (s testAccountStore) WithLock(ctx context.Context, fn func(storage.Store) error) error {
@@ -241,11 +251,14 @@ func TestSignOutResumesAfterPublishedCheckpointError(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
 	faults := c.testStoreFaults()
-	faults.afterWrite = storage.ErrPublished
+	faults.afterWrite = func() error {
+		faults.read = errors.New("keyring readback unavailable")
+		return storage.ErrPublished
+	}
 	if err := c.SignOut(t.Context(), ""); !errors.Is(err, storage.ErrPublished) {
 		t.Fatalf("unconfirmed sign-out checkpoint = %v", err)
 	}
-	faults.afterWrite = nil
+	faults.afterWrite, faults.read = nil, nil
 	accounts, err := c.loadStore()
 	if err != nil || accounts.Active != c.selected {
 		t.Fatalf("interrupted sign-out lost the active registration: %v", err)
@@ -258,6 +271,27 @@ func TestSignOutResumesAfterPublishedCheckpointError(t *testing.T) {
 	accounts, err = c.loadStore()
 	if err != nil || accounts.Active != "" || accounts.Accounts[c.selected].signedIn() {
 		t.Fatalf("sign-out retry did not clear the saved grant: %v", err)
+	}
+}
+
+func TestSignOutRevokesAfterVerifiedCheckpoint(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	faults := c.testStoreFaults()
+	faults.afterWrite = func() error {
+		faults.afterWrite = nil
+		return storage.ErrPublished
+	}
+	revoked := false
+	base := mockSignInTransport(t, nil)
+	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() == oauth.Issuer+"/revoke" {
+			revoked = true
+		}
+		return base.RoundTrip(r)
+	})
+	if err := c.SignOut(t.Context(), ""); err != nil || !revoked {
+		t.Fatalf("sign-out after verified checkpoint: revoked=%t, error=%v", revoked, err)
 	}
 }
 

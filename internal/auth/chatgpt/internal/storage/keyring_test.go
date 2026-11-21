@@ -112,7 +112,7 @@ func TestOpenReportsPreviousCredentialFile(t *testing.T) {
 	if err := os.MkdirAll(profile, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"accounts.json", ".credentials-interrupted"} {
+	for _, name := range []string{"accounts.json", "Accounts.json", ".credentials-interrupted"} {
 		path := filepath.Join(profile, name)
 		if err := os.WriteFile(path, []byte("synthetic previous credentials"), 0600); err != nil {
 			t.Fatal(err)
@@ -182,6 +182,16 @@ func TestProfileAliasUsesSameKeyringScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSnapshot(t, alias, "current")
+
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dangling)
+	t.Setenv("XDG_CONFIG_HOME", dangling)
+	if _, err := OpenWithKeyring(ring, root); err == nil {
+		t.Fatal("accepted a profile alias whose target is missing")
+	}
 }
 
 func TestInterruptedWritePreservesCurrentSnapshot(t *testing.T) {
@@ -243,34 +253,42 @@ func TestUncertainPublicationPreservesReplacement(t *testing.T) {
 	assertSnapshot(t, store, "replacement")
 }
 
-func TestPublicationRetriesAfterDefiniteFailure(t *testing.T) {
-	store, ring := testStore(t)
-	if err := save(store, t.Context(), "current"); err != nil {
-		t.Fatal(err)
-	}
-	m, err := store.readManifest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	failed := false
-	ring.onSet = func(item, value string) error {
-		if !failed && item == store.manifestItem() {
-			var index manifest
-			if err := json.Unmarshal([]byte(value), &index); err != nil {
+func TestPublicationRetriesAfterTransientFailure(t *testing.T) {
+	for _, name := range []string{"definite", "uncertain"} {
+		t.Run(name, func(t *testing.T) {
+			store, ring := testStore(t)
+			if err := save(store, t.Context(), "current"); err != nil {
 				t.Fatal(err)
 			}
-			if index.Current != m.Current {
-				failed = true
-				return errors.New("transient error before publishing")
+			m, err := store.readManifest()
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		ring.items[item] = value
-		return nil
+			failed := false
+			ring.onSet = func(item, value string) error {
+				ring.onGet = nil
+				if !failed && item == store.manifestItem() {
+					var index manifest
+					if err := json.Unmarshal([]byte(value), &index); err != nil {
+						t.Fatal(err)
+					}
+					if index.Current != m.Current {
+						failed = true
+						if name == "uncertain" {
+							ring.onGet = func(string) (string, error) { return "", errors.New("transient verification error") }
+						}
+						return errors.New("transient error before publishing")
+					}
+				}
+				ring.items[item] = value
+				return nil
+			}
+			if err := save(store, t.Context(), "replacement"); err != nil || !failed {
+				t.Fatalf("retry after failed publication = %v", err)
+			}
+			assertSnapshot(t, store, "replacement")
+		})
 	}
-	if err := save(store, t.Context(), "replacement"); err != nil || !failed {
-		t.Fatalf("retry after failed publication = %v", err)
-	}
-	assertSnapshot(t, store, "replacement")
 }
 
 func TestUnconfirmedCleanupIsRetried(t *testing.T) {
