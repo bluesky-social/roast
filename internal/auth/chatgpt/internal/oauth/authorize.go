@@ -5,6 +5,8 @@ import (
 	"net/url"
 
 	"golang.org/x/oauth2"
+
+	"github.com/bluesky-social/roast/internal/config"
 )
 
 const DynamicClientID = "dynamic_agent_client"
@@ -38,7 +40,7 @@ func (a Authorization) URL(redirect string) string {
 		"response_type":         {"code"},
 		"redirect_uri":          {redirect},
 		"scope":                 {Scope},
-		"resource":              {APIBaseURL},
+		"resource":              {config.OpenAIBaseURL},
 		"state":                 {a.State},
 		"nonce":                 {a.Nonce},
 		"code_challenge_method": {"S256"},

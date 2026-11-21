@@ -52,7 +52,12 @@ func uniqueJSONField(raw json.RawMessage, name string) (string, json.RawMessage)
 		if err != nil || decoder.Decode(&value) != nil {
 			return "", nil
 		}
-		if field, ok := key.(string); ok && strings.EqualFold(field, name) {
+		field, ok := key.(string)
+		if strings.EqualFold(field, "access_token") || strings.EqualFold(field, "refresh_token") || strings.EqualFold(field, "id_token") {
+			// A mixed grant/error response cannot confirm rejection. Never use its credentials for revocation.
+			return "", nil
+		}
+		if ok && strings.EqualFold(field, name) {
 			if found != nil {
 				return "", nil
 			}
@@ -75,7 +80,10 @@ func requestIDForError(id string) string {
 	return id
 }
 
-var ErrNetwork = errors.New("ChatGPT service unavailable")
+var (
+	ErrAuth    = errors.New("ChatGPT authentication required")
+	ErrNetwork = errors.New("ChatGPT service unavailable")
+)
 
 type oauthError struct {
 	code      string
@@ -132,6 +140,22 @@ func (e *oauthError) Error() string {
 		return message + "; retry later"
 	}
 	return message
+}
+
+// DefinitiveGrantRejection reports an explicit client error that rules out issuance.
+// invalid_grant can mean a one-use authorization code was already consumed.
+func DefinitiveGrantRejection(err error) bool {
+	var failure *oauthError
+	if !errors.As(err, &failure) || failure.catalog ||
+		(failure.status != http.StatusBadRequest && failure.status != http.StatusUnauthorized && failure.status != http.StatusForbidden) {
+		return false
+	}
+	switch failure.code {
+	case "access_denied", "invalid_request", "invalid_client", "unauthorized_client", "invalid_scope",
+		"invalid_resource", "unsupported_grant_type":
+		return true
+	}
+	return false
 }
 
 func InvalidRefreshGrant(err error) bool {

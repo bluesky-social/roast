@@ -66,14 +66,31 @@ func (l *Listener) RedirectURI() string { return l.redirect }
 // Wait returns the first callback with matching state. Close the listener when
 // sign-in ends so it can reject duplicate callbacks during the exchange.
 func (l *Listener) Wait(ctx context.Context) (Result, error) {
+	var cb callback
+	var stopped error
 	select {
 	case <-ctx.Done():
-		return Result{}, ctx.Err()
-	case err := <-l.stopped:
-		return Result{}, err
-	case cb := <-l.callbacks:
-		return cb.result, cb.err
+		stopped = ctx.Err()
+	case stopped = <-l.stopped:
+	case cb = <-l.callbacks:
 	}
+	if stopped != nil {
+		// Serve can exit before an accepted handler finishes. Give the handler
+		// the bounded shutdown interval to deliver any already-issued registration.
+		l.Close()
+		select {
+		case cb = <-l.callbacks:
+		default:
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return Result{}, ctxErr
+			}
+			return Result{}, stopped
+		}
+	}
+	if cb.err != nil {
+		return Result{}, errors.Join(cb.err, ctx.Err())
+	}
+	return cb.result, nil
 }
 
 func (l *Listener) Close() { closeCallback(l.server) }
