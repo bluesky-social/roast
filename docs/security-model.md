@@ -32,7 +32,8 @@ API-key profile. A locked collection can prompt for unlock.
 Roast uses a private lock file to serialize account updates and token renewal.
 On macOS it lives in the system's per-user directory. On Linux it lives in the
 user's home, which must be user-owned and have no shared write permissions.
-Leave the lock file in place while any Roast command is running.
+Keep the lock location under directories you trust, and leave the lock file
+in place while any Roast command is running.
 Sign out before moving your user config directory so its old entries can be
 revoked and removed from the keyring.
 Each update saves new keyring entries before publishing the snapshot that
@@ -49,7 +50,9 @@ If the connection drops after OpenAI rotates a token but before Roast receives
 the replacement, or Roast exits before saving it, you may need to sign in again.
 To revoke that unseen replacement, disconnect Roast in ChatGPT Settings.
 Signing out asks OpenAI to revoke the grant, then clears the local credentials
-even if OpenAI cannot be reached. To reconnect a saved account, fix any reported
+even if OpenAI cannot be reached. If a sign-out reported unconfirmed remote
+revocation, check Connected Apps in ChatGPT Settings after retrying local cleanup.
+To reconnect a saved account, fix any reported
 storage problem, then run `roast chatgpt signin --account CLIENT_ID` with the ID from
 `roast chatgpt status`. If you used an earlier file-backed preview, sign in
 again to populate the keyring. First sign out using the preview, or disconnect
