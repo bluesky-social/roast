@@ -31,13 +31,17 @@ func TestWriteRequiresCurrentLock(t *testing.T) {
 	}
 }
 
-func TestLockRejectsSymlinkDirectory(t *testing.T) {
+func TestLockRejectsSymlinkFile(t *testing.T) {
 	store, _ := testStore(t)
-	if err := os.Symlink(t.TempDir(), store.lockDir); err != nil {
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, store.lockPath); err != nil {
 		t.Fatal(err)
 	}
 	err := store.WithLock(t.Context(), func(Store) error {
-		t.Error("accepted a symlink as the lock directory")
+		t.Error("accepted a symlink as the lock file")
 		return nil
 	})
 	if err == nil {
@@ -89,10 +93,10 @@ func TestReplacingLockDuringPreflightBlocksOperation(t *testing.T) {
 		return nil
 	}
 	ring.onGet = func(item string) (string, error) {
-		if err := os.Rename(store.lockDir, store.lockDir+".old"); err != nil {
+		if err := os.Rename(store.lockPath, store.lockPath+".old"); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Mkdir(store.lockDir, 0700); err != nil {
+		if err := os.WriteFile(store.lockPath, nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 		return ring.get(item)
@@ -106,8 +110,8 @@ func TestReplacingLockDuringPreflightBlocksOperation(t *testing.T) {
 }
 
 func TestLockReleasedOnProcessDeath(t *testing.T) {
-	if dir := os.Getenv("ROAST_TEST_LOCK_DIR"); dir != "" {
-		store := keyringStore{lockDir: dir, ring: &memoryKeyring{}}
+	if path := os.Getenv("ROAST_TEST_LOCK_PATH"); path != "" {
+		store := keyringStore{lockPath: path, ring: &memoryKeyring{}}
 		if err := store.WithLock(t.Context(), func(Store) error {
 			fmt.Println("locked")
 			time.Sleep(time.Minute)
@@ -119,7 +123,7 @@ func TestLockReleasedOnProcessDeath(t *testing.T) {
 	}
 	store, _ := testStore(t)
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestLockReleasedOnProcessDeath$")
-	cmd.Env = append(os.Environ(), "ROAST_TEST_LOCK_DIR="+store.lockDir)
+	cmd.Env = append(os.Environ(), "ROAST_TEST_LOCK_PATH="+store.lockPath)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

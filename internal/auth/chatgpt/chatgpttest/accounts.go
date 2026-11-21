@@ -3,6 +3,7 @@
 package chatgpttest
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -24,6 +25,17 @@ func UseKeyring(t *testing.T) string {
 		t.Setenv(name, root)
 	}
 	keyring.MockInit()
+	store, err := storage.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The test profile has a unique lock path under the system's user directory.
+	path := store.(interface{ LockPath() string }).LockPath()
+	t.Cleanup(func() {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Error(err)
+		}
+	})
 	return root
 }
 

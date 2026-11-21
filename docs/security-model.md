@@ -29,12 +29,12 @@ user D-Bus session, with a login or default collection that you can unlock.
 For unattended runs, arrange for that collection to be unlocked or use an
 API-key profile. A locked collection can prompt for unlock.
 
-Roast uses a private lock directory to serialize account updates and token
-renewal. On macOS it lives in the system's per-user directory. On Linux it
-lives in the user's home, which must be user-owned and have no shared write
-permissions. Each update saves new keyring entries before
-publishing the snapshot that readers use. Roast cleans up entries left by an
-interruption before attempting another token renewal.
+Roast uses a private lock file to serialize account updates and token renewal.
+On macOS it lives in the system's per-user directory. On Linux it lives in the
+user's home, which must be user-owned and have no shared write permissions.
+Each update saves new keyring entries before publishing the snapshot that
+readers use. Roast cleans up entries left by an interruption before attempting
+another token renewal.
 
 When an unusable refresh reply contains a complete, distinct replacement
 refresh token, Roast asks OpenAI to revoke it. It ignores credentials echoed
@@ -51,6 +51,8 @@ storage problem, then run `roast chatgpt signin --account CLIENT_ID` with the ID
 `roast chatgpt status`. If you used an earlier file-backed preview, sign in
 again to populate the keyring. First sign out using the preview, or disconnect
 its registration in ChatGPT Settings. Then remove the preview's credential file.
+For a file-backed preview, check its profile directory for `accounts.json`
+and any `.credentials-*` files left by interrupted writes.
 
 ## Configuration templates
 
