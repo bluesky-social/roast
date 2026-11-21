@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"charm.land/fantasy"
-	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 	"github.com/bluesky-social/roast/internal/testutil"
 )
 
@@ -68,7 +67,7 @@ func TestChatGPTNativeToolLoop(t *testing.T) {
 		captures = append(captures, r)
 		return nil
 	}}, planRoundTripper(func(r *http.Request) (*http.Response, error) {
-		if r.URL.String() != chatGPTBaseURL+"/responses" || r.Header.Get("Authorization") != "Bearer oauth-only" {
+		if r.Method != http.MethodPost || r.URL.String() != "https://api.openai.com/v1/responses" || r.Header.Get("Authorization") != "Bearer oauth-only" {
 			t.Fatal("wrong destination or credential")
 		}
 		if got := r.Header.Get("Accept"); got != "text/event-stream" {
@@ -149,7 +148,7 @@ func TestChatGPTNativeToolLoop(t *testing.T) {
 
 func TestChatGPTCredentialFailure(t *testing.T) {
 	c, err := newChatGPTResponsesClient(t.Context(), ClientConfig{Protocol: "chatgpt", Model: "test", MaxOutputTokens: 100}, func(context.Context) (string, error) {
-		return "", fmt.Errorf("%w: plan permission missing", chatgpt.ErrAuth)
+		return "", fmt.Errorf("%w: plan permission missing", ErrAuth)
 	}, planRoundTripper(func(*http.Request) (*http.Response, error) { t.Fatal("request sent without consent"); return nil, nil }))
 	if err != nil {
 		t.Fatal(err)
@@ -692,5 +691,23 @@ func TestChatGPTWrapUpDoesNotRetryPlanRejection(t *testing.T) {
 	var planErr *chatGPTError
 	if requests != 1 || !errors.Is(err, ErrWorkDeadline) || !errors.As(err, &planErr) || planErr.Code != "subscription_sharing_usage_unavailable" {
 		t.Fatalf("wrap-up made %d requests, returned %v", requests, err)
+	}
+}
+
+func TestChatGPTTransportRejectsUnexpectedRoutes(t *testing.T) {
+	transport := &chatGPTTransport{token: func(context.Context) (string, error) { t.Fatal("retrieved token for wrong endpoint"); return "", nil }}
+	for _, route := range []struct{ method, url string }{
+		{http.MethodPost, "https://wrong.invalid/v1/responses"},
+		{http.MethodPost, chatGPTBaseURL + "/models"},
+		{http.MethodPost, chatGPTBaseURL + "/responses?query=1"},
+		{http.MethodGet, chatGPTBaseURL + "/responses"},
+	} {
+		req, err := http.NewRequest(route.method, route.url, strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := transport.RoundTrip(req); err == nil || !strings.Contains(err.Error(), "permits only POST") {
+			t.Fatalf("%s %s: %v, want route rejection", route.method, route.url, err)
+		}
 	}
 }
