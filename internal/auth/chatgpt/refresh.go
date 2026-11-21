@@ -167,24 +167,21 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 // replacement that may be visible so the next call can resume its validation.
 func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountStore, saved *credential, previousGeneration string, writeErr error) error {
 	cause := fmt.Errorf("ChatGPT refresh completed for account %q but saving its replacement could not be confirmed: %w", saved.ClientID, writeErr)
-	if errors.Is(writeErr, storage.ErrPublished) {
-		current, err := loadAccountStore(accounts.storage)
-		if err != nil || current.HostID != accounts.HostID || current.Accounts[saved.ClientID].Generation != previousGeneration {
-			return fmt.Errorf("%w. Repair credential storage and retry. If renewal still fails, disconnect Roast in ChatGPT Settings and sign in again", cause)
-		}
+	current, err := loadAccountStore(accounts.storage)
+	if err == nil && current.HostID == accounts.HostID && current.Accounts[saved.ClientID].Generation == previousGeneration {
 		retryErr := accounts.saveCredential(saved)
 		if retryErr == nil {
 			return fmt.Errorf("%w. The replacement is now saved. Retry to finish validation", cause)
 		}
 		cause = errors.Join(cause, retryErr)
-		if errors.Is(retryErr, storage.ErrPublished) {
-			return fmt.Errorf("%w. Repair credential storage and retry. If renewal still fails, disconnect Roast in ChatGPT Settings and sign in again", cause)
-		}
+		writeErr = retryErr
+	}
+	if errors.Is(writeErr, storage.ErrPublished) {
+		return fmt.Errorf("%w. Repair credential storage and retry. If renewal still fails, disconnect Roast in ChatGPT Settings and sign in again", cause)
 	}
 
 	// Publication failed. A later read can only recover the earlier grant.
 	cause = c.revokeDiscardedToken(ctx, saved.ClientID, saved.Pending.Response.RefreshToken, "refresh_token", cause)
-	current, err := loadAccountStore(accounts.storage)
 	if err == nil && current.HostID == accounts.HostID && current.Accounts[saved.ClientID].Generation == previousGeneration {
 		return accounts.clearStoredGrant(saved, cause)
 	}

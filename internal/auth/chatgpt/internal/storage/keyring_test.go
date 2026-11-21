@@ -117,7 +117,7 @@ func TestOpenReportsPreviousCredentialFile(t *testing.T) {
 		if err := os.WriteFile(path, []byte("synthetic previous credentials"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Open(); err == nil || !strings.Contains(err.Error(), "previous Roast version") {
+		if _, err := OpenWithKeyring(nil, dir); err == nil || !strings.Contains(err.Error(), "previous Roast version") {
 			t.Fatalf("opening with previous credential file %q = %v", name, err)
 		}
 		if got, err := os.ReadFile(path); err != nil || string(got) != "synthetic previous credentials" {
