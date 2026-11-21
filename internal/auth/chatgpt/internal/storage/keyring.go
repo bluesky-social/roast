@@ -64,12 +64,9 @@ type keyringStore struct {
 	lock      *storeLock
 }
 
-// Open prepares a handle without accessing the vault or creating the lock directory.
-func Open() (Store, error) {
-	return openStore()
+func init() {
+	openStore = openSystemStore
 }
-
-var openStore = openSystemStore
 
 func openSystemStore() (Store, error) {
 	lockRoot, err := userLockRoot()
