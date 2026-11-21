@@ -58,8 +58,17 @@ func (m *memoryKeyring) Delete(_, item string) error {
 func testStore(t *testing.T) (keyringStore, *memoryKeyring) {
 	t.Helper()
 	ring := &memoryKeyring{items: make(map[string]string)}
-	root := t.TempDir()
+	root := privateTestHome(t)
 	return newStore(filepath.Join(root, "storage"), root, ring), ring
+}
+
+func privateTestHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func save(store Store, ctx context.Context, value string) error {
@@ -283,6 +292,10 @@ func TestMissingCommittedEntryIsNotAnEmptyStore(t *testing.T) {
 	if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("incomplete credential snapshot = %v", err)
 	}
+	ring.items[store.chunkItem(m.Current, 0)] = strings.Repeat("A", 2*chunkSize)
+	if err := store.ReadJSON(&got); err == nil || !strings.Contains(err.Error(), "oversized") {
+		t.Fatalf("oversized credential entry = %v", err)
+	}
 }
 
 func TestMalformedManifestIsNotAnEmptyStore(t *testing.T) {
@@ -291,7 +304,7 @@ func TestMalformedManifestIsNotAnEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{"{}", string(oversized)} {
+	for _, raw := range []string{"{}", string(oversized), "{}" + strings.Repeat(" ", maxManifestSize)} {
 		ring.items[store.manifestItem()] = raw
 		var got string
 		if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) {

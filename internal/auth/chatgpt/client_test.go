@@ -67,6 +67,9 @@ func jsonResponse(status int, value any) (*http.Response, error) {
 func testClient(t *testing.T) *Client {
 	t.Helper()
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	store, err := storage.OpenWithKeyring(&testKeyring{items: make(map[string]string)}, dir)
