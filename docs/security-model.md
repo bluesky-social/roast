@@ -27,8 +27,11 @@ On macOS, access goes through `/usr/bin/security` and follows that tool's Keycha
 permissions. On Linux, a Secret Service provider must be reachable on your
 user D-Bus session, with a login or default collection that you can unlock.
 For unattended runs, arrange for that collection to be unlocked or use an
-API-key profile. A locked collection can prompt for unlock.
-An in-progress keyring write can hold the lock until the provider responds.
+API-key profile. A locked collection can prompt for unlock. Encryption at rest
+and access control depend on the provider. Other programs with access to your
+session bus may be able to read credentials from an unlocked collection.
+An in-progress keyring operation can hold the lock until the provider responds,
+including during a read on Linux.
 After a forced exit on Linux, Secret Service can finish an already dispatched
 write after the process releases its lock. Wait for the keyring provider before
 retrying a command that was forcibly stopped during a write.
