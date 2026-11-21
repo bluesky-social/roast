@@ -168,7 +168,13 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountStore, saved *credential, previousGeneration string, writeErr error) error {
 	cause := fmt.Errorf("ChatGPT refresh completed for account %q but saving its replacement could not be confirmed: %w", saved.ClientID, writeErr)
 	if errors.Is(writeErr, storage.ErrPublished) {
-		return fmt.Errorf("%w. Repair credential storage and retry", cause)
+		current, err := loadAccountStore(accounts.storage)
+		if err == nil && current.HostID == accounts.HostID && current.Accounts[saved.ClientID].Generation == previousGeneration {
+			if err := accounts.saveCredential(saved); err == nil {
+				return fmt.Errorf("%w. The replacement is now saved. Retry to finish validation", cause)
+			}
+		}
+		return fmt.Errorf("%w. Repair credential storage and retry. If renewal still fails, disconnect Roast in ChatGPT Settings and sign in again", cause)
 	}
 
 	// Publication failed. A later read can only recover the earlier grant.
@@ -268,7 +274,8 @@ func (c *Client) discardInvalidRefresh(ctx context.Context, accounts *accountSto
 // A rejected token can only be sent to revocation. Saving it first lets the
 // next command finish cleanup if Roast exits during the request.
 func (c *Client) discardGrant(ctx context.Context, accounts *accountStore, saved *credential, token, kind string, cause error, checkpointed bool) error {
-	if err := accounts.markForRevocation(saved, token, kind, kind == "access_token"); err != nil {
+	if err := accounts.markForRevocation(saved, token, kind, kind == "access_token"); err != nil &&
+		!(errors.Is(err, storage.ErrPublished) && accounts.confirmRevocationCheckpoint(*saved)) {
 		cause = errors.Join(cause, fmt.Errorf("could not record the rejected ChatGPT replacement; repair credential storage: %w", err))
 		if checkpointed {
 			// The durable copy may still allow validation. Retry the marker
@@ -285,7 +292,7 @@ func (c *Client) discardGrant(ctx context.Context, accounts *accountStore, saved
 }
 
 // Persist the only permitted use of a rejected token before contacting the
-// issuer. A previously visible marker may have failed its directory sync.
+// issuer. A marker may be visible even when a keyring write reports an error.
 func (accounts *accountStore) markForRevocation(saved *credential, token, kind string, unknownRefresh bool) error {
 	saved.clearGrant()
 	saved.Pending = &pendingRefresh{RevokeOnly: true, UnknownRefresh: unknownRefresh}
