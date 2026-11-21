@@ -41,11 +41,13 @@ On macOS it lives in the system's per-user directory. On Linux it lives in the
 user's home, which must be user-owned and have no shared write permissions.
 Keep the lock location under directories you trust, and leave the lock file
 in place while any Roast command is running.
-Before moving your user config directory, find your registrations with
-`roast chatgpt status` and run `roast chatgpt signout -- CLIENT_ID` for each
-account. This revokes its grant and clears its tokens while keeping the old
-registration metadata. If revocation is unconfirmed, disconnect the
-registration in ChatGPT Settings.
+Before moving your user config directory, finish or cancel any running Roast
+commands, including browser sign-ins. At the old config path, use
+`roast chatgpt status` to find each registration and run
+`roast chatgpt signout -- CLIENT_ID` for each. If local cleanup fails, repair
+keyring access and retry from the old path before moving. If revocation is
+unconfirmed, disconnect the registration in ChatGPT Settings. After moving,
+run `roast chatgpt signin` to connect the new profile.
 Each update saves new keyring entries before publishing the snapshot that
 readers use. Roast cleans up entries left by an interruption before attempting
 another token renewal.
