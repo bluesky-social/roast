@@ -146,7 +146,7 @@ func checkPreviewFiles(profile string) error {
 	}
 	for _, entry := range entries {
 		name := strings.ToLower(entry.Name())
-		if name == "accounts.json" || strings.HasPrefix(name, ".credentials-") {
+		if name == "accounts.json" || (strings.HasPrefix(name, ".credentials-") && entry.Type().IsRegular()) {
 			return fmt.Errorf("found a previous ChatGPT credential file at %q. Sign out with your previous Roast version or disconnect the old registration in ChatGPT Settings, then remove the old credential files and sign in again", filepath.Join(profile, entry.Name()))
 		}
 	}
@@ -368,7 +368,7 @@ func (s keyringStore) setVerified(ctx context.Context, item, value string) (bool
 		if err := s.lock.checkName(); err != nil {
 			return uncertain, err
 		}
-		setErr := s.ring.Set(service, item, value)
+		setErr := s.setItem(item, value)
 		got, err := s.ring.Get(service, item)
 		if err == nil && got == value {
 			return false, nil
@@ -413,7 +413,7 @@ func (s keyringStore) deleteVerified(ctx context.Context, item string) error {
 		if err := s.lock.checkName(); err != nil {
 			return err
 		}
-		if errors.Is(s.ring.Delete(service, item), keyring.ErrNotFound) {
+		if errors.Is(s.deleteItem(item), keyring.ErrNotFound) {
 			return nil
 		}
 		// A provider may report an error even after deleting the item.
@@ -422,6 +422,34 @@ func (s keyringStore) deleteVerified(ctx context.Context, item string) error {
 		}
 	}
 	return keyringError("confirm removal of superseded")
+}
+
+func (s keyringStore) setItem(item, value string) error {
+	if _, native := s.ring.(systemKeyring); runtime.GOOS == "darwin" && native {
+		// Match go-keyring's encoding without putting the value in argv.
+		encoded := "go-keyring-base64:" + base64.StdEncoding.EncodeToString([]byte(value))
+		line := fmt.Sprintf("add-generic-password -U -s %s -a %s -w %s\n", service, item, encoded)
+		if len(line) >= 4096 {
+			return keyring.ErrSetDataTooBig
+		}
+		cmd := exec.Command("/usr/bin/security", "-i")
+		cmd.Stdin = strings.NewReader(line)
+		return s.runSecurityMutation(cmd)
+	}
+	return s.ring.Set(service, item, value)
+}
+
+func (s keyringStore) deleteItem(item string) error {
+	if _, native := s.ring.(systemKeyring); runtime.GOOS == "darwin" && native {
+		return s.runSecurityMutation(exec.Command("/usr/bin/security", "delete-generic-password", "-s", service, "-a", item))
+	}
+	return s.ring.Delete(service, item)
+}
+
+func (s keyringStore) runSecurityMutation(cmd *exec.Cmd) error {
+	// The child must keep the flock until it completes, even if Roast exits.
+	cmd.ExtraFiles = []*os.File{s.lock.file}
+	return cmd.Run()
 }
 
 // Provider errors may contain secret values. Give callers an actionable error
