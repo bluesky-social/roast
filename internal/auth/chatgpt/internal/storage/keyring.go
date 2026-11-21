@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,7 @@ const (
 	// corrupt index. Typical accounts need only a few entries.
 	maxSnapshotSize = 16 << 20
 	maxChunks       = maxSnapshotSize / chunkSize
+	maxManifestSize = 512
 )
 
 type keyringAccess interface {
@@ -60,15 +62,32 @@ type keyringStore struct {
 
 // Open prepares a handle without accessing the vault or creating the lock directory.
 func Open() (Store, error) {
+	lockRoot, err := userLockRoot()
+	if err != nil {
+		return nil, err
+	}
+	return OpenWithKeyring(systemKeyring{}, lockRoot)
+}
+
+func userLockRoot() (string, error) {
+	if runtime.GOOS == "darwin" {
+		// A home-directory ACL can grant access beyond its POSIX mode bits.
+		// Use the system-managed local directory for the current user.
+		path, err := exec.Command("/usr/bin/getconf", "DARWIN_USER_DIR").Output()
+		if err != nil {
+			return "", fmt.Errorf("locate the macOS ChatGPT keyring lock directory: %w", err)
+		}
+		return strings.TrimSpace(string(path)), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		account, lookupErr := user.LookupId(fmt.Sprint(os.Geteuid()))
 		if lookupErr != nil {
-			return nil, fmt.Errorf("locate the ChatGPT keyring lock directory: %w", lookupErr)
+			return "", fmt.Errorf("locate the ChatGPT keyring lock directory: %w", lookupErr)
 		}
 		home = account.HomeDir
 	}
-	return OpenWithKeyring(systemKeyring{}, home)
+	return home, nil
 }
 
 // OpenWithKeyring creates a store with the given keyring client and lock root.
@@ -78,7 +97,7 @@ func OpenWithKeyring(ring keyringAccess, lockRoot string) (Store, error) {
 		return nil, err
 	}
 	if !filepath.IsAbs(lockRoot) {
-		return nil, errors.New("the ChatGPT keyring lock requires an absolute home directory")
+		return nil, errors.New("the ChatGPT keyring lock requires an absolute directory")
 	}
 	profile := filepath.Join(dir, "roast", "chatgpt-plan")
 	legacy := filepath.Join(profile, "accounts.json")
@@ -138,7 +157,7 @@ func (s keyringStore) readManifest() (manifest, error) {
 		return manifest{}, keyringError("read")
 	}
 	var m *manifest
-	if json.Unmarshal([]byte(raw), &m) != nil || m == nil || !m.Current.valid() || !m.Discard.valid() ||
+	if len(raw) > maxManifestSize || json.Unmarshal([]byte(raw), &m) != nil || m == nil || !m.Current.valid() || !m.Discard.valid() ||
 		m.Current.ID == m.Discard.ID {
 		return manifest{}, errors.New("invalid ChatGPT credential index in the keyring")
 	}
@@ -186,6 +205,9 @@ func (s keyringStore) readSnapshot(v snapshot) (string, error) {
 		}
 		if err != nil {
 			return "", keyringError("read")
+		}
+		if len(raw) > base64.RawStdEncoding.EncodedLen(chunkSize) {
+			return "", errors.New("oversized ChatGPT credential entry in the keyring")
 		}
 		chunk, err := base64.RawStdEncoding.DecodeString(raw)
 		if err != nil || len(chunk) == 0 || len(chunk) > chunkSize || (i+1 < v.Chunks && len(chunk) != chunkSize) {
@@ -288,6 +310,9 @@ func (s keyringStore) setVerified(item, value string) (bool, error) {
 func (s keyringStore) discard(ctx context.Context, v snapshot) error {
 	for i := range v.Chunks {
 		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.lock.checkName(); err != nil {
 			return err
 		}
 		if err := s.deleteVerified(s.chunkItem(v, i)); err != nil {

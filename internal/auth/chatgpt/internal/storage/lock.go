@@ -30,13 +30,13 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	if s.lock != nil {
 		return errors.New("WithLock cannot be nested on a locked credential store")
 	}
-	home, err := os.Stat(filepath.Dir(s.lockDir))
+	root, err := os.Stat(filepath.Dir(s.lockDir))
 	if err != nil {
 		return err
 	}
-	stat, ok := home.Sys().(*syscall.Stat_t)
-	if !ok || !home.IsDir() || stat.Uid != uint32(os.Geteuid()) || home.Mode().Perm()&0022 != 0 {
-		return errors.New("the ChatGPT keyring lock requires a user-owned home directory without shared write permissions")
+	stat, ok := root.Sys().(*syscall.Stat_t)
+	if !ok || !root.IsDir() || stat.Uid != uint32(os.Geteuid()) || root.Mode().Perm()&0022 != 0 {
+		return errors.New("the ChatGPT keyring lock requires a user-owned directory without shared write permissions")
 	}
 	if err := os.Mkdir(s.lockDir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err

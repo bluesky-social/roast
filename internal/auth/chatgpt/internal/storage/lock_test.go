@@ -77,6 +77,17 @@ func TestReplacingConfigDirectoryKeepsKeyringLock(t *testing.T) {
 
 func TestReplacingLockDuringPreflightBlocksOperation(t *testing.T) {
 	store, ring := testStore(t)
+	if err := save(store, t.Context(), "current"); err != nil {
+		t.Fatal(err)
+	}
+	ring.onDrop = func(string) error { return errors.New("cleanup failed") }
+	if err := save(store, t.Context(), "replacement"); !errors.Is(err, ErrPublished) {
+		t.Fatalf("unconfirmed cleanup = %v", err)
+	}
+	ring.onDrop = func(string) error {
+		t.Error("credential cleanup started after the lock directory was replaced")
+		return nil
+	}
 	ring.onGet = func(item string) (string, error) {
 		if err := os.Rename(store.lockDir, store.lockDir+".old"); err != nil {
 			t.Fatal(err)
