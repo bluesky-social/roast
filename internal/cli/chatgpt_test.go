@@ -212,6 +212,7 @@ const unconditionalPanicFinding = `{"assessment":"FINDINGS_PRESENT","findings":[
 
 func TestReviewProtocolFlagCanUseRoleAPISettings(t *testing.T) {
 	configPath, _ := accountFixture(t)
+	keyring.MockInitWithError(errors.New("keyring unavailable in test"))
 	writeAccountConfig(t, configPath, "chatgpt", "responses")
 	t.Chdir(initChangedRepo(t))
 	t.Setenv("ROAST_FINDER_BASE_URL", "https://provider.invalid/v1")
