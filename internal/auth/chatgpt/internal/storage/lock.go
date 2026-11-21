@@ -76,6 +76,12 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	if err != nil {
 		return err
 	}
+	if m.Discard.ID != "" && m.Current.ID != "" {
+		// Keep the previous entries if the current snapshot is unreadable.
+		if _, err := s.readSnapshot(m.Current); err != nil {
+			return errors.New("could not verify the current ChatGPT credential snapshot before recovery")
+		}
+	}
 	if err := s.removeDiscarded(ctx, m); err != nil {
 		return fmt.Errorf("recover interrupted ChatGPT credential update: %w", err)
 	}
