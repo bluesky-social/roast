@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.5.0 (2026-11-21)
+
+## What's Changed
+* chore(deps): update module github.com/klauspost/cpuid/v2 to v2.4.2 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/183
+* feat: Review a pull request without switching branches by @wn-mitch in https://github.com/bluesky-social/roast/pull/174
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/184
+* chore(deps): update ci go tools by @renovate[bot] in https://github.com/bluesky-social/roast/pull/185
+* fix(deps): update module go.yaml.in/yaml/v3 to v4 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/180
+* chore(deps): update module github.com/mattn/go-shellwords to v1.0.17 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/190
+* chore(deps): update module github.com/charmbracelet/x/ansi to v0.11.10 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/191
+
+## New Contributors
+* @wn-mitch made their first contribution in https://github.com/bluesky-social/roast/pull/174
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.9...v1.5.0
+
 ## 1.4.9 (2026-11-20)
 
 ## What's Changed
