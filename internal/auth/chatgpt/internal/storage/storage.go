@@ -12,7 +12,7 @@ var ErrPublished = errors.New("ChatGPT credential update may have been published
 
 // Store reads complete credential snapshots and serializes their updates.
 type Store interface {
-	ReadJSON(dst any) error
+	ReadJSON(ctx context.Context, dst any) error
 	WriteJSON(ctx context.Context, value any) error
 	WithLock(ctx context.Context, fn func(Store) error) error
 }

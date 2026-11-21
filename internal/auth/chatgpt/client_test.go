@@ -22,7 +22,7 @@ import (
 
 func TestNewDoesNotCreateCredentials(t *testing.T) {
 	mockKeyring(t)
-	c, err := New()
+	c, err := New(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,11 +127,11 @@ type testAccountStore struct {
 	faults *storeFaults
 }
 
-func (s testAccountStore) ReadJSON(dst any) error {
+func (s testAccountStore) ReadJSON(ctx context.Context, dst any) error {
 	if s.faults.read != nil {
 		return s.faults.read
 	}
-	return s.Store.ReadJSON(dst)
+	return s.Store.ReadJSON(ctx, dst)
 }
 
 func (s testAccountStore) WriteJSON(ctx context.Context, value any) error {
@@ -170,7 +170,7 @@ func seed(t *testing.T, c *Client, exp time.Time) {
 }
 
 func (c *Client) loadCredential(id string) (credential, error) {
-	accounts, err := c.loadStore()
+	accounts, err := c.loadStore(context.Background())
 	if err != nil {
 		return credential{}, err
 	}
@@ -264,7 +264,7 @@ func TestSignOutResumesAfterPublishedCheckpointError(t *testing.T) {
 		t.Fatalf("unconfirmed sign-out checkpoint = %v", err)
 	}
 	faults.afterWrite, faults.read = nil, nil
-	accounts, err := c.loadStore()
+	accounts, err := c.loadStore(t.Context())
 	if err != nil || accounts.Active != "" || accounts.Accounts[id].Pending == nil {
 		t.Fatalf("interrupted sign-out was not checkpointed: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestSignOutResumesAfterPublishedCheckpointError(t *testing.T) {
 	if err := c.SignOut(t.Context(), id); err != nil {
 		t.Fatal(err)
 	}
-	accounts, err = c.loadStore()
+	accounts, err = c.loadStore(t.Context())
 	if err != nil || accounts.Active != "" || accounts.Accounts[id].signedIn() {
 		t.Fatalf("sign-out retry did not clear the saved grant: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestSignOutKeepsItsSelectedAccount(t *testing.T) {
 	if err := c.SignOut(t.Context(), ""); err != nil {
 		t.Fatal(err)
 	}
-	accounts, err := c.loadStore()
+	accounts, err := c.loadStore(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}

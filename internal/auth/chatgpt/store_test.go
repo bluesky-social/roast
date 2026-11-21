@@ -16,7 +16,7 @@ import (
 func TestNewReportsUnavailableKeyring(t *testing.T) {
 	mockKeyring(t)
 	keyring.MockInitWithError(errors.New("test backend failure"))
-	if _, err := New(); err == nil || !strings.Contains(err.Error(), "system keyring") {
+	if _, err := New(t.Context()); err == nil || !strings.Contains(err.Error(), "system keyring") {
 		t.Fatalf("New on an unavailable keyring = %v", err)
 	}
 }
@@ -33,7 +33,7 @@ func TestSignInPersistsStableHostBeforeAuthorization(t *testing.T) {
 				return err
 			}
 			hostID := u.Query().Get("ext_agent_host_id")
-			accounts, err := c.loadStore()
+			accounts, err := c.loadStore(t.Context())
 			if err != nil || accounts.HostID != hostID || !uuid.MatchString(hostID) || len(accounts.Accounts) != 0 {
 				t.Fatalf("sign-in did not prepare a stable host: %v", err)
 			}

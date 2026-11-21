@@ -81,7 +81,7 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	i, e := c.loadStore()
+	i, e := c.loadStore(t.Context())
 	if e != nil || i.Active != "oaiapp_test" {
 		t.Fatal("registration not activated")
 	}
@@ -221,7 +221,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	if err != nil || !pending.PendingRegistration || pending.Subject != "" || pending.Email != "" || pending.AccessToken != "" || pending.RefreshToken != "" || pending.IDToken != "" {
 		t.Fatal("pending callback was lost or treated as verified identity")
 	}
-	i, err := c.loadStore()
+	i, err := c.loadStore(t.Context())
 	if err != nil || i.Active != "oaiapp_existing" || len(i.Accounts) != 2 {
 		t.Fatal("failed registration displaced active account")
 	}
@@ -235,7 +235,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	if err != nil || verified.PendingRegistration || verified.Subject != "subject" || verified.AccessToken == "" {
 		t.Fatal("pending registration did not complete identity validation")
 	}
-	i, err = c.loadStore()
+	i, err = c.loadStore(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func TestPendingSignInLeavesAccountOperationsAvailable(t *testing.T) {
 			if err := awaitMockSignIn(t, done); err != nil {
 				t.Fatal(err)
 			}
-			i, err := c.loadStore()
+			i, err := c.loadStore(t.Context())
 			if err != nil || i.Active != "" || len(i.Accounts) != 2 {
 				t.Fatalf("sign-in overwrote sign-out or lost registrations: %v", err)
 			}
@@ -443,7 +443,7 @@ func TestConcurrentSignInsMergeRegistrationsAndSelection(t *testing.T) {
 	if err := awaitMockSignIn(t, firstDone); err != nil {
 		t.Fatal(err)
 	}
-	i, err := c.loadStore()
+	i, err := c.loadStore(t.Context())
 	if err != nil || i.Active != "account-c" || len(i.Accounts) != 3 {
 		t.Fatalf("concurrent sign-in lost account updates: %v", err)
 	}
@@ -620,7 +620,7 @@ func TestDiscardedSignInGrantIsRevoked(t *testing.T) {
 			if failure == "canceled after verification" && !errors.Is(err, context.Canceled) {
 				t.Fatalf("sign-in returned %v, want cancellation", err)
 			}
-			accounts, err := c.loadStore()
+			accounts, err := c.loadStore(t.Context())
 			if err != nil || accounts.Active != "" || !accounts.Accounts["account-b"].PendingRegistration {
 				t.Fatalf("failed sign-in activated an unvalidated grant: %v", err)
 			}
@@ -640,7 +640,7 @@ func TestPendingSignInPreservesExplicitReselection(t *testing.T) {
 	if err := awaitMockSignIn(t, done); err != nil {
 		t.Fatal(err)
 	}
-	accounts, err := c.loadStore()
+	accounts, err := c.loadStore(t.Context())
 	if err != nil || accounts.Active != c.selected || !accounts.Accounts["account-b"].signedIn() {
 		t.Fatalf("sign-in did not preserve explicit reselection: %v", err)
 	}
@@ -728,7 +728,7 @@ func TestCanceledNewCallbackRetainsOnlyRegistrationID(t *testing.T) {
 	if err := awaitMockSignIn(t, done); !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), id) || !strings.Contains(err.Error(), "--account CLIENT_ID") {
 		t.Fatalf("canceled sign-in did not give a way to resume: %v", err)
 	}
-	accounts, err := c.loadStore()
+	accounts, err := c.loadStore(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
