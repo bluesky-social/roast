@@ -12,11 +12,7 @@ import (
 )
 
 // Darwin ACL entries can grant access independently of the Unix mode bits.
-func checkFilesystemPermissions(f *os.File) error {
-	var fs unix.Statfs_t
-	if err := unix.Fstatfs(int(f.Fd()), &fs); err != nil {
-		return fmt.Errorf("check ChatGPT storage filesystem: %w", err)
-	}
+func checkFilesystemPermissions(f *os.File, fs *unix.Statfs_t) error {
 	if fs.Flags&(unix.MNT_LOCAL|unix.MNT_IGNORE_OWNERSHIP) != unix.MNT_LOCAL {
 		return errors.New("ChatGPT credential storage requires a local filesystem with ownership enabled on macOS")
 	}

@@ -2,17 +2,12 @@ package storage
 
 import (
 	"errors"
-	"fmt"
 	"os"
 
 	"golang.org/x/sys/unix"
 )
 
-func checkFilesystemPermissions(f *os.File) error {
-	var fs unix.Statfs_t
-	if err := unix.Fstatfs(int(f.Fd()), &fs); err != nil {
-		return fmt.Errorf("check ChatGPT storage filesystem: %w", err)
-	}
+func checkFilesystemPermissions(_ *os.File, fs *unix.Statfs_t) error {
 	// These filesystems enforce Unix ownership and permission bits in the
 	// kernel. Mounts that can synthesize private modes are excluded.
 	const zfsSuperMagic = 0x2fc12fc1
