@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -91,6 +92,25 @@ func TestIDTokenValidation(t *testing.T) {
 				t.Errorf("validated subject = %q, want subject", identity.Subject)
 			}
 		})
+	}
+}
+
+func TestCanceledVerificationDoesNotRejectGrant(t *testing.T) {
+	key := testutil.NewRSAKey(t)
+	raw := testutil.SignRS256(t, testutil.NewRSAKey(t), idTokenClaims(time.Now()))
+	keys, err := json.Marshal(testutil.RS256KeySet(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	c := NewClient()
+	c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		cancel()
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(keys))}, nil
+	})
+	if _, err := c.ValidateID(ctx, raw, "oaiapp_test", "nonce", time.Now); !errors.Is(err, context.Canceled) {
+		t.Fatalf("verification returned %v, want cancellation", err)
 	}
 }
 

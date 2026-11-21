@@ -12,7 +12,22 @@ import (
 
 // Token returns a usable plan access token for the registration pinned by New.
 func (c *Client) Token(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if c.selected == "" {
+		accounts, err := c.loadStore()
+		if err != nil {
+			return "", err
+		}
+		for _, saved := range accounts.Accounts {
+			if saved.Pending != nil && saved.Pending.RevokeOnly {
+				return "", fmt.Errorf("%w: no account selected. Registration %q has a pending disconnection. Run roast chatgpt signout -- CLIENT_ID with that registration ID", ErrAuth, saved.ClientID)
+			}
+		}
+		if len(accounts.Accounts) != 0 {
+			return "", fmt.Errorf("%w: no account selected. Run roast chatgpt status, then select an account or resume sign-in with roast chatgpt signin --account CLIENT_ID", ErrAuth)
+		}
 		return "", fmt.Errorf("%w: no account selected; run roast chatgpt signin", ErrAuth)
 	}
 	var token string
@@ -55,6 +70,7 @@ func (c *Client) selectedToken(ctx context.Context, accounts *accountStore) (str
 	}
 
 	now := c.now()
+	// Renew in the last minute of the token's life, once the issuer permits rotation.
 	if now.Before(saved.ExpiresAt.Add(-time.Minute)) || now.Unix() < saved.EarliestRefreshAt {
 		if !now.Before(saved.ExpiresAt) {
 			return "", errors.New("ChatGPT token expired before refresh is permitted; retry after earliest_refresh_at")
@@ -78,15 +94,36 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 	stop()
 	rotated := tokens.RefreshToken != "" && tokens.RefreshToken != saved.RefreshToken
 	if err != nil {
+		if errors.Is(err, oauth.ErrAmbiguousRotation) {
+			// A replacement was reported but cannot be used. Revoke a known
+			// access token and direct the user to Settings for the renewable grant.
+			access := tokens.AccessToken
+			if access == "" {
+				access = saved.AccessToken
+			}
+			return "", c.discardGrant(ctx, accounts, &saved, access, "access_token", oauth.ErrAmbiguousRotation, false)
+		}
 		if rotated {
 			cause := fmt.Errorf("%w: ChatGPT returned a malformed refresh response with a replacement token: %v", ErrAuth, err)
-			cause = c.revokeDiscardedToken(ctx, saved.ClientID, tokens.RefreshToken, "refresh_token", cause)
-			return "", accounts.clearStoredGrant(&saved, cause)
+			if !oauth.ValidRefreshToken(tokens.RefreshToken) {
+				return "", accounts.clearStoredGrant(&saved, errors.Join(cause, unconfirmedRevocation(saved.ClientID)))
+			}
+			return "", c.discardGrant(ctx, accounts, &saved, tokens.RefreshToken, "refresh_token", cause, false)
 		}
 		if oauth.InvalidRefreshGrant(err) {
-			return "", accounts.clearStoredGrant(&saved, err)
+			if c.now().Before(saved.ExpiresAt) {
+				return "", c.discardGrant(ctx, accounts, &saved, saved.AccessToken, "access_token", err, false)
+			}
+			cause := fmt.Errorf("%w. If an earlier renewal was interrupted, disconnect Roast in ChatGPT Settings to revoke any unseen replacement", err)
+			return "", accounts.clearStoredGrant(&saved, cause)
 		}
-		return "", err
+		if oauth.DefinitiveGrantRejection(err) {
+			return "", err
+		}
+		// The issuer may have rotated the grant before the reply arrived. An
+		// access token alone does not establish rotation: revoking it can also
+		// revoke the existing refresh token (RFC 7009 section 2.1).
+		return "", fmt.Errorf("%w. If renewal keeps failing, disconnect Roast in ChatGPT Settings and sign in again", err)
 	}
 	receivedAt := c.now()
 	if rotated {
@@ -105,10 +142,8 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 		// A rejected replacement must leave the sign-in snapshot intact.
 		next, err := c.validatedRefresh(ctx, saved, tokens, receivedAt)
 		switch {
-		case errors.Is(err, errInvalidRefresh):
-			return "", fmt.Errorf("%w: malformed ChatGPT refresh response. Existing grant retained: %w", ErrNetwork, err)
-		case errors.Is(err, errRefreshIdentityChanged):
-			return "", accounts.clearStoredGrant(&saved, err)
+		case errors.Is(err, errInvalidRefresh), errors.Is(err, errRefreshIdentityChanged):
+			return "", c.discardInvalidRefresh(ctx, accounts, &saved, tokens, err)
 		case err != nil:
 			return "", err
 		}
@@ -139,7 +174,7 @@ func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountSt
 	// The atomic rename did not happen. The replacement cannot be recovered
 	// from disk, even when a storage failure also prevents reading the old file.
 	cause = c.revokeDiscardedToken(ctx, saved.ClientID, saved.Pending.Response.RefreshToken, "refresh_token", cause)
-	current, err := c.loadStore()
+	current, err := loadAccountStore(accounts.files, accounts.path)
 	if err == nil && current.HostID == accounts.HostID && current.Accounts[saved.ClientID].Generation == previousGeneration {
 		return accounts.clearStoredGrant(saved, cause)
 	}
@@ -148,9 +183,19 @@ func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountSt
 
 func (c *Client) acceptPending(ctx context.Context, accounts *accountStore, saved *credential) error {
 	pending := saved.Pending
+	if pending.RevokeOnly {
+		// The checkpoint holds only the token that may be sent to revocation.
+		grant := credential{RefreshToken: pending.Response.RefreshToken, AccessToken: pending.Response.AccessToken}
+		token, kind := grant.revocationToken()
+		cause := errors.New("finishing an interrupted ChatGPT token revocation")
+		if token == "" {
+			return accounts.clearStoredGrant(saved, errors.Join(cause, unconfirmedRevocation(saved.ClientID)))
+		}
+		return c.discardGrant(ctx, accounts, saved, token, kind, cause, true)
+	}
 	receivedAt := pending.ReceivedAt
 	if receivedAt.IsZero() || receivedAt.Unix() <= 0 {
-		return c.discardInvalidRefresh(ctx, accounts, saved, errors.New("invalid pending ChatGPT token receipt time"))
+		return c.discardInvalidRefresh(ctx, accounts, saved, pending.Response, errors.New("invalid pending ChatGPT token receipt time"))
 	}
 
 	if receivedAt.After(c.now().Add(5 * time.Second)) {
@@ -160,7 +205,7 @@ func (c *Client) acceptPending(ctx context.Context, accounts *accountStore, save
 	next, err := c.validatedRefresh(ctx, *saved, pending.Response, receivedAt)
 	switch {
 	case errors.Is(err, errInvalidRefresh), errors.Is(err, errRefreshIdentityChanged):
-		return c.discardInvalidRefresh(ctx, accounts, saved, err)
+		return c.discardInvalidRefresh(ctx, accounts, saved, pending.Response, err)
 	case err != nil:
 		return err
 	}
@@ -196,24 +241,61 @@ func (c *Client) validatedRefresh(ctx context.Context, previous credential, resp
 	return next, nil
 }
 
-// Discard a malformed response while retaining the validated grant when the
-// provider did not issue a replacement refresh token.
-func (c *Client) discardInvalidRefresh(ctx context.Context, accounts *accountStore, saved *credential, cause error) error {
-	replacement := saved.Pending.Response.RefreshToken
-	if replacement != "" && replacement != saved.RefreshToken && oauth.ValidRefreshToken(replacement) {
-		cause = c.revokeDiscardedToken(ctx, saved.ClientID, replacement, "refresh_token", cause)
-		return accounts.clearStoredGrant(saved, cause)
+// Reject a response that cannot be used for this account. A malformed reply
+// without rotation leaves the previously validated grant intact.
+func (c *Client) discardInvalidRefresh(ctx context.Context, accounts *accountStore, saved *credential, response oauth.TokenResponse, cause error) error {
+	checkpointed := saved.Pending != nil
+	if replacement := response.RefreshToken; replacement != "" && replacement != saved.RefreshToken && oauth.ValidRefreshToken(replacement) {
+		return c.discardGrant(ctx, accounts, saved, replacement, "refresh_token", cause, checkpointed)
 	}
 	if errors.Is(cause, errRefreshIdentityChanged) {
-		return accounts.clearStoredGrant(saved, cause)
+		if response.AccessToken == saved.AccessToken {
+			// Neither token is new. Revoking either could disconnect the previously verified account.
+			return accounts.clearStoredGrant(saved, errors.Join(cause, unconfirmedRevocation(saved.ClientID)))
+		}
+		return c.discardGrant(ctx, accounts, saved, response.AccessToken, "access_token", cause, checkpointed)
 	}
-	saved.Pending = nil
-	// Removing an invalid checkpoint keeps the underlying grant unchanged.
-	accounts.Accounts[saved.ClientID] = *saved
-	if err := accounts.save(); err != nil {
-		return errors.Join(cause, fmt.Errorf("could not discard the malformed ChatGPT refresh response. Repair credential storage and retry: %w", err))
+	if checkpointed {
+		saved.Pending = nil
+		// Removing an invalid checkpoint keeps the underlying grant unchanged.
+		accounts.Accounts[saved.ClientID] = *saved
+		if err := accounts.save(context.Background()); err != nil {
+			return errors.Join(cause, fmt.Errorf("could not discard the malformed ChatGPT refresh response. Repair credential storage and retry: %w", err))
+		}
 	}
 	return fmt.Errorf("%w: malformed ChatGPT refresh response. Existing grant retained: %w", ErrNetwork, cause)
+}
+
+// A rejected token can only be sent to revocation. Saving it first lets the
+// next command finish cleanup if Roast exits during the request.
+func (c *Client) discardGrant(ctx context.Context, accounts *accountStore, saved *credential, token, kind string, cause error, checkpointed bool) error {
+	if err := accounts.markForRevocation(saved, token, kind, kind == "access_token"); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("could not record the rejected ChatGPT replacement; repair credential storage: %w", err))
+		if checkpointed {
+			// The durable copy may still allow validation. Retry the marker
+			// before revoking a token that recovery could otherwise publish.
+			return errors.Join(cause, unconfirmedRevocation(saved.ClientID))
+		}
+		// A malformed reply has never been saved for validation. We can revoke
+		// it from memory and attempt local cleanup even when storage failed.
+	}
+	cause = c.revokeDiscardedToken(ctx, saved.ClientID, token, kind, cause)
+	// Erase the rejected secret after a completed attempt. If the provider
+	// could not confirm revocation, the error directs the user to Settings.
+	return accounts.clearStoredGrant(saved, cause)
+}
+
+// Persist the only permitted use of a rejected token before contacting the
+// issuer. A previously visible marker may have failed its directory sync.
+func (accounts *accountStore) markForRevocation(saved *credential, token, kind string, unknownRefresh bool) error {
+	saved.clearGrant()
+	saved.Pending = &pendingRefresh{RevokeOnly: true, UnknownRefresh: unknownRefresh}
+	if kind == "refresh_token" {
+		saved.Pending.Response.RefreshToken = token
+	} else {
+		saved.Pending.Response.AccessToken = token
+	}
+	return accounts.saveCredential(saved)
 }
 
 // clearStoredGrant runs under the session lock. It clears any pending tokens

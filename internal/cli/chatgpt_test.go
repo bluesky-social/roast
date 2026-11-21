@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt"
-	"github.com/bluesky-social/roast/internal/auth/chatgpt/chatgpttest"
 	"github.com/bluesky-social/roast/internal/review"
 	"github.com/bluesky-social/roast/internal/testutil"
 )
@@ -134,7 +133,7 @@ func accountFixture(t *testing.T) (configPath, storePath string, selectAccount f
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
-	storePath = chatgpttest.SeedAccounts(t, "account-a", "account-b")
+	storePath = testutil.SeedChatGPTAccounts(t, "account-a", "account-b")
 	selector, err := chatgpt.New()
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +183,26 @@ func accountToolResponse(model, tool, args string, direct bool) (*http.Response,
 }
 
 const unconditionalPanicFinding = `{"assessment":"FINDINGS_PRESENT","findings":[{"reasoning":"panic is reachable","severity":"HIGH","confidence":0.95,"cwe":"CWE-248","description":"The function always panics.","file":"bad.go","lines":[3],"code_quote":"panic(\"oops\")","fixed_code":"return","frontend_category":""}]}`
+
+func TestReviewProtocolFlagCanUseRoleAPISettings(t *testing.T) {
+	configPath, _, _ := accountFixture(t)
+	writeAccountConfig(t, configPath, "chatgpt", "responses")
+	t.Chdir(initChangedRepo(t))
+	t.Setenv("ROAST_FINDER_BASE_URL", "https://provider.invalid/v1")
+	t.Setenv("ROAST_FINDER_API_KEY", "role-key")
+	var calls int
+	mockAccountTransport(t, func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != "https://provider.invalid/v1/responses" || r.Header.Get("Authorization") != "Bearer role-key" {
+			return nil, errors.New("request did not use the explicitly selected API-key endpoint")
+		}
+		calls++
+		return accountToolResponse("finder-model", "findings", `{"assessment":"NO_FINDINGS","findings":[]}`, false)
+	})
+	code, err := ExecuteContext(t.Context(), []string{"review", "--config", configPath, "--finder-protocol", "responses", "--quick", "--uncommitted-only", "--max-attempts=1"}, io.Discard, io.Discard)
+	if err != nil || code != ExitClean || calls != 1 {
+		t.Fatalf("protocol override: code=%d, calls=%d, err=%v", code, calls, err)
+	}
+}
 
 func TestReviewPinsChatGPTAccountAcrossRoles(t *testing.T) {
 	for _, protocols := range [][2]string{{"chatgpt", "chatgpt"}, {"responses", "chatgpt"}, {"chatgpt", "responses"}} {
@@ -331,6 +350,14 @@ func TestDoctorEscapesChatGPTProviderErrors(t *testing.T) {
 		!strings.Contains(got, "--enable-plan") || strings.Contains(got, "provider unavailable") || strings.ContainsRune(got, '\x1b') {
 		t.Fatalf("doctor output did not escape the provider diagnostic: %q", got)
 	}
+	reader, writer := io.Pipe()
+	reader.Close()
+	defer writer.Close()
+	cmd = newDoctorCommand(writer)
+	cmd.SetArgs([]string{"--config", configPath})
+	if err := cmd.ExecuteContext(t.Context()); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("doctor with closed output: %v", err)
+	}
 }
 
 func TestDoctorSkipsLoginForInvalidChatGPTProfiles(t *testing.T) {
@@ -454,7 +481,7 @@ func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
 		}
 		switch r.URL.String() {
 		case "https://api.openai.com/v1/models":
-			return asJSON(map[string]any{"models": []map[string]string{{"slug": "finder-model", "display_name": "Finder", "visibility": "list"}}})
+			return asJSON(map[string]any{"models": []map[string]string{{"slug": "finder-model", "display_name": "Finder\nlabel\tvalue", "visibility": "list"}}})
 		case "https://api.openai.com/v1/responses":
 			reviewRequests.Add(1)
 			return accountToolResponse("finder-model", "findings", `{"assessment":"NO_FINDINGS","findings":[]}`, true)
@@ -507,8 +534,16 @@ func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if _, err := ExecuteContext(ctx, []string{"chatgpt", "models"}, &out, io.Discard); err != nil || !strings.Contains(out.String(), "finder-model") {
+	if _, err := ExecuteContext(ctx, []string{"chatgpt", "models"}, &out, io.Discard); err != nil || out.String() != "finder-model\tFinder\\nlabel\\tvalue\n" {
 		t.Fatalf("model listing: %q, %v", out.String(), err)
+	}
+	closedReader, closedWriter := io.Pipe()
+	closedReader.Close()
+	defer closedWriter.Close()
+	for _, command := range []string{"models", "status"} {
+		if _, err := ExecuteContext(ctx, []string{"chatgpt", command}, closedWriter, io.Discard); !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("%s with closed output: %v", command, err)
+		}
 	}
 	out.Reset()
 	code, err := ExecuteContext(ctx, []string{"review", "--config", configPath, "--uncommitted-only", "--max-attempts=1", "--format", "json"}, &out, io.Discard)

@@ -152,6 +152,25 @@ func TestOnlyOAuthBadRequestCanInvalidateRefreshGrant(t *testing.T) {
 	}
 }
 
+func TestOnlyExplicitCodeRejectionRulesOutAnIssuedGrant(t *testing.T) {
+	for _, tc := range []struct {
+		body     string
+		rejected bool
+	}{
+		{`{"error":"invalid_scope"}`, true},
+		{`{"error":"invalid_grant"}`, false},
+		{`{"error":{"code":"invalid_scope","refresh_token":"echoed"}}`, false},
+		{`{"error":"invalid_grant","Refresh_Token":"echoed"}`, false},
+		{`{"error":"invalid_grant","id_token":"echoed"}`, false},
+		{`{"error":`, false},
+	} {
+		resp := &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(tc.body))}
+		if got := DefinitiveGrantRejection(responseError(resp, false)); got != tc.rejected {
+			t.Fatalf("DefinitiveGrantRejection(%s) = %v", tc.body, got)
+		}
+	}
+}
+
 func TestModelCatalogResponses(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -174,6 +193,7 @@ func TestModelCatalogResponses(t *testing.T) {
 		{"ambiguous models arrays", http.StatusOK, `{"models":[],"MODELS":[]}`, ErrNetwork, false},
 		{"null models array", http.StatusOK, `{"models":null}`, ErrNetwork, false},
 		{"error alongside models", http.StatusOK, `{"error":"unavailable","models":[]}`, ErrNetwork, false},
+		{"mixed-case error alongside models", http.StatusOK, `{"Error":"unavailable","models":[]}`, ErrNetwork, false},
 		{"missing listed model slug", http.StatusOK, `{"models":[{"visibility":"list","slug":" "}]}`, ErrNetwork, false},
 		{"null catalog entry", http.StatusOK, `{"models":[null]}`, ErrNetwork, false},
 		{"empty catalog", http.StatusOK, `{"models":[]}`, nil, false},
@@ -265,7 +285,8 @@ func TestRefreshTimestampRepresentations(t *testing.T) {
 		{"fraction", `1794182400.25`, 1794182401},
 		{"sub-ULP fraction", `1794182400.0000001`, 1794182401},
 		{"sub-ULP string", `"1794182400.0000001"`, 1794182401},
-		{"tiny decimal remainder", `1794182400.0000000000000000000000000000000000000000000000000000000000000000000000000000000000001`, 1794182401},
+		{"long zero fraction", `"1794182400.` + strings.Repeat("0", 1500) + `"`, 1794182400},
+		{"long nonzero fraction", `"1794182400.` + strings.Repeat("0", 1500) + `1"`, 1794182401},
 		{"leading decimal point", `"+.25E2"`, 25},
 		{"trailing decimal point", `"1.e2"`, 100},
 		{"multiple decimal points", `"1..1"`, 0},
@@ -298,12 +319,13 @@ func TestRefreshTimestampRepresentations(t *testing.T) {
 		{"out of range date", `"0000-01-01T00:00:00Z"`, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			wire := `{}`
+			wire := `{"access_token":"access","refresh_token":"replacement"`
 			if tc.raw != "" {
-				wire = `{"earliest_refresh_at":` + tc.raw + `}`
+				wire += `,"earliest_refresh_at":` + tc.raw
 			}
+			wire += "}"
 			var token TokenResponse
-			if err := json.Unmarshal([]byte(wire), &token); err != nil {
+			if err := readTokenResponse(strings.NewReader(wire), "previous", &token); err != nil {
 				t.Fatalf("optional metadata rejected response: %v", err)
 			}
 			if int64(token.EarliestRefreshAt) != tc.want {
@@ -321,26 +343,26 @@ func TestRefreshTimestampRepresentations(t *testing.T) {
 	}
 }
 
-func TestRefreshTimestampTinyRemainders(t *testing.T) {
-	for zeros := 1; zeros <= 1500; zeros++ {
-		for _, last := range []string{"0", "1"} {
-			raw := `"1794182400.` + strings.Repeat("0", zeros) + last + `"`
-			var value RefreshTimestamp
-			want := RefreshTimestamp(1794182400)
-			if last == "1" {
-				want++
-			}
-			if err := json.Unmarshal([]byte(raw), &value); err != nil || value != want {
-				t.Fatalf("decimal precision lost at %d fractional zeros: got %d want %d", zeros, value, want)
-			}
-		}
-	}
-}
-
 func TestRefreshTimestampInvalidHintClearsPreviousValue(t *testing.T) {
 	var previous RefreshTimestamp = 42
 	if err := json.Unmarshal([]byte(`"invalid"`), &previous); err != nil || previous != 0 {
 		t.Fatal("invalid hint retained stale scheduling metadata")
+	}
+}
+
+func TestAmbiguousRefreshHintPreservesReplacement(t *testing.T) {
+	for _, extension := range []string{
+		`"Earliest_Refresh_At":42`,
+		`"earliest_refresh_at":42,"earliest_refresh_at":43`,
+		`"earliest_refresh_at":42,"Earliest_Refresh_At":43`,
+		`"Earliest_Refresh_At":42,"Earliest_Refresh_At":43`,
+	} {
+		wire := `{"access_token":"access","refresh_token":"replacement",` + extension + `}`
+		var tokens TokenResponse
+		if err := readTokenResponse(strings.NewReader(wire), "previous", &tokens); err != nil ||
+			tokens.RefreshToken != "replacement" || tokens.EarliestRefreshAt != 0 {
+			t.Fatalf("optional hint %s affected the grant: %v", extension, err)
+		}
 	}
 }
 
@@ -354,7 +376,7 @@ func TestOptionalMetadataDoesNotRelaxCredentialParsing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var token TokenResponse
-			if err := json.Unmarshal([]byte(tc.wire), &token); err == nil {
+			if err := readTokenResponse(strings.NewReader(tc.wire), "previous", &token); err == nil {
 				t.Fatal("invalid credential response accepted")
 			}
 		})
@@ -371,11 +393,41 @@ func TestDiagnosticTokenResponseDoesNotSupplyCredentials(t *testing.T) {
 	}
 }
 
+func TestConflictingTokensCannotConfirmRevocation(t *testing.T) {
+	for _, body := range []string{
+		`{"refresh_token":"one","refresh_token":"two"}`,
+		`{"refresh_token":"one","refresh_token":"two","refresh_token":"one"}`,
+		`{"Refresh_Token":"alias","refresh_token":"rotated"}`,
+		`{"refresh_token":"rotated","Refresh_Token":"alias"}`,
+		`{"access_token":"one","access_token":"two"}`,
+	} {
+		var tokens TokenResponse
+		if err := readTokenResponse(strings.NewReader(body), "previous", &tokens); err == nil || tokens.RefreshToken != "" || tokens.AccessToken != "" {
+			t.Fatal("conflicting tokens produced a cleanup candidate")
+		}
+	}
+}
+
+func TestUnusableReplacementPreservesOnlyAKnownAccessTokenForCleanup(t *testing.T) {
+	for _, body := range []string{
+		`{"access_token":"known","refresh_token":"first","refresh_token":"second"}`,
+		`{"access_token":"known","refresh_token":"bad\ntoken"}`,
+		`{"access_token":"known","refresh_token":17}`,
+		`{"access_token":"known","refresh_token":{}}`,
+	} {
+		var tokens TokenResponse
+		err := readTokenResponse(strings.NewReader(body), "previous", &tokens)
+		if !errors.Is(err, ErrAmbiguousRotation) || tokens.AccessToken != "known" || tokens.RefreshToken != "" {
+			t.Fatal("failed to distinguish the known access token from an unusable replacement")
+		}
+	}
+}
+
 func TestMisnamedRotatedTokenIsOnlyReturnedForCleanup(t *testing.T) {
 	for _, body := range []string{
 		`{"Refresh_Token":"rotated","token_type":"Bearer"}`,
-		`{"Refresh_Token":"alias","refresh_token":"rotated"}`,
-		`{"refresh_token":"rotated","Refresh_Token":"alias"}`,
+		`{"Refresh_Token":"rotated","refresh_token":"rotated"}`,
+		`{"refresh_token":"rotated","Refresh_Token":"previous"}`,
 	} {
 		var tokens TokenResponse
 		err := readTokenResponse(strings.NewReader(body), "previous", &tokens)

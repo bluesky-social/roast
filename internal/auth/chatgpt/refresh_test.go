@@ -144,8 +144,8 @@ func TestTerminalRefreshClearsGrantAndKeepsRegistration(t *testing.T) {
 		return jsonResponse(400, map[string]string{"error": "invalid_grant", "error_description": "secret should not appear"})
 	})
 	_, e := c.Token(context.Background())
-	if !errors.Is(e, ErrAuth) || strings.Contains(e.Error(), "secret") {
-		t.Fatal("unsafe or unclassified error")
+	if !errors.Is(e, ErrAuth) || strings.Contains(e.Error(), "secret") || !strings.Contains(e.Error(), "ChatGPT Settings") {
+		t.Fatal("missing recovery guidance or unsafe terminal error")
 	}
 	v, err := c.loadCredential(c.selected)
 	if err != nil {
@@ -157,6 +157,17 @@ func TestTerminalRefreshClearsGrantAndKeepsRegistration(t *testing.T) {
 	accounts, err := c.Status(t.Context())
 	if err != nil || len(accounts) != 1 || accounts[0].SignedIn || accounts[0].PlanEnabled {
 		t.Fatalf("status still reports a usable grant after invalid_grant: %v", err)
+	}
+}
+
+func TestTerminalRefreshRevokesAnUnexpiredAccessToken(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(30*time.Second))
+	expectRevocation(t, c, "access", "access_token", transportFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+	}))
+	if token, err := c.Token(t.Context()); token != "" || !oauth.InvalidRefreshGrant(err) || !strings.Contains(err.Error(), "ChatGPT Settings") {
+		t.Fatalf("missing cleanup guidance for the rejected grant: %v", err)
 	}
 }
 
@@ -247,8 +258,8 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 	}
 }
 
-// A rejected rotation must revoke the distinct replacement for this registration.
-func expectDiscardedRefresh(t *testing.T, c *Client, token string, next http.RoundTripper) {
+// Check which credential was sent to revocation for this registration.
+func expectRevocation(t *testing.T, c *Client, token, kind string, next http.RoundTripper) {
 	t.Helper()
 	calls := 0
 	t.Cleanup(func() {
@@ -266,7 +277,7 @@ func expectDiscardedRefresh(t *testing.T, c *Client, token string, next http.Rou
 			return jsonResponse(http.StatusOK, map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": oauth.Issuer + "/revoke"})
 		case oauth.Issuer + "/revoke":
 			calls++
-			if r.FormValue("token") != token || r.FormValue("token_type_hint") != "refresh_token" || r.FormValue("client_id") != c.selected {
+			if r.FormValue("token") != token || r.FormValue("token_type_hint") != kind || r.FormValue("client_id") != c.selected {
 				t.Error("revoked the wrong grant")
 			}
 			return jsonResponse(http.StatusOK, map[string]any{})
@@ -276,9 +287,65 @@ func expectDiscardedRefresh(t *testing.T, c *Client, token string, next http.Rou
 	})
 }
 
-func TestPendingWrongIdentityNeverExposed(t *testing.T) {
-	for name, refreshToken := range map[string]string{"rotated": "new-refresh", "unchanged": "refresh", "omitted": ""} {
-		t.Run(name, func(t *testing.T) {
+func TestRejectedCheckpointOnlyRetriesRevocation(t *testing.T) {
+	for _, operation := range []string{"review", "reauthorize"} {
+		t.Run(operation, func(t *testing.T) {
+			const revokeURL = oauth.Issuer + "/revoke"
+			c := testClient(t)
+			seed(t, c, time.Now().Add(time.Hour))
+			saved, err := c.loadCredential(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved.Pending = &pendingRefresh{RevokeOnly: true, Response: oauth.TokenResponse{RefreshToken: "replacement"}}
+			if err := c.saveCredential(&saved); err != nil {
+				t.Fatal(err)
+			}
+			var revoked bool
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.String() == discoveryURL {
+					return jsonResponse(http.StatusOK, map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": revokeURL})
+				}
+				if r.URL.String() != revokeURL || r.FormValue("token") != "replacement" {
+					return nil, errors.New("unexpected request for rejected checkpoint")
+				}
+				revoked = true
+				return jsonResponse(http.StatusOK, nil)
+			})
+			var token string
+			if operation == "reauthorize" {
+				err = c.SignIn(t.Context(), c.selected, func(string) error {
+					t.Fatal("opened the browser before completing pending revocation")
+					return nil
+				})
+			} else {
+				token, err = c.Token(t.Context())
+			}
+			if token != "" || err == nil || !revoked {
+				t.Fatalf("rejected replacement: revoked=%v err=%v", revoked, err)
+			}
+			saved, err = c.loadCredential(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertClearedCredentials(t, saved)
+		})
+	}
+}
+
+func TestRefreshedWrongIdentityNeverExposed(t *testing.T) {
+	for _, tt := range []struct {
+		name, refreshToken string
+		checkpointed       bool
+		repeatsAccess      bool
+	}{
+		{"rotated checkpoint", "new-refresh", true, false},
+		{"unchanged checkpoint", "refresh", true, false},
+		{"omitted checkpoint", "", true, false},
+		{"fresh reply without rotation", "", false, false},
+		{"both tokens unchanged", "", false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(-time.Minute))
 			key := testutil.NewRSAKey(t)
@@ -288,20 +355,31 @@ func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 			}
 			cl := claims("")
 			cl["sub"] = "different"
-			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "wrong-account", RefreshToken: refreshToken, IDToken: testutil.SignRS256(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: time.Now()}
-			if err := c.saveCredential(&v); err != nil {
-				t.Fatal(err)
+			response := oauth.TokenResponse{AccessToken: "wrong-account", RefreshToken: tt.refreshToken, IDToken: testutil.SignRS256(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}
+			if tt.repeatsAccess {
+				response.AccessToken = v.AccessToken
+			}
+			if tt.checkpointed {
+				v.Pending = &pendingRefresh{Response: response, ReceivedAt: time.Now()}
+				if err := c.saveCredential(&v); err != nil {
+					t.Fatal(err)
+				}
 			}
 			before, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
 			jwksCalls := 0
-			replacement := ""
-			if name == "rotated" {
-				replacement = refreshToken
+			replacement, kind := "wrong-account", "access_token"
+			if tt.refreshToken != "" && tt.refreshToken != v.RefreshToken {
+				replacement, kind = tt.refreshToken, "refresh_token"
+			} else if tt.repeatsAccess {
+				replacement = "" // Only the previous identity's credentials are known.
 			}
-			expectDiscardedRefresh(t, c, replacement, transportFunc(func(r *http.Request) (*http.Response, error) {
+			expectRevocation(t, c, replacement, kind, transportFunc(func(r *http.Request) (*http.Response, error) {
+				if !tt.checkpointed && r.URL.String() == tokenURL {
+					return jsonResponse(http.StatusOK, response)
+				}
 				if r.URL.String() != jwksURL {
 					return nil, errors.New("unexpected request instead of JWKS validation")
 				}
@@ -490,7 +568,7 @@ func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
 			if err := c.saveCredential(&v); err != nil {
 				t.Fatal(err)
 			}
-			expectDiscardedRefresh(t, c, "pending-refresh", transportFunc(func(r *http.Request) (*http.Response, error) {
+			expectRevocation(t, c, "pending-refresh", "refresh_token", transportFunc(func(r *http.Request) (*http.Response, error) {
 				if r.URL.String() != jwksURL {
 					t.Fatal("invalid pending record caused refresh")
 				}
@@ -631,6 +709,7 @@ func TestMalformedSuccessfulRefreshWithoutRotationPreservesGrant(t *testing.T) {
 		`{}`,
 		`{"expires_in":3600}`,
 		`{"access_token":"replacement","token_type":"Bearer"}`,
+		`{"access_token":"replacement","refresh_token":`,
 		`{"access_token":"invalid access","token_type":"Bearer","expires_in":3600}`,
 		`{"access_token":"replacement","id_token":"invalid","token_type":"Bearer","expires_in":3600}`,
 		`{"access_token":"replacement","refresh_token":"refresh","token_type":"Bearer","expires_in":-1}`,
@@ -686,6 +765,7 @@ func TestPartiallyDecodedRefreshCannotReuseRotatedGrant(t *testing.T) {
 		revokeStatus int
 	}{
 		{http.StatusOK, `{"refresh_token":"rotated","expires_in":"invalid"}`, http.StatusOK},
+		{http.StatusOK, `{"refresh_token":"rotated","refresh_token":"bad\ntoken"}`, http.StatusOK},
 		{http.StatusOK, `{"refresh_token":"rotated","expires_in":`, http.StatusOK},
 		{http.StatusOK, `{"refresh_token":"rotated","expires_in":`, http.StatusForbidden},
 		{http.StatusOK, `{"refresh_token":"rotated"} trailing data`, http.StatusOK},
@@ -705,6 +785,10 @@ func TestPartiallyDecodedRefreshCannotReuseRotatedGrant(t *testing.T) {
 				return jsonResponse(http.StatusOK, map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": oauth.Issuer + "/revoke"})
 			case oauth.Issuer + "/revoke":
 				revocations++
+				saved, err := c.loadCredential(c.selected)
+				if err != nil || saved.signedIn() || saved.planEnabled() || saved.Pending == nil || !saved.Pending.RevokeOnly || saved.Pending.Response.RefreshToken != "rotated" {
+					t.Fatalf("rejected grant still usable or missing its cleanup token: %v", err)
+				}
 				if r.FormValue("token") != "rotated" || r.FormValue("token_type_hint") != "refresh_token" || r.FormValue("client_id") != c.selected {
 					t.Fatal("revocation did not identify the discarded replacement")
 				}
@@ -716,6 +800,9 @@ func TestPartiallyDecodedRefreshCannotReuseRotatedGrant(t *testing.T) {
 		if token != "" || !errors.Is(err, ErrAuth) || revocations != 1 {
 			t.Fatalf("malformed rotated response was not rejected: %v", err)
 		}
+		if !strings.Contains(err.Error(), "ChatGPT Settings") {
+			t.Fatalf("missing remote recovery guidance for the malformed reply: %v", err)
+		}
 		if strings.Contains(err.Error(), "Disconnect Roast in ChatGPT Settings") != (tc.revokeStatus != http.StatusOK) {
 			t.Fatalf("wrong revocation guidance: %v", err)
 		}
@@ -724,6 +811,73 @@ func TestPartiallyDecodedRefreshCannotReuseRotatedGrant(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertClearedCredentials(t, saved)
+	}
+}
+
+func TestConflictingRefreshTokensClearTheConsumedGrant(t *testing.T) {
+	for _, access := range []string{"", "access", "unique"} {
+		t.Run("access-"+access, func(t *testing.T) {
+			c := testClient(t)
+			seed(t, c, time.Now().Add(-time.Minute))
+			revoked := false
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.String() {
+				case tokenURL:
+					body := `{"access_token":"` + access + `","refresh_token":"first","refresh_token":"second"}`
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+				case discoveryURL:
+					return jsonResponse(http.StatusOK, map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": oauth.Issuer + "/revoke"})
+				case oauth.Issuer + "/revoke":
+					want := access
+					if want == "" {
+						want = "access" // The saved access token is still known.
+					}
+					if r.FormValue("token") != want || r.FormValue("token_type_hint") != "access_token" {
+						t.Fatal("attempted to revoke an arbitrary token")
+					}
+					saved, err := c.loadCredential(c.selected)
+					if err != nil || saved.Pending == nil || !saved.Pending.UnknownRefresh {
+						t.Fatalf("lost the manual recovery requirement before revocation: %v", err)
+					}
+					revoked = true
+					return jsonResponse(http.StatusOK, nil)
+				default:
+					return nil, errors.New("unexpected request")
+				}
+			})
+			token, err := c.Token(t.Context())
+			if token != "" || !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "ChatGPT Settings") || !revoked {
+				t.Fatalf("ambiguous renewal did not explain manual recovery: %v", err)
+			}
+			saved, err := c.loadCredential(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertClearedCredentials(t, saved)
+		})
+	}
+}
+
+func TestMalformedRotationAttemptsRevocationWhenStorageFails(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(-time.Minute))
+	expectRevocation(t, c, "replacement", "refresh_token", transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != tokenURL {
+			t.Fatalf("unexpected request to %s", r.URL.Host)
+		}
+		// Prevent the next atomic rename from replacing the account file.
+		if err := os.Rename(c.storePath(), c.storePath()+".previous"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(c.storePath(), 0700); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"refresh_token":"replacement","expires_in":`))}, nil
+	}))
+	token, err := c.Token(t.Context())
+	if token != "" || !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "repair credential storage") ||
+		strings.Contains(err.Error(), "remote revocation was not confirmed") {
+		t.Fatalf("storage failure lost the revocation result: %v", err)
 	}
 }
 
@@ -999,7 +1153,7 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 			if stage == "checkpoint" {
 				replacement = "rotated"
 			}
-			expectDiscardedRefresh(t, c, replacement, transportFunc(func(r *http.Request) (*http.Response, error) {
+			expectRevocation(t, c, replacement, "refresh_token", transportFunc(func(r *http.Request) (*http.Response, error) {
 				switch r.URL.String() {
 				case tokenURL:
 					refreshes++

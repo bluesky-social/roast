@@ -10,17 +10,21 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	josejson "github.com/go-jose/go-jose/v4/json"
+
+	"github.com/bluesky-social/roast/internal/config"
 )
 
 const (
 	Issuer       = "https://auth.openai.com"
 	Scope        = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 	authorizeURL = Issuer + "/api/accounts/authorize"
-	modelsURL    = APIBaseURL + "/models"
+	modelsURL    = config.OpenAIBaseURL + "/models"
 	tokenURL     = Issuer + "/api/accounts/oauth/token"
 	jwksURL      = Issuer + "/.well-known/jwks.json"
 	discoveryURL = Issuer + "/.well-known/openid-configuration"
@@ -42,6 +46,56 @@ type TokenResponse struct {
 	ExpiresIn         int64            `json:"expires_in"`
 	Scope             *string          `json:"scope,omitempty"`
 	EarliestRefreshAt RefreshTimestamp `json:"earliest_refresh_at"`
+}
+
+// RefreshTimestamp stores the provider's optional earliest_refresh_at as Unix seconds.
+// An invalid hint falls back to token expiry and never discards a rotated grant.
+type RefreshTimestamp int64
+
+var refreshEpoch = regexp.MustCompile(`^\+?([0-9]*)(?:\.([0-9]*))?(?:[eE]([+-]?[0-9]+))?$`)
+var refreshDateFraction = regexp.MustCompile(`[.,]0*[1-9]`)
+
+func (t *RefreshTimestamp) UnmarshalJSON(data []byte) error {
+	*t = 0
+	raw := strings.TrimSpace(string(data))
+	if strings.HasPrefix(raw, "\"") {
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		raw = strings.TrimSpace(raw)
+	}
+	const maxUnix = 253402300799 // Last second of the RFC 3339 year 9999.
+	var seconds int64
+	if instant, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		seconds = instant.Unix()
+		if refreshDateFraction.MatchString(raw) {
+			seconds++
+		}
+	} else if parts := refreshEpoch.FindStringSubmatch(raw); parts != nil {
+		digits := strings.TrimLeft(parts[1]+parts[2], "0")
+		if digits == "" {
+			return nil
+		}
+		// Only the first twelve integer digits fit a timestamp. Keep the remainder
+		// as text so rounding up never loses a fraction or expands a large exponent.
+		exponent, _ := strconv.ParseInt(parts[3], 10, 32)
+		point := int64(len(digits)-len(parts[2])) + exponent
+		switch {
+		case point <= 0:
+			seconds = 1
+		case point <= 12:
+			integer := digits[:min(int64(len(digits)), point)]
+			integer += strings.Repeat("0", int(point)-len(integer))
+			seconds, _ = strconv.ParseInt(integer, 10, 64)
+			if point < int64(len(digits)) && strings.ContainsAny(digits[point:], "123456789") {
+				seconds++
+			}
+		}
+	}
+	if seconds > 0 && seconds <= maxUnix {
+		*t = RefreshTimestamp(seconds)
+	}
+	return nil
 }
 
 func (c Client) request(ctx context.Context, method, target string, form url.Values, bearer string, out any) error {
@@ -82,8 +136,12 @@ func (c Client) request(ctx context.Context, method, target string, form url.Val
 			// A nonstandard success is never accepted as a grant. The issuer
 			// may still have rotated a token, even if the body is incomplete.
 			data, _ := io.ReadAll(io.LimitReader(resp.Body, tokenResponseLimit+1))
-			*tokens, _ = extractCleanupTokens(data, form.Get("refresh_token"))
+			var scanErr error
+			_, *tokens, scanErr = scanTokenResponse(data, form.Get("refresh_token"))
 			err = fmt.Errorf("%w: unexpected ChatGPT token response (HTTP %d)", ErrNetwork, resp.StatusCode)
+			if errors.Is(scanErr, ErrAmbiguousRotation) {
+				err = errors.Join(err, scanErr)
+			}
 		} else {
 			err = responseError(resp, target == modelsURL)
 		}
@@ -91,7 +149,7 @@ func (c Client) request(ctx context.Context, method, target string, form url.Val
 		if tokens, ok := out.(*TokenResponse); ok {
 			previous := form.Get("refresh_token")
 			err = readTokenResponse(resp.Body, previous, tokens)
-			if err != nil && form.Get("grant_type") == "refresh_token" &&
+			if err != nil && !errors.Is(err, ErrAmbiguousRotation) && form.Get("grant_type") == "refresh_token" &&
 				(tokens.RefreshToken == "" || tokens.RefreshToken == previous) {
 				err = fmt.Errorf("%w: malformed ChatGPT refresh response. Existing grant retained: %w", ErrNetwork, err)
 			}
@@ -109,6 +167,10 @@ func (c Client) request(ctx context.Context, method, target string, form url.Val
 
 var errInvalidJSONResponse = errors.New("invalid ChatGPT response")
 
+// ErrAmbiguousRotation means a response supplied a replacement refresh token
+// but did not identify a single usable token for revocation.
+var ErrAmbiguousRotation = errors.New("ChatGPT returned an unusable or conflicting replacement refresh token")
+
 // Read one complete document. In particular, a truncated or ambiguous error
 // response must never be treated as grounds to discard a refresh token.
 func readJSON(body io.Reader, limit int64, dst any) error {
@@ -123,25 +185,35 @@ const tokenResponseLimit = 2 << 20
 
 func readTokenResponse(body io.Reader, previousRefresh string, tokens *TokenResponse) error {
 	data, readErr := io.ReadAll(io.LimitReader(body, tokenResponseLimit+1))
-	issued, rejected := extractCleanupTokens(data, previousRefresh)
-	if readErr != nil || len(data) > tokenResponseLimit || rejected || !json.Valid(data) || josejson.Unmarshal(data, tokens) != nil ||
-		!ValidAccessToken(tokens.AccessToken) || !ValidRefreshToken(tokens.RefreshToken) {
+	grant, issued, scanErr := scanTokenResponse(data, previousRefresh)
+	if scanErr != nil {
 		*tokens = issued
-		return errors.New("invalid ChatGPT response")
+		return scanErr
 	}
+	if readErr != nil || len(data) > tokenResponseLimit || !json.Valid(data) ||
+		!ValidAccessToken(grant.AccessToken) || !ValidRefreshToken(grant.RefreshToken) {
+		*tokens = issued
+		return errInvalidJSONResponse
+	}
+	*tokens = grant
 	return nil
 }
 
-// Fully read token fields in a rejected response are evidence for cleanup
-// only. Retain a distinct replacement even when a duplicate obscures it.
-func extractCleanupTokens(data []byte, previousRefresh string) (TokenResponse, bool) {
-	var issued, aliases TokenResponse
+// Decode each grant field by its exact name. Fully read tokens from a rejected
+// response are evidence for revocation only, including when the body is truncated.
+func scanTokenResponse(data []byte, previousRefresh string) (grant, issued TokenResponse, err error) {
+	var ambiguousAccess, ambiguousRefresh, invalidRefresh bool
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
-		return issued, false
+		return grant, issued, errInvalidJSONResponse
 	}
-	seen := make(map[string]bool, 2)
-	rejected := false
+	fields := map[string]any{
+		"access_token": &grant.AccessToken, "refresh_token": &grant.RefreshToken,
+		"id_token": &grant.IDToken, "token_type": &grant.TokenType,
+		"expires_in": &grant.ExpiresIn, "scope": &grant.Scope,
+	}
+	seen := make(map[string]bool)
+	valid := true
 	for decoder.More() {
 		key, err := decoder.Token()
 		name, ok := key.(string)
@@ -150,63 +222,78 @@ func extractCleanupTokens(data []byte, previousRefresh string) (TokenResponse, b
 		}
 		if strings.EqualFold(name, "error") || strings.EqualFold(name, "error_description") || strings.EqualFold(name, "error_uri") {
 			// An error envelope can echo request credentials, even on HTTP 200.
-			return TokenResponse{}, true
+			return TokenResponse{}, TokenResponse{}, errInvalidJSONResponse
 		}
 		var raw json.RawMessage
 		if decoder.Decode(&raw) != nil {
 			break
 		}
-		wireName := name
-		name = tokenResponseField(name)
-		if name == "" {
+		if strings.EqualFold(name, "earliest_refresh_at") {
+			const hint = "earliest_refresh_at"
+			if !seen[hint] && name == hint {
+				_ = grant.EarliestRefreshAt.UnmarshalJSON(raw)
+			} else {
+				grant.EarliestRefreshAt = 0
+			}
+			seen[hint] = true
 			continue
 		}
-		rejected = rejected || seen[name] || name != wireName
+		wireName := name
+		for field := range fields {
+			if strings.EqualFold(name, field) {
+				name = field
+				break
+			}
+		}
+		if seen[name] || name != wireName {
+			valid = false
+		}
 		seen[name] = true
+		if dst := fields[name]; dst != nil && josejson.Unmarshal(raw, dst) != nil {
+			valid = false
+		}
 		if name != "access_token" && name != "refresh_token" {
 			continue
 		}
 		var token string
-		if json.Unmarshal(raw, &token) != nil || token == "" {
+		if err := json.Unmarshal(raw, &token); err != nil {
+			if name == "refresh_token" {
+				invalidRefresh = true
+			}
 			continue
 		}
-		candidate := &issued
-		if wireName != name {
-			candidate = &aliases
+		if token == "" {
+			continue // An empty or null optional token is equivalent to omission.
 		}
 		switch name {
 		case "access_token":
-			if candidate.AccessToken == "" && ValidAccessToken(token) {
-				candidate.AccessToken = token
+			if ValidAccessToken(token) {
+				ambiguousAccess = ambiguousAccess || (issued.AccessToken != "" && issued.AccessToken != token)
+				issued.AccessToken = token
 			}
 		case "refresh_token":
-			if (candidate.RefreshToken == "" || candidate.RefreshToken == previousRefresh) && ValidRefreshToken(token) {
-				candidate.RefreshToken = token
+			if !ValidRefreshToken(token) {
+				invalidRefresh = true
+			} else if token != previousRefresh {
+				ambiguousRefresh = ambiguousRefresh || (issued.RefreshToken != "" && issued.RefreshToken != token)
+				issued.RefreshToken = token
 			}
 		}
 	}
-	// Prefer an exact-name replacement in either field order. An alias is
-	// only a fallback for cleanup, never evidence for publishing a grant.
-	if issued.AccessToken == "" {
-		issued.AccessToken = aliases.AccessToken
+	if ambiguousAccess {
+		issued.AccessToken = ""
 	}
-	if issued.RefreshToken == previousRefresh {
+	if ambiguousRefresh || (invalidRefresh && issued.RefreshToken == "") {
+		// Keep a known access token for cleanup. The issuer must resolve
+		// replacement refresh tokens we cannot identify or use.
 		issued.RefreshToken = ""
-	}
-	if issued.RefreshToken == "" && aliases.RefreshToken != previousRefresh {
-		issued.RefreshToken = aliases.RefreshToken
+		return grant, issued, ErrAmbiguousRotation
 	}
 
-	return issued, rejected
-}
-
-func tokenResponseField(name string) string {
-	for _, field := range []string{"access_token", "refresh_token", "id_token", "token_type", "expires_in", "scope", "earliest_refresh_at"} {
-		if strings.EqualFold(name, field) {
-			return field
-		}
+	if !valid {
+		return grant, issued, errInvalidJSONResponse
 	}
-	return ""
+	return grant, issued, nil
 }
 
 // ValidAccessToken accepts an omitted value or the Bearer token syntax.
@@ -233,7 +320,7 @@ func (c Client) Exchange(ctx context.Context, clientID, code, verifier, redirect
 		"code":          {code},
 		"code_verifier": {verifier},
 		"redirect_uri":  {redirect},
-		"resource":      {APIBaseURL},
+		"resource":      {config.OpenAIBaseURL},
 	})
 }
 
@@ -242,7 +329,7 @@ func (c Client) Refresh(ctx context.Context, clientID, refreshToken string) (Tok
 		"grant_type":    {"refresh_token"},
 		"client_id":     {clientID},
 		"refresh_token": {refreshToken},
-		"resource":      {APIBaseURL},
+		"resource":      {config.OpenAIBaseURL},
 	})
 }
 
@@ -303,12 +390,16 @@ type modelCatalog []Model
 
 func (catalog *modelCatalog) UnmarshalJSON(data []byte) error {
 	var envelope map[string]json.RawMessage
-	if josejson.Unmarshal(data, &envelope) != nil || envelope["error"] != nil {
+	if josejson.Unmarshal(data, &envelope) != nil {
 		return errInvalidJSONResponse
 	}
-	field, value := uniqueJSONField(data, "models")
+	for name := range envelope {
+		if strings.EqualFold(name, "error") || (name != "models" && strings.EqualFold(name, "models")) {
+			return errInvalidJSONResponse
+		}
+	}
 	var entries []*Model
-	if field != "models" || json.Unmarshal(value, &entries) != nil || entries == nil {
+	if json.Unmarshal(envelope["models"], &entries) != nil || entries == nil {
 		return errInvalidJSONResponse
 	}
 	decoded := make(modelCatalog, len(entries))

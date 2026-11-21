@@ -55,7 +55,11 @@ func jsonResponse(status int, value any) (*http.Response, error) {
 func testClient(t *testing.T) *Client {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "credentials")
-	if err := storage.EnsureDir(dir); err != nil {
+	files, err := storage.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	provider := oauth.NewClient()
@@ -63,19 +67,17 @@ func testClient(t *testing.T) *Client {
 		t.Error("unexpected network request")
 		return nil, errors.New("unexpected")
 	})
-	return &Client{dir: dir, now: time.Now, provider: provider}
+	return &Client{files: files, dir: dir, now: time.Now, provider: provider}
 }
 
 func seed(t *testing.T, c *Client, exp time.Time) {
 	t.Helper()
 	c.selected = "oaiapp_test"
-	accounts, err := c.loadStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts.HostID, accounts.Active = "host", c.selected
-	saved := credential{Account: Account{ClientID: c.selected, Subject: "subject", ExpiresAt: exp}, AccessToken: "access", RefreshToken: "refresh", Scopes: oauth.Scope}
-	if err := accounts.saveCredential(&saved); err != nil {
+	if err := c.withStore(t.Context(), func(accounts *accountStore) error {
+		accounts.HostID, accounts.Active = "host", c.selected
+		saved := credential{Account: Account{ClientID: c.selected, Subject: "subject", ExpiresAt: exp}, AccessToken: "access", RefreshToken: "refresh", Scopes: oauth.Scope}
+		return accounts.saveCredential(&saved)
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -141,6 +143,10 @@ func TestSignOutRevokesAccessOnlyGrant(t *testing.T) {
 		case oauth.Issuer + "/revoke":
 			if err := r.ParseForm(); err != nil {
 				return nil, err
+			}
+			saved, err := c.loadCredential(c.selected)
+			if err != nil || saved.signedIn() || saved.Pending == nil || !saved.Pending.RevokeOnly || saved.Pending.Response.AccessToken != "access" {
+				t.Fatalf("access-only sign-out did not checkpoint its token: %v", err)
 			}
 			revoked = r.Form.Get("token") == "access" && r.Form.Get("token_type_hint") == "access_token"
 			return jsonResponse(http.StatusOK, nil)

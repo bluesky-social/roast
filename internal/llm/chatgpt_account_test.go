@@ -8,11 +8,12 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bluesky-social/roast/internal/auth/chatgpt/chatgpttest"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
-	storePath := chatgpttest.SeedAccounts(t, "account-b")
+	storePath := testutil.SeedChatGPTAccounts(t, "account-b")
 	if err := os.WriteFile(storePath, []byte("invalid state"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -36,12 +37,22 @@ func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out struct{ Answer string }
-	if err := client.CompleteStructured(request, "system", "user", "submit", &out); !errors.Is(err, ErrAuth) || !errors.Is(err, initialErr) {
+	if err := client.CompleteStructured(request, "system", "user", "submit", &out); !errors.Is(err, ErrAuth) || !errors.Is(err, chatgpt.ErrAuth) || !errors.Is(err, initialErr) {
 		t.Fatalf("original operation error = %v, want cached authentication failure", err)
 	}
 	// Starting another operation captures the new selection even if its parent
 	// context carries an old snapshot. Construction does not retrieve a token.
-	if _, err := chatGPTAccount(WithPinnedChatGPTAccount(operation)); err != nil {
+	next := WithPinnedChatGPTAccount(operation)
+	if _, err := chatGPTAccount(next); err != nil {
 		t.Fatalf("next operation failed to capture the repaired store: %v", err)
+	}
+	client, err = New(next, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The repaired store has no selected account. Preserve both error categories
+	// when the account opens successfully but cannot supply a token.
+	if err := client.CompleteStructured(next, "system", "user", "submit", &out); !errors.Is(err, ErrAuth) || !errors.Is(err, chatgpt.ErrAuth) {
+		t.Fatalf("missing credentials did not reach the review as an authentication error: %v", err)
 	}
 }

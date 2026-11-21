@@ -58,7 +58,9 @@ func newDoctorCommand(stdout io.Writer) *cobra.Command {
 				}
 			} else {
 				for _, result := range results {
-					fmt.Fprintf(stdout, "%-5s %-18s %s\n", strings.ToUpper(string(result.Status)), result.Name, textsafe.Line(result.Detail))
+					if _, err := fmt.Fprintf(stdout, "%-5s %-18s %s\n", strings.ToUpper(string(result.Status)), result.Name, textsafe.Line(result.Detail)); err != nil {
+						return fmt.Errorf("write doctor results: %w", err)
+					}
 				}
 			}
 			for _, result := range results {
@@ -116,7 +118,8 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			check.role, check.err = flip.Role, err
 		}
 		if check.err == nil && check.role.Protocol == "chatgpt" {
-			usesChatGPT = true
+			check.err = config.ValidateRole(check.name, check.role)
+			usesChatGPT = usesChatGPT || check.err == nil
 		}
 	}
 	if usesChatGPT {

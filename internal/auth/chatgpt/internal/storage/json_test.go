@@ -16,11 +16,38 @@ import (
 	"time"
 )
 
+func TestReadJSONRejectsCorruptAndTrailingData(t *testing.T) {
+	files := testStore(t)
+	path := filepath.Join(testStorageDir(t), "accounts.json")
+	if err := os.WriteFile(path, []byte(`"valid" "unexpected"`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := "prior"
+	if err := files.ReadJSON(path, &got); err == nil || got != "prior" {
+		t.Fatal("trailing JSON reached the caller")
+	}
+	if err := os.WriteFile(path, []byte{0}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.ReadJSON(path, &got); err == nil {
+		t.Fatal("accepted corrupt sparse credential file")
+	}
+}
+
 func TestWriteJSONReservesStoreNames(t *testing.T) {
+	files := testStore(t)
 	dir := testStorageDir(t)
-	err := WithLock(t.Context(), dir, func() error {
+	if err := files.WriteJSON(t.Context(), filepath.Join(dir, "accounts.json"), "test"); err == nil {
+		t.Fatal("wrote credentials without holding the lock")
+	}
+	var expired Store
+	err := files.WithLock(t.Context(), dir, func(locked Store) error {
+		expired = locked
 		for _, name := range []string{lockFileName, "SESSION.LOCK", ".credentials-staged"} {
-			if err := WriteJSON(filepath.Join(dir, name), "test"); err == nil {
+			if err := locked.WriteJSON(t.Context(), filepath.Join(dir, name), "test"); err == nil {
 				t.Errorf("accepted reserved name %q", name)
 			}
 		}
@@ -29,17 +56,17 @@ func TestWriteJSONReservesStoreNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := expired.WriteJSON(t.Context(), filepath.Join(dir, "accounts.json"), "test"); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("write after the lock was released: %v", err)
+	}
 }
 
 func TestCleanupInterruptedWrite(t *testing.T) {
+	files := testStore(t)
 	if os.Getenv("ROAST_TEST_INTERRUPTED_WRITE") == "1" {
 		dir := os.Getenv("ROAST_TEST_LOCK_DIR")
-		err := WithLock(t.Context(), dir, func() error {
-			parent, err := openPrivateDirectory(dir)
-			if err != nil {
-				return err
-			}
-			defer parent.Close()
+		err := files.WithLock(t.Context(), dir, func(locked Store) error {
+			parent := locked.(localFiles).lockedDir.File
 			f, err := privateTemp(parent)
 			if err != nil {
 				return err
@@ -62,7 +89,9 @@ func TestCleanupInterruptedWrite(t *testing.T) {
 	}
 	dir := testStorageDir(t)
 	committed := filepath.Join(dir, "accounts.json")
-	if err := WriteJSON(committed, "previous credential"); err != nil {
+	if err := files.WithLock(t.Context(), dir, func(locked Store) error {
+		return locked.WriteJSON(t.Context(), committed, "previous credential")
+	}); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestCleanupInterruptedWrite$")
@@ -109,19 +138,20 @@ func TestCleanupInterruptedWrite(t *testing.T) {
 	if orphan == "" {
 		t.Fatal("crashed writer left no temporary file to exercise cleanup")
 	}
-	if err := WithLock(t.Context(), dir, func() error { return CleanupTemps(dir) }); err != nil {
+	if err := files.WithLock(t.Context(), dir, func(Store) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("orphan remains: %v", err)
 	}
 	var saved string
-	if err := ReadJSON(committed, &saved); err != nil || saved != "previous credential" {
+	if err := files.ReadJSON(committed, &saved); err != nil || saved != "previous credential" {
 		t.Fatalf("cleanup changed committed data: %q, %v", saved, err)
 	}
 }
 
 func TestCleanupWaitsForActiveWriter(t *testing.T) {
+	files := testStore(t)
 	dir := testStorageDir(t)
 	staged := make(chan string, 1)
 	release := make(chan struct{})
@@ -129,12 +159,8 @@ func TestCleanupWaitsForActiveWriter(t *testing.T) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		done <- WithLock(t.Context(), dir, func() error {
-			parent, err := openPrivateDirectory(dir)
-			if err != nil {
-				return err
-			}
-			defer parent.Close()
+		done <- files.WithLock(t.Context(), dir, func(locked Store) error {
+			parent := locked.(localFiles).lockedDir.File
 			f, err := privateTemp(parent)
 			if err != nil {
 				return err
@@ -166,7 +192,7 @@ func TestCleanupWaitsForActiveWriter(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	err := WithLock(ctx, dir, func() error { return CleanupTemps(dir) })
+	err := files.WithLock(ctx, dir, func(Store) error { return nil })
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cleanup did not wait for writer: %v", err)
 	}
@@ -178,16 +204,17 @@ func TestCleanupWaitsForActiveWriter(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if err := WithLock(t.Context(), dir, func() error { return CleanupTemps(dir) }); err != nil {
+	if err := files.WithLock(t.Context(), dir, func(Store) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	var saved string
-	if err := ReadJSON(filepath.Join(dir, "accounts.json"), &saved); err != nil || saved != "new credential" {
+	if err := files.ReadJSON(filepath.Join(dir, "accounts.json"), &saved); err != nil || saved != "new credential" {
 		t.Fatalf("writer lost data: %q, %v", saved, err)
 	}
 }
 
 func TestCleanupLeavesUnsafeAndUnrelatedEntries(t *testing.T) {
+	files := testStore(t)
 	for _, kind := range []string{"directory", "symlink", "public file", "unrelated file"} {
 		t.Run(kind, func(t *testing.T) {
 			dir := testStorageDir(t)
@@ -220,11 +247,11 @@ func TestCleanupLeavesUnsafeAndUnrelatedEntries(t *testing.T) {
 				}
 			case "unrelated file":
 				path = filepath.Join(dir, "accounts.json")
-				if err := WriteJSON(path, "untouched"); err != nil {
+				if err := os.WriteFile(path, []byte("untouched"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := WithLock(t.Context(), dir, func() error { return CleanupTemps(dir) }); err != nil {
+			if err := files.WithLock(t.Context(), dir, func(Store) error { return nil }); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Lstat(path); err != nil {
@@ -243,31 +270,33 @@ func (v cancelDuringWrite) MarshalJSON() ([]byte, error) {
 }
 
 func TestCanceledWriteRetainsPreviousCredential(t *testing.T) {
+	files := testStore(t)
 	dir := testStorageDir(t)
 	path := filepath.Join(dir, "accounts.json")
-	if err := WithLock(t.Context(), dir, func() error {
-		if err := WriteJSON(path, "previous credential"); err != nil {
+	if err := files.WithLock(t.Context(), dir, func(locked Store) error {
+		if err := locked.WriteJSON(t.Context(), path, "previous credential"); err != nil {
 			return err
 		}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		return WriteJSONContext(ctx, path, cancelDuringWrite{cancel})
+		return locked.WriteJSON(ctx, path, cancelDuringWrite{cancel})
 	}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("write returned %v", err)
 	}
 	var saved string
-	if err := ReadJSON(path, &saved); err != nil || saved != "previous credential" {
+	if err := files.ReadJSON(path, &saved); err != nil || saved != "previous credential" {
 		t.Fatalf("saved %q after cancellation: %v", saved, err)
 	}
 }
 
 func TestCredentialFileStaysReadableWithRestrictiveUmask(t *testing.T) {
+	files := testStore(t)
 	dir := testStorageDir(t)
 	path := filepath.Join(dir, "accounts.json")
 	previous := syscall.Umask(0477)
 	defer syscall.Umask(previous)
-	err := WithLock(t.Context(), dir, func() error {
-		return WriteJSON(path, "credential")
+	err := files.WithLock(t.Context(), dir, func(locked Store) error {
+		return locked.WriteJSON(t.Context(), path, "credential")
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -280,7 +309,7 @@ func TestCredentialFileStaysReadableWithRestrictiveUmask(t *testing.T) {
 		t.Errorf("credential file permissions = %o, want 0600", got)
 	}
 	var saved string
-	if err := ReadJSON(path, &saved); err != nil || saved != "credential" {
+	if err := files.ReadJSON(path, &saved); err != nil || saved != "credential" {
 		t.Fatalf("unreadable replacement: %q, %v", saved, err)
 	}
 }

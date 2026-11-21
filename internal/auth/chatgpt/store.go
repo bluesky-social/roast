@@ -12,6 +12,7 @@ import (
 )
 
 type accountStore struct {
+	files     storage.Store
 	path      string
 	HostID    string                `json:"host_id"`
 	Active    string                `json:"active"`
@@ -24,8 +25,12 @@ func (c *Client) storePath() string {
 }
 
 func (c *Client) loadStore() (*accountStore, error) {
-	s := &accountStore{path: c.storePath()}
-	err := storage.ReadJSON(s.path, s)
+	return loadAccountStore(c.files, c.storePath())
+}
+
+func loadAccountStore(files storage.Store, path string) (*accountStore, error) {
+	s := &accountStore{files: files, path: path}
+	err := s.files.ReadJSON(s.path, s)
 	if errors.Is(err, os.ErrNotExist) {
 		s.Accounts = make(map[string]credential)
 		return s, nil
@@ -41,7 +46,7 @@ func (c *Client) loadStore() (*accountStore, error) {
 	}
 	for id, saved := range s.Accounts {
 		if saved.PendingRegistration && (id == s.Active || saved.Subject != "" || saved.Email != "" ||
-			saved.IDToken != "" || saved.AccessToken != "" || saved.RefreshToken != "" || saved.Pending != nil ||
+			saved.IDToken != "" || saved.AccessToken != "" || saved.RefreshToken != "" || (saved.Pending != nil && !saved.Pending.RevokeOnly) ||
 			saved.Scopes != "" || !saved.ExpiresAt.IsZero() || saved.EarliestRefreshAt != 0) {
 			return nil, errors.New("pending ChatGPT registration is active or contains identity or grant data")
 		}
@@ -54,20 +59,20 @@ func (c *Client) loadStore() (*accountStore, error) {
 
 // withStore serializes updates and token rotation across Roast processes.
 func (c *Client) withStore(ctx context.Context, fn func(*accountStore) error) error {
-	return storage.WithLock(ctx, c.dir, func() error {
-		if err := storage.CleanupTemps(c.dir); err != nil {
-			return fmt.Errorf("clean up interrupted ChatGPT credential writes: %w", err)
-		}
-		s, err := c.loadStore()
+	return c.files.WithLock(ctx, c.dir, func(locked storage.Store) error {
+		s, err := loadAccountStore(locked, c.storePath())
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		return fn(s)
 	})
 }
 
-func (s *accountStore) save() error {
-	return storage.WriteJSON(s.path, s)
+func (s *accountStore) save(ctx context.Context) error {
+	return s.files.WriteJSON(ctx, s.path, s)
 }
 
 // Track explicit selections even when the active account stays the same.
@@ -92,15 +97,15 @@ func (s *accountStore) saveCredential(saved *credential) error {
 func (s *accountStore) saveCredentialContext(ctx context.Context, saved *credential) error {
 	saved.Generation = rand.Text()
 	s.Accounts[saved.ClientID] = *saved
-	return storage.WriteJSONContext(ctx, s.path, s)
+	return s.files.WriteJSON(ctx, s.path, s)
 }
 
-func (s *accountStore) ensureHost() error {
+func (s *accountStore) ensureHost(ctx context.Context) error {
 	if s.HostID != "" {
 		return nil
 	}
 	s.HostID = newHostID()
-	return s.save()
+	return s.save(ctx)
 }
 
 // The provider expects a version 4 UUID in URN form.

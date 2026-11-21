@@ -18,9 +18,13 @@ func newChatGPTClient(ctx context.Context, cfg ClientConfig) (Client, error) {
 	// finder results available for reporting and severity gating.
 	return newChatGPTResponsesClient(ctx, cfg, func(requestCtx context.Context) (string, error) {
 		if initErr != nil {
-			return "", fmt.Errorf("%w: initialize Sign in with ChatGPT: %w", chatgpt.ErrAuth, initErr)
+			return "", fmt.Errorf("%w: %w: initialize Sign in with ChatGPT: %w", ErrAuth, chatgpt.ErrAuth, initErr)
 		}
-		return auth.Token(requestCtx)
+		token, err := auth.Token(requestCtx)
+		if errors.Is(err, chatgpt.ErrAuth) {
+			return "", fmt.Errorf("%w: %w", ErrAuth, err)
+		}
+		return token, err
 	}, http.DefaultTransport)
 }
 

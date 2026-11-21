@@ -66,7 +66,9 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(stdout, "ChatGPT account connected. Review usage and permissions at https://chatgpt.com/settings/usage")
+			if _, err := fmt.Fprintln(stdout, "ChatGPT account connected. Review usage and permissions at https://chatgpt.com/settings/usage"); err != nil {
+				return fmt.Errorf("ChatGPT account connected, but could not write confirmation: %w", err)
+			}
 			return nil
 		},
 	}
@@ -92,12 +94,15 @@ func newChatGPTStatusCommand(stdout io.Writer) *cobra.Command {
 				return err
 			}
 			if len(accounts) == 0 {
-				fmt.Fprintln(stdout, "No ChatGPT accounts. Run roast chatgpt signin.")
+				_, err := fmt.Fprintln(stdout, "No ChatGPT accounts. Run roast chatgpt signin.")
+				return err
 			}
 			for _, account := range accounts {
-				fmt.Fprintf(stdout, "%s  %s  active=%t signed_in=%t plan_enabled=%t pending_registration=%t\n",
-					textsafe.Text(account.ClientID), textsafe.Text(account.Email),
-					account.Active, account.SignedIn, account.PlanEnabled, account.PendingRegistration)
+				if _, err := fmt.Fprintf(stdout, "%s  %s  active=%t signed_in=%t plan_enabled=%t pending_registration=%t\n",
+					textsafe.Line(account.ClientID), textsafe.Line(account.Email),
+					account.Active, account.SignedIn, account.PlanEnabled, account.PendingRegistration); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
@@ -132,7 +137,7 @@ func newChatGPTSelectCommand() *cobra.Command {
 func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "signout [CLIENT_ID]",
-		Short: "Revoke and clear this registration's tokens, retaining its identity",
+		Short: "Clear this registration's local tokens and ask ChatGPT to revoke them",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.MaximumNArgs(1)(cmd, args); err != nil {
 				return err
@@ -156,7 +161,9 @@ func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 			if err := client.SignOut(ctx, id); err != nil {
 				return err
 			}
-			fmt.Fprintln(stdout, "Signed out of ChatGPT.")
+			if _, err := fmt.Fprintln(stdout, "ChatGPT credentials cleared from this device. To confirm remote disconnection, check connected apps in ChatGPT Settings."); err != nil {
+				return fmt.Errorf("cleared local ChatGPT credentials, but could not write confirmation: %w", err)
+			}
 			return nil
 		},
 	}
@@ -180,7 +187,9 @@ func newChatGPTModelsCommand(stdout io.Writer) *cobra.Command {
 			}
 			for _, model := range models {
 				if model.Visibility == "list" {
-					fmt.Fprintf(stdout, "%s\t%s\n", textsafe.Text(model.Slug), textsafe.Text(model.DisplayName))
+					if _, err := fmt.Fprintf(stdout, "%s\t%s\n", textsafe.Line(model.Slug), textsafe.Line(model.DisplayName)); err != nil {
+						return err
+					}
 				}
 			}
 			return nil

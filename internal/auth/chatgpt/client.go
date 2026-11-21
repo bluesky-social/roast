@@ -16,9 +16,13 @@ import (
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
-var ErrNetwork = oauth.ErrNetwork
+var (
+	ErrAuth    = oauth.ErrAuth
+	ErrNetwork = oauth.ErrNetwork
+)
 
 type Client struct {
+	files    storage.Store
 	dir      string
 	selected string
 	provider oauth.Client
@@ -42,7 +46,8 @@ func tokenGrantContext(parent context.Context) (context.Context, context.CancelF
 
 // New opens Roast's registration store and pins the active registration.
 func New() (*Client, error) {
-	if err := storage.CheckSupported(); err != nil {
+	files, err := storage.Open()
+	if err != nil {
 		return nil, err
 	}
 	dir, err := os.UserConfigDir()
@@ -50,6 +55,7 @@ func New() (*Client, error) {
 		return nil, err
 	}
 	c := &Client{
+		files:    files,
 		dir:      filepath.Join(dir, "roast", "chatgpt-plan"),
 		provider: oauth.NewClient(),
 		now:      time.Now,
@@ -124,18 +130,20 @@ func (c *Client) Select(ctx context.Context, id string) error {
 			return errors.New("account is signed out; run roast chatgpt signin --account CLIENT_ID")
 		}
 		accounts.setActive(id)
-		return accounts.save()
+		return accounts.save(ctx)
 	})
 }
 
 // SignOut attempts revocation and clears the local grant. An empty ID uses
 // the registration this client selected before waiting for the store lock.
+// Success confirms local cleanup and an accepted revocation request for any
+// known token. Only the issuer can confirm the state of an unseen replacement.
 func (c *Client) SignOut(ctx context.Context, id string) error {
 	if id == "" {
 		id = c.selected
 	}
 	if id == "" {
-		return errors.New("no active ChatGPT account")
+		return errors.New("no active ChatGPT account. Use roast chatgpt status to find the registration, then run roast chatgpt signout CLIENT_ID")
 	}
 	return c.withStore(ctx, func(accounts *accountStore) error {
 		saved, err := accounts.credential(id)
@@ -143,23 +151,33 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 			return err
 		}
 
+		// Include an explicit sign-out's deselection in any recovery checkpoint.
+		if accounts.Active == id {
+			accounts.setActive("")
+		}
 		token, tokenType := saved.revocationToken()
+		unknownRefresh := saved.Pending != nil && saved.Pending.UnknownRefresh
 		var remoteErr error
+		if token == "" && (saved.PendingRegistration || (saved.Pending != nil && saved.Pending.RevokeOnly)) {
+			// A prior exchange or revocation may already have reached the issuer.
+			remoteErr = unconfirmedRevocation(id)
+		}
 		if token != "" {
+			// A crash during revocation must never leave a locally usable grant.
+			if err := accounts.markForRevocation(&saved, token, tokenType, unknownRefresh); err != nil {
+				return errors.Join(fmt.Errorf("could not confirm saving the pending sign-out; repair credential storage and retry: %w", err), unconfirmedRevocation(id))
+			}
 			// Revocation precedes local cleanup. Bound it across discovery and
 			// retries so another command can acquire the session lock.
 			revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			err := c.provider.Revoke(revokeCtx, id, token, tokenType)
 			cancel()
-			if err != nil {
+			if err != nil || unknownRefresh {
 				remoteErr = errors.Join(unconfirmedRevocation(id), ctx.Err())
 			}
 		}
 
 		saved.clearGrant()
-		if accounts.Active == id {
-			accounts.setActive("")
-		}
 		if err := accounts.saveCredential(&saved); err != nil {
 			return errors.Join(fmt.Errorf("could not confirm local sign-out from ChatGPT account %q: %w", id, err), remoteErr)
 		}

@@ -24,8 +24,10 @@ type credential struct {
 // A refresh can rotate the token before the identity keys are available.
 // Keep the response and its receipt time together until validation succeeds.
 type pendingRefresh struct {
-	Response   oauth.TokenResponse `json:"response"`
-	ReceivedAt time.Time           `json:"received_at"`
+	RevokeOnly     bool                `json:"revoke_only,omitempty"`
+	UnknownRefresh bool                `json:"unknown_refresh,omitempty"`
+	Response       oauth.TokenResponse `json:"response"`
+	ReceivedAt     time.Time           `json:"received_at"`
 }
 
 const planScope = "chatgpt.tokens.use.direct"
@@ -44,10 +46,15 @@ func (v credential) planEnabled() bool {
 	return v.AccessToken != "" && slices.Contains(scopes, planScope) && slices.Contains(scopes, "resource.invoke")
 }
 
+// OpenAI's sign-out flow revokes the refresh token for the session. Use the
+// access token when it is the only known token the issuer can revoke.
 func (v credential) revocationToken() (token, tokenType string) {
 	refresh, access := v.RefreshToken, v.AccessToken
 	if v.Pending != nil {
 		pending := v.Pending.Response
+		if v.Pending.RevokeOnly {
+			refresh, access = "", ""
+		}
 		if pending.RefreshToken != "" && oauth.ValidRefreshToken(pending.RefreshToken) {
 			refresh = pending.RefreshToken
 		}

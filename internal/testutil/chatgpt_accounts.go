@@ -1,17 +1,17 @@
-// Package chatgpttest provides synthetic ChatGPT registrations for integration tests.
-package chatgpttest
+//go:build darwin || linux
+
+package testutil
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
-// SeedAccounts seeds an isolated user config directory and returns the store path.
-func SeedAccounts(t *testing.T, active string, others ...string) string {
+// SeedChatGPTAccounts seeds an isolated user config directory and returns the store path.
+func SeedChatGPTAccounts(t *testing.T, active string, others ...string) string {
 	t.Helper()
 	root := t.TempDir()
 	for _, name := range []string{"HOME", "APPDATA", "XDG_CONFIG_HOME"} {
@@ -41,11 +41,15 @@ func SeedAccounts(t *testing.T, active string, others ...string) string {
 		}
 	}
 	path := filepath.Join(dir, "accounts.json")
-	if err := storage.WriteJSON(path, map[string]any{
+	data, err := json.Marshal(map[string]any{
 		"host_id":  "urn:uuid:00000000-0000-4000-8000-000000000001",
 		"active":   active,
 		"accounts": accounts,
-	}); err != nil {
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	return path

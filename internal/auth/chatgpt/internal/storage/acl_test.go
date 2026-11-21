@@ -13,10 +13,11 @@ import (
 )
 
 func TestStoreRejectsDarwinACLs(t *testing.T) {
+	files := testStore(t)
 	requireDarwinACL(t)
 	root := t.TempDir()
 	setACL(t, root, "everyone allow list,search,readattr,readsecurity,file_inherit,directory_inherit")
-	err := EnsureDir(filepath.Join(root, "store"))
+	err := files.ensureDir(filepath.Join(root, "store"))
 	if err == nil || !strings.Contains(err.Error(), "extended ACLs") {
 		t.Fatalf("inherited ACL accepted: %v", err)
 	}
@@ -27,18 +28,19 @@ func TestStoreRejectsDarwinACLs(t *testing.T) {
 	}
 	setACL(t, path, "everyone allow read")
 	var data map[string]any
-	if err := ReadJSON(path, &data); err == nil || !strings.Contains(err.Error(), "extended ACLs") {
+	if err := files.ReadJSON(path, &data); err == nil || !strings.Contains(err.Error(), "extended ACLs") {
 		t.Fatalf("credentials with an extended ACL were readable: %v", err)
 	}
 }
 
 func TestStoreChecksDarwinACLsBeforeWriting(t *testing.T) {
+	files := testStore(t)
 	requireDarwinACL(t)
 	dir := testStorageDir(t)
 	path := filepath.Join(dir, "accounts.json")
-	err := WithLock(t.Context(), dir, func() error {
+	err := files.WithLock(t.Context(), dir, func(locked Store) error {
 		setACL(t, dir, "everyone allow list,search,readattr")
-		return WriteJSON(path, "synthetic credential")
+		return locked.WriteJSON(t.Context(), path, "synthetic credential")
 	})
 	if err == nil || !strings.Contains(err.Error(), "extended ACLs") {
 		t.Fatalf("accepted an ACL added after acquiring the store lock: %v", err)
@@ -89,20 +91,21 @@ func TestUnixStorageRejectsOtherOwners(t *testing.T) {
 }
 
 func TestFirstWriteBelowSearchOnlyAncestor(t *testing.T) {
+	files := testStore(t)
 	if os.Geteuid() == 0 {
 		t.Skip("requires Unix permission enforcement for an unprivileged user")
 	}
 	parent := t.TempDir()
 	store := filepath.Join(parent, "store")
-	if err := EnsureDir(store); err != nil {
+	if err := files.ensureDir(store); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(parent, 0100); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0700) })
-	err := WithLock(t.Context(), store, func() error {
-		return WriteJSON(filepath.Join(store, "accounts.json"), "synthetic account")
+	err := files.WithLock(t.Context(), store, func(locked Store) error {
+		return locked.WriteJSON(t.Context(), filepath.Join(store, "accounts.json"), "synthetic account")
 	})
 	if err != nil {
 		t.Fatalf("initial write below a search-only ancestor: %v", err)
@@ -123,7 +126,30 @@ func TestPrivateFileInfoAcceptsUnlinkedOpenFile(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := privateFileInfo(f, false); err != nil {
+	if _, err := testStore(t).privateFileInfo(f, false); err != nil {
 		t.Fatalf("replacing the path invalidated the private open file: %v", err)
+	}
+}
+
+func TestFilesystemPermissions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		allowed bool
+	}{
+		{"Linux ext4", checkLinuxMount(0xef53), true},
+		{"Linux tmpfs", checkLinuxMount(0x01021994), true},
+		{"Linux NFS", checkLinuxMount(0x6969), false},
+		{"Linux FUSE", checkLinuxMount(0x65735546), false},
+		{"Darwin APFS", checkDarwinMount("apfs", true), true},
+		{"Darwin HFS+", checkDarwinMount("hfs", true), true},
+		{"Darwin without local ownership", checkDarwinMount("apfs", false), false},
+		{"Darwin unsupported volume", checkDarwinMount("smbfs", true), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if (tc.err == nil) != tc.allowed {
+				t.Fatalf("allowed = %v, error = %v", tc.allowed, tc.err)
+			}
+		})
 	}
 }

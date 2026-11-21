@@ -64,7 +64,11 @@ func TestChatGPTRejectsRoleOverrides(t *testing.T) {
 			t.Setenv(variable, "private-value")
 			cfg := Defaults()
 			cfg.InferenceProfiles["finder"] = InferenceProfile{Protocol: "chatgpt", Model: "gpt-test", MaxOutputTokens: 1024}
-			if _, err := cfg.ResolveRole("finder"); err == nil || strings.Contains(err.Error(), "private-value") {
+			role, err := cfg.ResolveRole("finder")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateRole("finder", role); err == nil || strings.Contains(err.Error(), "private-value") {
 				t.Fatalf("unsafe validation: %v", err)
 			}
 		})
@@ -124,9 +128,81 @@ func TestChatGPTProtocolEnvironmentOverride(t *testing.T) {
 		{Protocol: "responses", SessionHeader: "X-Session"},
 	} {
 		cfg.InferenceProfiles["finder"] = profile
-		if _, err := cfg.ResolveRole("finder"); err == nil {
+		role, err := cfg.ResolveRole("finder")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateRole("finder", role); err == nil {
 			t.Fatalf("profile HTTP settings followed chatgpt override: %#v", profile)
 		}
+	}
+}
+
+func TestCLIProtocolCanRestoreOriginalProfileCredential(t *testing.T) {
+	t.Setenv("ROAST_FINDER_PROTOCOL", "chatgpt")
+	cfg := Defaults()
+	cfg.InferenceProfiles["finder"] = InferenceProfile{Protocol: "responses", Model: "test", APIKey: "original", MaxOutputTokens: 128}
+	role, err := cfg.ResolveRole("finder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, protocol := range []string{"chat", "responses"} {
+		if got := OverrideEndpoint("finder", role, nil, &protocol); ValidateRole("finder", got) != nil || got.APIKey != "original" {
+			t.Fatalf("restoring the configured provider via %s lost its credential", protocol)
+		}
+	}
+	protocol := "anthropic"
+	if got := OverrideEndpoint("finder", role, nil, &protocol); got.APIKey == "original" {
+		t.Fatal("profile credential followed the override to another provider")
+	}
+}
+
+func TestProtocolFlagKeepsExplicitRoleEndpointPairedWithKey(t *testing.T) {
+	for _, first := range []string{"chatgpt", "anthropic"} {
+		t.Run(first, func(t *testing.T) {
+			endpoint := DefaultBaseURL(first)
+			t.Setenv("ROAST_FINDER_PROTOCOL", first)
+			t.Setenv("ROAST_FINDER_BASE_URL", endpoint)
+			t.Setenv("ROAST_FINDER_API_KEY", "role-key")
+			cfg := Defaults()
+			cfg.InferenceProfiles["finder"] = InferenceProfile{Protocol: "chatgpt", Model: "test", MaxOutputTokens: 128}
+			role, err := cfg.ResolveRole("finder")
+			if err != nil {
+				t.Fatal(err)
+			}
+			protocol := "responses"
+			if first == "chatgpt" {
+				protocol = "anthropic"
+			}
+			got := OverrideEndpoint("finder", role, nil, &protocol)
+			if err := ValidateRole("finder", got); err != nil || got.BaseURL != endpoint || got.APIKey != "role-key" {
+				t.Fatalf("explicit role endpoint lost: %s, %v", got.BaseURL, err)
+			}
+		})
+	}
+}
+
+func TestProtocolOverrideKeepsExplicitProfileEndpointWithRoleKey(t *testing.T) {
+	t.Setenv("ROAST_FINDER_API_KEY", "role-key")
+	cfg := Defaults()
+	cfg.InferenceProfiles["finder"] = InferenceProfile{Protocol: "responses", BaseURL: OpenAIBaseURL, Model: "test", MaxOutputTokens: 128}
+	for _, source := range []string{"flag", "environment"} {
+		t.Run(source, func(t *testing.T) {
+			protocol := "anthropic"
+			if source == "environment" {
+				t.Setenv("ROAST_FINDER_PROTOCOL", protocol)
+			}
+			role, err := cfg.ResolveRole("finder")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source == "flag" {
+				role = OverrideEndpoint("finder", role, nil, &protocol)
+			}
+			if role.BaseURL != OpenAIBaseURL || role.APIKey != "role-key" {
+				t.Fatalf("role key moved to %s", role.BaseURL)
+			}
+		})
 	}
 }
 
@@ -156,5 +232,51 @@ func TestSwitchFromChatGPTUsesTheAPIKeyProvidersEndpoint(t *testing.T) {
 				t.Fatalf("switching from ChatGPT should use the endpoint paired with OPENAI_API_KEY, got %s", role.BaseURL)
 			}
 		})
+	}
+}
+
+func TestProtocolFlagRestoresExplicitProfileEndpointAndKey(t *testing.T) {
+	t.Setenv("ROAST_FINDER_PROTOCOL", "chatgpt")
+	t.Setenv("ROAST_FINDER_API_KEY", "")
+	t.Setenv("ROAST_FINDER_BASE_URL", "")
+	cfg := Defaults()
+	cfg.InferenceProfiles["finder"] = InferenceProfile{
+		Protocol: "anthropic", BaseURL: OpenAIBaseURL, APIKey: "profile-key", Model: "test", MaxOutputTokens: 128,
+	}
+	role, err := cfg.ResolveRole("finder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocol := "anthropic"
+	role = OverrideEndpoint("finder", role, nil, &protocol)
+	if err := ValidateRole("finder", role); err != nil || role.BaseURL != OpenAIBaseURL || role.APIKey != "profile-key" {
+		t.Fatalf("restoring the configured protocol changed its credential or endpoint: %s, %v", role.BaseURL, err)
+	}
+}
+
+func TestNamingNewProviderEndpointDoesNotRestorePreviousKey(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("ROAST_FINDER_PROTOCOL", "anthropic")
+	t.Setenv("ANTHROPIC_API_KEY", "destination-key")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic-gateway.example/v1")
+	for _, source := range []string{"", "https://source-gateway.example/v1"} {
+		cfg := Defaults()
+		cfg.InferenceProfiles["finder"] = InferenceProfile{Protocol: "responses", APIKey: "source-key", BaseURL: source, Model: "test", MaxOutputTokens: 128}
+		role, err := cfg.ResolveRole("finder")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, endpoint := range []string{DefaultBaseURL("anthropic"), "https://anthropic-gateway.example/v1"} {
+			got := OverrideEndpoint("finder", role, &endpoint, nil)
+			if got.BaseURL != endpoint || got.APIKey != "destination-key" {
+				t.Fatalf("switching from %q to %q selected the wrong endpoint or credential", source, endpoint)
+			}
+		}
+		for _, endpoint := range []string{"https://api.anthropic.com:443/v1", "https://API.ANTHROPIC.COM./v1", "https://anthropic-gateway.example/custom"} {
+			got := OverrideEndpoint("finder", role, &endpoint, nil)
+			if got.BaseURL != endpoint || got.APIKey == "source-key" {
+				t.Fatalf("source credential reached %q", endpoint)
+			}
+		}
 	}
 }

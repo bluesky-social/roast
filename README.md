@@ -133,7 +133,8 @@ and `roast chatgpt select CLIENT_ID` to switch. To resume a pending sign-in,
 run `roast chatgpt signin --account CLIENT_ID`.
 
 Reviews and `roast doctor` spend plan usage. The output-token setting is a
-local budget estimate. OpenAI controls the response limit. Roast uses fixed
+local budget estimate. OpenAI controls the response length, so a plan call can
+exceed the remaining shared token budget. Roast uses fixed
 OpenAI endpoints and stores credentials in an owner-only local file.
 [ChatGPT credential storage](docs/security-model.md#direct-chatgpt-plan-usage)
 
