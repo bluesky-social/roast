@@ -412,6 +412,8 @@ func TestUnusableReplacementPreservesOnlyAKnownAccessTokenForCleanup(t *testing.
 	for _, body := range []string{
 		`{"access_token":"known","refresh_token":"first","refresh_token":"second"}`,
 		`{"access_token":"known","refresh_token":"bad\ntoken"}`,
+		`{"access_token":"known","refresh_token":17}`,
+		`{"access_token":"known","refresh_token":{}}`,
 	} {
 		var tokens TokenResponse
 		err := readTokenResponse(strings.NewReader(body), "previous", &tokens)

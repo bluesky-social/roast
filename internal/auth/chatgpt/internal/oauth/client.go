@@ -256,8 +256,14 @@ func scanTokenResponse(data []byte, previousRefresh string) (grant, issued Token
 			continue
 		}
 		var token string
-		if json.Unmarshal(raw, &token) != nil || token == "" {
+		if err := json.Unmarshal(raw, &token); err != nil {
+			if name == "refresh_token" {
+				invalidRefresh = true
+			}
 			continue
+		}
+		if token == "" {
+			continue // An empty or null optional token is equivalent to omission.
 		}
 		switch name {
 		case "access_token":
