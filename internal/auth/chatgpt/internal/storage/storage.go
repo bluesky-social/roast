@@ -1,4 +1,4 @@
-// Package storage provides private JSON files and cross-process locks for ChatGPT credentials.
+// Package storage saves ChatGPT credentials in the system keyring.
 package storage
 
 import (
@@ -6,22 +6,13 @@ import (
 	"errors"
 )
 
-// ErrPublished marks a write that became visible before its final directory sync failed.
-var ErrPublished = errors.New("ChatGPT credentials were published")
+// ErrPublished marks a write whose snapshot is visible or may have become
+// visible. A caller must keep a grant that may already be saved.
+var ErrPublished = errors.New("ChatGPT credential update may have been published")
 
-// Store reads and updates private credential files on a supported filesystem.
+// Store reads complete credential snapshots and serializes their updates.
 type Store interface {
-	ReadJSON(path string, dst any) error
-	WriteJSON(ctx context.Context, path string, value any) error
-	WithLock(ctx context.Context, dir string, fn func(Store) error) error
-}
-
-var platformStore Store
-
-// Open selects the native implementation before any credential path is accessed.
-func Open() (Store, error) {
-	if platformStore == nil {
-		return nil, errors.New("ChatGPT sign-in is available on macOS and Linux")
-	}
-	return platformStore, nil
+	ReadJSON(dst any) error
+	WriteJSON(ctx context.Context, value any) error
+	WithLock(ctx context.Context, fn func(Store) error) error
 }
