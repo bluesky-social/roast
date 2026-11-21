@@ -18,6 +18,7 @@ const nudgeToolName = "__roast_continue"
 type agentRunState struct {
 	opts        ConverseOpts
 	model       string
+	chatGPT     bool
 	wd          *workDeadlineState
 	turn        int
 	finalTurn   bool
@@ -136,6 +137,9 @@ func (s *agentRunState) cutoffError(what string, cause error) error {
 		sentinel = ErrNoFinalCall
 	}
 	if cause != nil {
+		if s.chatGPT {
+			return fmt.Errorf("%w; %s: %w: %w", sentinel, what, ErrNoFinalCall, cause)
+		}
 		return fmt.Errorf("%w; %s: %w: %v", sentinel, what, ErrNoFinalCall, cause)
 	}
 	return fmt.Errorf("%w; %s: %w", sentinel, what, ErrNoFinalCall)
@@ -148,7 +152,7 @@ func (s *agentRunState) prepareStep(ctx context.Context, opts fantasy.PrepareSte
 	if ceiling <= 0 {
 		ceiling = defaultInputByteCeiling
 	}
-	if s.turn > 1 && !s.inputWarn && fantasyConversationBytes(s.messages()) > ceiling {
+	if s.turn > 1 && !s.inputWarn && s.conversationBytes(s.messages()) > ceiling {
 		s.inputWarn = true
 		s.inject(fantasy.NewUserMessage(
 			"INPUT BUDGET EXHAUSTED. Do not request more files. Call `" + s.opts.FinalTool + "` now with what you have — partial results beat none.",
@@ -210,7 +214,7 @@ func (m *managedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 	call.ToolChoice = &choice
 	return func(yield func(fantasy.StreamPart) bool) {
 		toolJSON, _ := json.Marshal(call.Tools)
-		release, err := m.client.cfg.Ledger.Reserve(fantasyConversationBytes(call.Prompt)+len(toolJSON)+2048, m.client.cfg.MaxOutputTokens, final)
+		release, err := m.client.cfg.Ledger.Reserve(m.state.conversationBytes(call.Prompt)+len(toolJSON)+2048, m.client.cfg.MaxOutputTokens, final)
 		if err != nil {
 			if final {
 				if m.state.cutoff == nil {
@@ -232,14 +236,23 @@ func (m *managedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 			return
 		}
 		var captureErr *captureError
+		workInterrupted := !m.state.chatGPT || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 		if errors.As(err, &captureErr) {
 			err = permanentModelError{err: err}
-		} else if !final && deadlineReached && ctx.Err() == nil {
+		} else if m.state.chatGPT && deadlineReached && ctx.Err() == nil && (final || !workInterrupted) {
+			m.state.forceFinal(ErrWorkDeadline)
+			err = permanentModelError{err: m.state.cutoffError("work deadline reached", normalizeProviderError(ctx, m.client.cfg.Model, err))}
+		} else if !final && deadlineReached && ctx.Err() == nil && workInterrupted {
 			m.state.forceFinal(ErrWorkDeadline)
 			m.streamFinal(ctx, call, yield)
 			return
 		} else if final && m.state.cutoff != nil {
 			err = m.state.cutoffError("wrap-up call failed", normalizeProviderError(ctx, m.client.cfg.Model, err))
+			if m.state.chatGPT {
+				// Keep the typed error for the caller after Fantasy finishes,
+				// without retrying a cutoff wrap-up call.
+				err = permanentModelError{err: err}
+			}
 		}
 		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
 	}, nil
@@ -277,6 +290,8 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 		usage := Usage{}
 		if finish != nil {
 			usage = m.client.addUsage(finish.Usage)
+		} else if body.terminalUsage != nil {
+			usage = m.client.addUsage(*body.terminalUsage)
 		}
 		release(usage)
 	}()
@@ -285,6 +300,8 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 		_ = body.close()
 		if err := m.client.transport.failure(); err != nil {
 			callErr = err
+		} else if body.failure != nil {
+			callErr = body.failure
 		}
 	}()
 	m.state.blockExploration, m.state.rejectFinal, m.state.acceptFinal = "", "", nil
@@ -333,6 +350,12 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 	_ = body.close()
 	if err := m.client.transport.failure(); err != nil {
 		return err
+	}
+	// Some SDKs stop at a terminal SSE event without requesting another body
+	// read. A wire guard can already have rejected that event; never postpone
+	// its failure until deferred cleanup after buffered tools are released.
+	if body.failure != nil {
+		return body.failure
 	}
 	if err := callCtx.Err(); err != nil {
 		return err
@@ -528,7 +551,7 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 		return fmt.Errorf("final tool %q is not configured", opts.FinalTool)
 	}
 	state := &agentRunState{
-		opts: opts, model: c.cfg.Model, wd: newWorkDeadlineState(opts), structured: structured, out: out,
+		opts: opts, model: c.cfg.Model, chatGPT: c.cfg.Protocol == "chatgpt", wd: newWorkDeadlineState(opts), structured: structured, out: out,
 		toolNames: make(map[string]bool, len(opts.Tools)+1), toolSchemas: make(map[string]map[string]any, len(opts.Tools)),
 		recordTools: make(map[string]bool),
 	}
@@ -586,7 +609,11 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 		return nil
 	}
 	if state.finalErr != nil {
-		err := fmt.Errorf("%s: %s arguments did not satisfy the schema (%v); if truncated, raise max_output_tokens", state.model, opts.FinalTool, state.finalErr)
+		message := fmt.Sprintf("%s: %s arguments did not satisfy the schema (%v)", state.model, opts.FinalTool, state.finalErr)
+		if !state.chatGPT {
+			message += "; if truncated, raise max_output_tokens"
+		}
+		err := errors.New(message)
 		if state.cutoff != nil {
 			return state.cutoffError("wrap-up submission was invalid", err)
 		}
@@ -826,7 +853,14 @@ func findTool(tools []Tool, name string) *Tool {
 	return nil
 }
 
-func fantasyConversationBytes(messages fantasy.Prompt) int {
+func (s *agentRunState) conversationBytes(messages fantasy.Prompt) int {
+	if s.chatGPT {
+		// Multiple content parts can refer to the same finalized output. Count
+		// that output once, exactly as it will appear in the next request.
+		if input, err := chatGPTInput(messages); err == nil {
+			return len(input)
+		}
+	}
 	data, _ := json.Marshal(messages)
 	return len(data)
 }
