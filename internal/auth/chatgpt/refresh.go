@@ -166,7 +166,7 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 // The keyring can report a failure after saving the checkpoint. Keep a
 // replacement that may be visible so the next call can resume its validation.
 func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountStore, saved *credential, previousGeneration string, writeErr error) error {
-	cause := fmt.Errorf("ChatGPT refresh completed but saving its replacement could not be confirmed: %w", writeErr)
+	cause := fmt.Errorf("ChatGPT refresh completed for account %q but saving its replacement could not be confirmed: %w", saved.ClientID, writeErr)
 	if errors.Is(writeErr, storage.ErrPublished) {
 		return fmt.Errorf("%w. Repair credential storage and retry", cause)
 	}

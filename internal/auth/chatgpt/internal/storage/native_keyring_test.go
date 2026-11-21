@@ -28,7 +28,7 @@ func TestNativeKeyringRoundTrip(t *testing.T) {
 			if err := locked.discard(ctx, m.Current); err != nil {
 				return err
 			}
-			return locked.deleteVerified(locked.manifestItem())
+			return locked.deleteVerified(ctx, locked.manifestItem())
 		}); err != nil {
 			t.Error(err)
 		}

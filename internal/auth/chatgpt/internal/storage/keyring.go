@@ -199,6 +199,9 @@ func (s keyringStore) chunkItem(v snapshot, index int) string {
 
 func (s keyringStore) readManifest() (manifest, error) {
 	raw, err := s.ring.Get(service, s.manifestItem())
+	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		raw, err = s.ring.Get(service, s.manifestItem())
+	}
 	if errors.Is(err, keyring.ErrNotFound) {
 		return manifest{}, nil
 	}
@@ -228,7 +231,7 @@ func (s keyringStore) ReadJSON(dst any) error {
 			return os.ErrNotExist
 		}
 		data, err := s.readSnapshot(m.Current)
-		if err != nil && s.lock == nil {
+		if err != nil {
 			// A writer may have committed and removed the previous snapshot.
 			next, readErr := s.readManifest()
 			if readErr == nil && next.Current != m.Current {
@@ -380,13 +383,7 @@ func (s keyringStore) setVerified(ctx context.Context, item, value string) (bool
 
 func (s keyringStore) discard(ctx context.Context, v snapshot) error {
 	for i := range v.Chunks {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := s.lock.checkName(); err != nil {
-			return err
-		}
-		if err := s.deleteVerified(s.chunkItem(v, i)); err != nil {
+		if err := s.deleteVerified(ctx, s.chunkItem(v, i)); err != nil {
 			return err
 		}
 	}
@@ -405,24 +402,26 @@ func (s keyringStore) removeDiscarded(ctx context.Context, m manifest) error {
 		return err
 	}
 	// An interrupted first write may leave only staging entries.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := s.lock.checkName(); err != nil {
-		return err
-	}
-	return s.deleteVerified(s.manifestItem())
+	return s.deleteVerified(ctx, s.manifestItem())
 }
 
-func (s keyringStore) deleteVerified(item string) error {
-	if errors.Is(s.ring.Delete(service, item), keyring.ErrNotFound) {
-		return nil
+func (s keyringStore) deleteVerified(ctx context.Context, item string) error {
+	for range 2 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.lock.checkName(); err != nil {
+			return err
+		}
+		if errors.Is(s.ring.Delete(service, item), keyring.ErrNotFound) {
+			return nil
+		}
+		// A provider may report an error even after deleting the item.
+		if _, err := s.ring.Get(service, item); errors.Is(err, keyring.ErrNotFound) {
+			return nil
+		}
 	}
-	// A provider may report a transport error even after deleting the item.
-	if _, err := s.ring.Get(service, item); !errors.Is(err, keyring.ErrNotFound) {
-		return keyringError("confirm removal of superseded")
-	}
-	return nil
+	return keyringError("confirm removal of superseded")
 }
 
 // Provider errors may contain secret values. Give callers an actionable error
