@@ -291,7 +291,10 @@ func (s keyringStore) getItem(ctx context.Context, item string) (string, error) 
 	}
 	value, err := s.lookupItem(ctx, item)
 	if err != nil && !errors.Is(err, keyring.ErrNotFound) && ctx.Err() == nil {
-		return s.lookupItem(ctx, item)
+		value, err = s.lookupItem(ctx, item)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
 	}
 	return value, err
 }
@@ -400,6 +403,10 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 		if _, err := s.setVerified(ctx, s.chunkItem(next, i), value); err != nil {
 			return err
 		}
+	}
+	// Verify the staged entries together before making them current.
+	if _, err := s.readSnapshot(ctx, next); err != nil {
+		return fmt.Errorf("verify the staged ChatGPT credential snapshot: %w", err)
 	}
 	published := manifest{Current: next, Discard: m.Current}
 	uncertain, err := s.writeManifest(ctx, published)
