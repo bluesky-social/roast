@@ -106,6 +106,9 @@ func openLock(path string) (*os.File, error) {
 
 func (l *storeLock) checkName() error {
 	named, err := os.Lstat(l.file.Name())
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("the ChatGPT keyring lock file disappeared")
+	}
 	if err != nil {
 		return err
 	}
