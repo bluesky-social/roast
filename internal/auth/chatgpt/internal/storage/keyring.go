@@ -55,7 +55,7 @@ func (systemKeyring) Delete(service, user string) error {
 
 type keyringStore struct {
 	ring      keyringAccess
-	lockDir   string
+	lockPath  string
 	namespace string
 	lock      *storeLock
 }
@@ -79,15 +79,12 @@ func userLockRoot() (string, error) {
 		}
 		return strings.TrimSpace(string(path)), nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		account, lookupErr := user.LookupId(fmt.Sprint(os.Geteuid()))
-		if lookupErr != nil {
-			return "", fmt.Errorf("locate the ChatGPT keyring lock directory: %w", lookupErr)
-		}
-		home = account.HomeDir
+	account, err := user.LookupId(fmt.Sprint(os.Geteuid()))
+	if err == nil && account.HomeDir != "" {
+		return account.HomeDir, nil
 	}
-	return home, nil
+	// Some Linux containers have no passwd entry for their effective UID.
+	return os.UserHomeDir()
 }
 
 // OpenWithKeyring creates a store with the given keyring client and lock root.
@@ -99,14 +96,56 @@ func OpenWithKeyring(ring keyringAccess, lockRoot string) (Store, error) {
 	if !filepath.IsAbs(lockRoot) {
 		return nil, errors.New("the ChatGPT keyring lock requires an absolute directory")
 	}
-	profile := filepath.Join(dir, "roast", "chatgpt-plan")
-	legacy := filepath.Join(profile, "accounts.json")
-	if _, err := os.Lstat(legacy); err == nil {
-		return nil, fmt.Errorf("found previous ChatGPT credentials at %q. Sign out with your previous Roast version or disconnect the old registration in ChatGPT Settings, then remove that file and sign in again", legacy)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("check for previous ChatGPT credential file: %w", err)
+	lockRoot, err = filepath.EvalSymlinks(lockRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ChatGPT keyring lock directory: %w", err)
+	}
+	profile, err := resolveProfilePath(filepath.Join(dir, "roast", "chatgpt-plan"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve ChatGPT profile directory: %w", err)
+	}
+	if err := checkPreviewFiles(profile); err != nil {
+		return nil, err
 	}
 	return newStore(profile, lockRoot, ring), nil
+}
+
+// Resolve aliases of the same profile without creating any directories.
+func resolveProfilePath(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	for parent := path; ; parent = filepath.Dir(parent) {
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			suffix, err := filepath.Rel(parent, path)
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(resolved, suffix), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) || parent == filepath.Dir(parent) {
+			return "", err
+		}
+	}
+}
+
+func checkPreviewFiles(profile string) error {
+	entries, err := os.ReadDir(profile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check for previous ChatGPT credential files: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "accounts.json" || strings.HasPrefix(name, ".credentials-") {
+			return fmt.Errorf("found a previous ChatGPT credential file at %q. Sign out with your previous Roast version or disconnect the old registration in ChatGPT Settings, then remove the old credential files and sign in again", filepath.Join(profile, name))
+		}
+	}
+	return nil
 }
 
 func newStore(profileDir, lockRoot string, ring keyringAccess) keyringStore {
@@ -114,8 +153,13 @@ func newStore(profileDir, lockRoot string, ring keyringAccess) keyringStore {
 	// overrides cannot write the same entries while holding different locks.
 	scope := filepath.Clean(profileDir) + "\x00" + filepath.Clean(lockRoot)
 	namespace := fmt.Sprintf("%x", sha256.Sum256([]byte(scope)))
-	lockDir := filepath.Join(lockRoot, ".roast-chatgpt-lock-"+namespace)
-	return keyringStore{ring: ring, lockDir: lockDir, namespace: namespace}
+	lockPath := filepath.Join(lockRoot, ".roast-chatgpt-"+namespace+".lock")
+	return keyringStore{ring: ring, lockPath: lockPath, namespace: namespace}
+}
+
+// LockPath reports the location of the credential-free coordination file.
+func (s keyringStore) LockPath() string {
+	return s.lockPath
 }
 
 type snapshot struct {
@@ -241,6 +285,9 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 	if s.lock.closed {
 		return os.ErrClosed
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.lock.checkName(); err != nil {
 		return err
 	}
@@ -267,6 +314,11 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 	}
 	published := manifest{Current: next, Discard: m.Current}
 	uncertain, err := s.writeManifest(ctx, published)
+	if err != nil && !uncertain && ctx.Err() == nil {
+		// All chunks are verified. Retry a failed publication before giving
+		// up a replacement token the issuer may have already rotated.
+		uncertain, err = s.writeManifest(ctx, published)
+	}
 	if err != nil {
 		if uncertain {
 			return errors.Join(ErrPublished, err)
