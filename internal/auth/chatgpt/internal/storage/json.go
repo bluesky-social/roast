@@ -1,45 +1,63 @@
 //go:build darwin || linux
 
-// Package storage provides private JSON files and cross-process locks for ChatGPT credentials.
 package storage
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-func checkPrivatePath(path string, directory bool) error {
-	info, err := os.Lstat(path)
+func openPrivateDirectory(path string) (*os.File, error) {
+	dir, err := os.OpenFile(path, privateReadFlags|unix.O_DIRECTORY, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return checkPrivate(path, info, directory)
+	if _, err := privateFileInfo(dir, true); err != nil {
+		dir.Close()
+		return nil, err
+	}
+	return dir, nil
 }
 
-// ReadJSON decodes an owner-only file.
-func ReadJSON(path string, v any) error {
-	b, err := readPrivateFile(path)
+func openAt(dir *os.File, name string, flags int, mode uint32) (*os.File, error) {
+	path := filepath.Join(dir.Name(), name)
+	fd, err := unix.Openat(int(dir.Fd()), name, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, mode)
 	if err != nil {
-		return err
+		return nil, &os.PathError{Op: "openat", Path: path, Err: err}
 	}
-	if json.Unmarshal(b, v) != nil {
-		return errors.New("invalid ChatGPT credential file")
-	}
-	return nil
+	return os.NewFile(uintptr(fd), path), nil
 }
 
-// WriteJSON atomically replaces a file with an owner-only JSON document.
-// Callers must hold the session lock. If syncing the directory fails after
-// the rename, the new document is already visible. Callers can reread it
-// under the lock before deciding whether a grant was published.
-func WriteJSON(path string, v any) error {
-	return WriteJSONContext(context.Background(), path, v)
+func readPrivateFile(path string) ([]byte, error) {
+	dir, err := openPrivateDirectory(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	f, err := openAt(dir, filepath.Base(path), privateReadFlags, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if _, err := privateFileInfo(f, false); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(f)
+}
+
+func privateTemp(dir *os.File) (*os.File, error) {
+	return openAt(dir, ".credentials-"+rand.Text(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 }
 
 // WriteJSONContext honors cancellation up to publication of the new document.
@@ -86,6 +104,78 @@ func WriteJSONContext(ctx context.Context, path string, v any) error {
 		return err
 	}
 	return commitPrivate(ctx, dir, name, filepath.Base(path))
+}
+
+func commitPrivate(ctx context.Context, dir *os.File, from, to string) error {
+	fd := int(dir.Fd())
+	var st unix.Stat_t
+	if err := unix.Fstatat(fd, to, &st, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, os.ErrNotExist) {
+		// An earlier process may have created the directory without syncing
+		// its parent entries. Do this under the lock before the first publish.
+		if err := syncParentEntries(dir.Name()); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	if err := unix.Renameat(fd, from, fd, to); err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("%w but could not sync the directory: %w", ErrPublished, err)
+	}
+	return nil
+}
+
+func syncParentEntries(path string) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	child, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(child)
+	if err != nil {
+		return err
+	}
+	device := info.Sys().(*syscall.Stat_t).Dev
+	for parent := filepath.Dir(child); parent != child; parent = filepath.Dir(child) {
+		info, err := os.Stat(parent)
+		if err != nil {
+			return err
+		}
+		// The enclosing filesystem cannot persist entries on this volume.
+		if info.Sys().(*syscall.Stat_t).Dev != device {
+			break
+		}
+		if err := syncDirectory(parent); err != nil {
+			// A search-only ancestor can be traversable but unreadable.
+			// Skip it only if Roast could not create entries there.
+			const writeAccess = 2
+			if !errors.Is(err, os.ErrPermission) || !errors.Is(syscall.Access(parent, writeAccess), os.ErrPermission) {
+				return err
+			}
+		}
+		child = parent
+	}
+	return nil
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // CleanupTemps removes abandoned atomic-write files without reading their data.

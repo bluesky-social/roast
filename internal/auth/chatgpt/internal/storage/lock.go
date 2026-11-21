@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -66,4 +67,28 @@ func WithLock(ctx context.Context, dir string, fn func() error) error {
 		return fmt.Errorf("waiting for ChatGPT lock: %w", context.DeadlineExceeded)
 	}
 	return fn()
+}
+
+const lockOpenFlags = os.O_RDWR | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+
+func privateLock(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|lockOpenFlags, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return os.OpenFile(path, lockOpenFlags, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func EnsureDir(dir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return checkPrivatePath(dir, true)
 }
