@@ -217,6 +217,9 @@ func (c *Client) finishSignIn(ctx context.Context, accounts *accountStore, previ
 		cause := fmt.Errorf("could not confirm saving ChatGPT credentials for account %q: %w", next.ClientID, err)
 		if errors.Is(err, storage.ErrPublished) {
 			// The grant may already be saved. Revoking it could end that session.
+			if !previous.PendingRegistration {
+				return fmt.Errorf("%w. Check roast chatgpt status and repair credential storage. If the account still cannot be used, disconnect its registration in ChatGPT Settings and sign in again", cause)
+			}
 			return registrationRecovery(cause)
 		}
 		return c.revokeUnpublishedGrant(ctx, accounts, previous, token, kind, cause)

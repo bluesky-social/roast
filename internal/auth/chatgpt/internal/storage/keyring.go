@@ -217,10 +217,7 @@ func (s keyringStore) chunkItem(v snapshot, index int) string {
 }
 
 func (s keyringStore) readManifest() (manifest, error) {
-	raw, err := s.ring.Get(service, s.manifestItem())
-	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		raw, err = s.ring.Get(service, s.manifestItem())
-	}
+	raw, err := s.getItem(context.Background(), s.manifestItem())
 	if errors.Is(err, keyring.ErrNotFound) {
 		return manifest{}, nil
 	}
@@ -249,7 +246,7 @@ func (s keyringStore) ReadJSON(dst any) error {
 		if m.Current.ID == "" {
 			return os.ErrNotExist
 		}
-		data, err := s.readSnapshot(m.Current)
+		data, err := s.readSnapshot(context.Background(), m.Current)
 		if err != nil {
 			// A writer may have committed and removed the previous snapshot.
 			next, readErr := s.readManifest()
@@ -271,12 +268,23 @@ func (s keyringStore) ReadJSON(dst any) error {
 	return errors.New("ChatGPT credentials changed while reading the keyring; retry")
 }
 
-func (s keyringStore) readSnapshot(v snapshot) (string, error) {
+func (s keyringStore) getItem(ctx context.Context, item string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	value, err := s.ring.Get(service, item)
+	if err != nil && !errors.Is(err, keyring.ErrNotFound) && ctx.Err() == nil {
+		return s.ring.Get(service, item)
+	}
+	return value, err
+}
+
+func (s keyringStore) readSnapshot(ctx context.Context, v snapshot) (string, error) {
 	var data strings.Builder
 	for i := range v.Chunks {
-		raw, err := s.ring.Get(service, s.chunkItem(v, i))
-		if err != nil && !errors.Is(err, keyring.ErrNotFound) {
-			raw, err = s.ring.Get(service, s.chunkItem(v, i))
+		raw, err := s.getItem(ctx, s.chunkItem(v, i))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
 		}
 		if errors.Is(err, keyring.ErrNotFound) {
 			return "", keyring.ErrNotFound
@@ -391,7 +399,7 @@ func (s keyringStore) setVerified(ctx context.Context, item, value string) (bool
 			return uncertain, err
 		}
 		setErr := s.setItem(item, value)
-		got, err := s.ring.Get(service, item)
+		got, err := s.getItem(ctx, item)
 		if err == nil && got == value {
 			return false, nil
 		}
@@ -435,11 +443,9 @@ func (s keyringStore) deleteVerified(ctx context.Context, item string) error {
 		if err := s.lock.checkName(); err != nil {
 			return err
 		}
-		if errors.Is(s.deleteItem(item), keyring.ErrNotFound) {
-			return nil
-		}
 		// A provider may report an error even after deleting the item.
-		if _, err := s.ring.Get(service, item); errors.Is(err, keyring.ErrNotFound) {
+		_ = s.deleteItem(item)
+		if _, err := s.getItem(ctx, item); errors.Is(err, keyring.ErrNotFound) {
 			return nil
 		}
 	}
