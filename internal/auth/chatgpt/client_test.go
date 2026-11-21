@@ -11,18 +11,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/zalando/go-keyring"
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
 func TestNewDoesNotCreateCredentials(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("APPDATA", dir)
+	mockKeyring(t)
 	c, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -33,9 +33,21 @@ func TestNewDoesNotCreateCredentials(t *testing.T) {
 	if _, err = c.Token(context.Background()); !errors.Is(err, ErrAuth) {
 		t.Fatal("missing login not classified")
 	}
-	if _, err = os.Stat(c.dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("read-only action created credential directory")
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err = os.Stat(filepath.Join(dir, "roast", "chatgpt-plan")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("read-only action created the keyring lock directory")
+	}
+}
+
+func mockKeyring(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	keyring.MockInit()
 }
 
 type transportFunc func(*http.Request) (*http.Response, error)
@@ -54,12 +66,8 @@ func jsonResponse(status int, value any) (*http.Response, error) {
 
 func testClient(t *testing.T) *Client {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "credentials")
-	files, err := storage.Open()
+	store, err := storage.OpenWithKeyring(&testKeyring{items: make(map[string]string)}, t.TempDir())
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	provider := oauth.NewClient()
@@ -67,7 +75,64 @@ func testClient(t *testing.T) *Client {
 		t.Error("unexpected network request")
 		return nil, errors.New("unexpected")
 	})
-	return &Client{files: files, dir: dir, now: time.Now, provider: provider}
+	return &Client{store: testAccountStore{Store: store, faults: &storeFaults{}}, now: time.Now, provider: provider}
+}
+
+type testKeyring struct {
+	mu    sync.Mutex
+	items map[string]string
+}
+
+func (k *testKeyring) Get(_, item string) (string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if value, ok := k.items[item]; ok {
+		return value, nil
+	}
+	return "", keyring.ErrNotFound
+}
+
+func (k *testKeyring) Set(_, item, value string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.items[item] = value
+	return nil
+}
+
+func (k *testKeyring) Delete(_, item string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.items[item]; !ok {
+		return keyring.ErrNotFound
+	}
+	delete(k.items, item)
+	return nil
+}
+
+type storeFaults struct {
+	write error
+}
+
+type testAccountStore struct {
+	storage.Store
+	faults *storeFaults
+}
+
+func (s testAccountStore) WriteJSON(ctx context.Context, value any) error {
+	if s.faults.write != nil {
+		return s.faults.write
+	}
+	return s.Store.WriteJSON(ctx, value)
+}
+
+func (s testAccountStore) WithLock(ctx context.Context, fn func(storage.Store) error) error {
+	return s.Store.WithLock(ctx, func(locked storage.Store) error {
+		return fn(testAccountStore{Store: locked, faults: s.faults})
+	})
+}
+
+func (c *Client) testStoreFaults() *storeFaults {
+	return c.store.(testAccountStore).faults
 }
 
 func seed(t *testing.T, c *Client, exp time.Time) {
@@ -185,29 +250,6 @@ func TestSelectedRegistrationPinnedAndIndependent(t *testing.T) {
 		if account.Active != (account.ClientID == other.ClientID) || !account.PlanEnabled {
 			t.Fatal("status did not reflect selected account")
 		}
-	}
-}
-
-func TestSignOutRemovesInterruptedCredentialWrites(t *testing.T) {
-	c := testClient(t)
-	seed(t, c, time.Now().Add(time.Hour))
-	orphan := filepath.Join(c.dir, ".credentials-interrupted")
-	if err := os.WriteFile(orphan, []byte(`{"refresh_token":"synthetic-orphan"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") })
-	if err := c.SignOut(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "signed out locally") {
-		t.Fatalf("sign-out error = %v", err)
-	}
-	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("orphan remained after sign-out: %v", err)
-	}
-	saved, err := c.loadCredential(c.selected)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if saved.signedIn() || saved.RefreshToken != "" || saved.Pending != nil {
-		t.Fatal("sign-out retained credentials")
 	}
 }
 

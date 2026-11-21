@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -186,13 +185,7 @@ func TestCanceledTerminalRefreshCleanup(t *testing.T) {
 			defer cancel()
 			c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
 				if tc.failWrite {
-					path := c.storePath()
-					if err := os.Rename(path, path+".backup"); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Mkdir(path, 0700); err != nil {
-						t.Fatal(err)
-					}
+					c.testStoreFaults().write = errors.New("keyring write failed")
 				}
 				cancel()
 				return jsonResponse(http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
@@ -865,13 +858,7 @@ func TestMalformedRotationAttemptsRevocationWhenStorageFails(t *testing.T) {
 		if r.URL.String() != tokenURL {
 			t.Fatalf("unexpected request to %s", r.URL.Host)
 		}
-		// Prevent the next atomic rename from replacing the account file.
-		if err := os.Rename(c.storePath(), c.storePath()+".previous"); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(c.storePath(), 0700); err != nil {
-			t.Fatal(err)
-		}
+		c.testStoreFaults().write = errors.New("keyring write failed")
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"refresh_token":"replacement","expires_in":`))}, nil
 	}))
 	token, err := c.Token(t.Context())
@@ -1085,30 +1072,9 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(-time.Minute))
 			key := testutil.NewRSAKey(t)
-			path := c.storePath()
-			backup := path + ".backup"
-			blocked := false
-			restore := func() {
-				if !blocked {
-					return
-				}
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Rename(backup, path); err != nil {
-					t.Fatal(err)
-				}
-				blocked = false
-			}
-			t.Cleanup(restore)
+			faults := c.testStoreFaults()
 			blockWrite := func() {
-				if err := os.Rename(path, backup); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Mkdir(path, 0700); err != nil {
-					t.Fatal(err)
-				}
-				blocked = true
+				faults.write = errors.New("keyring write failed")
 			}
 			refreshes := 0
 			replacement := ""
@@ -1132,7 +1098,7 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 						ExpiresIn: 3600, Scope: scopeValue(oauth.Scope),
 					})
 				case jwksURL:
-					if stage == "validated credentials" && !blocked {
+					if stage == "validated credentials" {
 						blockWrite()
 					}
 					return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
@@ -1153,7 +1119,7 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 			if stage == "checkpoint without rotation" && strings.Contains(err.Error(), "credential cleanup") {
 				t.Fatalf("unchanged refresh token should not be cleared: %v", err)
 			}
-			restore()
+			faults.write = nil
 			saved, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
@@ -1183,7 +1149,7 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 func TestFailedCheckpointKeepsPublishedReplacement(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
-	writeErr := errors.New("simulated directory sync failure")
+	writeErr := errors.New("could not confirm keyring commit")
 	err := c.withStore(t.Context(), func(accounts *accountStore) error {
 		saved, err := accounts.credential(c.selected)
 		if err != nil {

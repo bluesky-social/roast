@@ -24,7 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zalando/go-keyring"
+
 	"github.com/bluesky-social/roast/internal/auth/chatgpt"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/chatgpttest"
 	"github.com/bluesky-social/roast/internal/review"
 	"github.com/bluesky-social/roast/internal/testutil"
 )
@@ -81,10 +84,8 @@ func TestChatGPTCommandRejectsInvalidArguments(t *testing.T) {
 }
 
 func TestChatGPTEmptyStatus(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("APPDATA", dir)
+	isolateUserConfig(t)
+	keyring.MockInit()
 	var out bytes.Buffer
 	cmd := newChatGPTCommand(&out)
 	cmd.SetArgs([]string{"status"})
@@ -98,6 +99,7 @@ func TestChatGPTEmptyStatus(t *testing.T) {
 
 func TestChatGPTModelsRequiresSignIn(t *testing.T) {
 	isolateUserConfig(t)
+	keyring.MockInit()
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	code, err := ExecuteContext(t.Context(), []string{"chatgpt", "models", "--error-format", "json"}, io.Discard, io.Discard)
 	if code != ExitAuth || !errors.Is(err, chatgpt.ErrAuth) {
@@ -111,6 +113,30 @@ func TestChatGPTModelsRequiresSignIn(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.Category != ErrorAuth {
 		t.Fatalf("expected a JSON authentication error, got %q", output.String())
 	}
+}
+
+func TestChatGPTCommandsReportUnavailableKeyring(t *testing.T) {
+	configPath := isolateUserConfig(t)
+	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
+	writeAccountConfig(t, configPath, "chatgpt", "chatgpt")
+	keyring.MockInitWithError(errors.New("private keyring diagnostic"))
+	mockAccountTransport(t, func(*http.Request) (*http.Response, error) {
+		t.Error("an unavailable keyring must stop plan requests")
+		return nil, errors.New("unexpected request")
+	})
+
+	var output bytes.Buffer
+	_, err := ExecuteContext(t.Context(), []string{"chatgpt", "signin"}, &output, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "system keyring") || output.Len() != 0 {
+		t.Fatalf("sign-in with unavailable keyring: %v, output: %q", err, output.String())
+	}
+	for _, result := range doctorChecks(t.Context(), configPath) {
+		if result.Name == "finder-roundtrip" && result.Status == doctorFail &&
+			strings.Contains(result.Detail, "system keyring") && !strings.Contains(result.Detail, "private keyring diagnostic") {
+			return
+		}
+	}
+	t.Fatal("doctor did not report the unavailable keyring")
 }
 
 type accountRoundTripper func(*http.Request) (*http.Response, error)
@@ -127,18 +153,18 @@ func mockAccountTransport(t *testing.T, transport accountRoundTripper) {
 	t.Cleanup(func() { http.DefaultTransport = previous })
 }
 
-func accountFixture(t *testing.T) (configPath, storePath string, selectAccount func(string) error) {
+func accountFixture(t *testing.T) (configPath string, selectAccount func(string) error) {
 	t.Helper()
 	configPath = filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
-	storePath = testutil.SeedChatGPTAccounts(t, "account-a", "account-b")
+	chatgpttest.SeedAccounts(t, "account-a", "account-b")
 	selector, err := chatgpt.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return configPath, storePath, func(account string) error { return selector.Select(t.Context(), account) }
+	return configPath, func(account string) error { return selector.Select(t.Context(), account) }
 }
 
 func writeAccountConfig(t *testing.T, path, finder, verifier string) {
@@ -185,7 +211,7 @@ func accountToolResponse(model, tool, args string, direct bool) (*http.Response,
 const unconditionalPanicFinding = `{"assessment":"FINDINGS_PRESENT","findings":[{"reasoning":"panic is reachable","severity":"HIGH","confidence":0.95,"cwe":"CWE-248","description":"The function always panics.","file":"bad.go","lines":[3],"code_quote":"panic(\"oops\")","fixed_code":"return","frontend_category":""}]}`
 
 func TestReviewProtocolFlagCanUseRoleAPISettings(t *testing.T) {
-	configPath, _, _ := accountFixture(t)
+	configPath, _ := accountFixture(t)
 	writeAccountConfig(t, configPath, "chatgpt", "responses")
 	t.Chdir(initChangedRepo(t))
 	t.Setenv("ROAST_FINDER_BASE_URL", "https://provider.invalid/v1")
@@ -207,7 +233,7 @@ func TestReviewProtocolFlagCanUseRoleAPISettings(t *testing.T) {
 func TestReviewPinsChatGPTAccountAcrossRoles(t *testing.T) {
 	for _, protocols := range [][2]string{{"chatgpt", "chatgpt"}, {"responses", "chatgpt"}, {"chatgpt", "responses"}} {
 		t.Run(strings.Join(protocols[:], "-"), func(t *testing.T) {
-			configPath, _, selectAccount := accountFixture(t)
+			configPath, selectAccount := accountFixture(t)
 			writeAccountConfig(t, configPath, protocols[0], protocols[1])
 			t.Chdir(initChangedRepo(t))
 			var mu sync.Mutex
@@ -265,7 +291,7 @@ func TestReviewPinsChatGPTAccountAcrossRoles(t *testing.T) {
 func TestDoctorPinsChatGPTAccountAcrossChecks(t *testing.T) {
 	for _, finderProtocol := range []string{"chatgpt", "responses"} {
 		t.Run(finderProtocol+"-finder", func(t *testing.T) {
-			configPath, _, selectAccount := accountFixture(t)
+			configPath, selectAccount := accountFixture(t)
 			writeAccountConfig(t, configPath, finderProtocol, "chatgpt")
 			var accounts []string
 			var methods []string
@@ -326,7 +352,7 @@ func TestDoctorPinsChatGPTAccountAcrossChecks(t *testing.T) {
 }
 
 func TestDoctorEscapesChatGPTProviderErrors(t *testing.T) {
-	configPath, _, _ := accountFixture(t)
+	configPath, _ := accountFixture(t)
 	writeAccountConfig(t, configPath, "chatgpt", "chatgpt")
 	t.Setenv("ROAST_FINDER_MODEL", "finder-model\n\x1b")
 	mockAccountTransport(t, func(r *http.Request) (*http.Response, error) {
@@ -361,7 +387,7 @@ func TestDoctorEscapesChatGPTProviderErrors(t *testing.T) {
 }
 
 func TestDoctorSkipsLoginForInvalidChatGPTProfiles(t *testing.T) {
-	configPath, _, _ := accountFixture(t)
+	configPath, _ := accountFixture(t)
 	writeAccountConfig(t, configPath, "chatgpt", "chatgpt")
 	t.Setenv("ROAST_FINDER_MODEL", " ")
 	t.Setenv("ROAST_VERIFIER_MODEL", " ")
@@ -380,11 +406,9 @@ func TestDoctorSkipsLoginForInvalidChatGPTProfiles(t *testing.T) {
 }
 
 func TestReviewWithUnreadableChatGPTVerifierAccount(t *testing.T) {
-	configPath, storePath, _ := accountFixture(t)
+	configPath, _ := accountFixture(t)
 	writeAccountConfig(t, configPath, "responses", "chatgpt")
-	if err := os.WriteFile(storePath, []byte("invalid account store"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	keyring.MockInitWithError(errors.New("keyring unavailable in test"))
 	t.Chdir(initChangedRepo(t))
 	for _, tc := range []struct {
 		name, response string
@@ -429,6 +453,7 @@ func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
 	for _, name := range []string{"HOME", "XDG_CONFIG_HOME", "APPDATA"} {
 		t.Setenv(name, root)
 	}
+	keyring.MockInit()
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())

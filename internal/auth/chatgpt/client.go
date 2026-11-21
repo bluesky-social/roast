@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"time"
 
@@ -22,8 +20,7 @@ var (
 )
 
 type Client struct {
-	files    storage.Store
-	dir      string
+	store    storage.Store
 	selected string
 	provider oauth.Client
 	now      func() time.Time
@@ -46,17 +43,12 @@ func tokenGrantContext(parent context.Context) (context.Context, context.CancelF
 
 // New opens Roast's registration store and pins the active registration.
 func New() (*Client, error) {
-	files, err := storage.Open()
-	if err != nil {
-		return nil, err
-	}
-	dir, err := os.UserConfigDir()
+	store, err := storage.Open()
 	if err != nil {
 		return nil, err
 	}
 	c := &Client{
-		files:    files,
-		dir:      filepath.Join(dir, "roast", "chatgpt-plan"),
+		store:    store,
 		provider: oauth.NewClient(),
 		now:      time.Now,
 	}

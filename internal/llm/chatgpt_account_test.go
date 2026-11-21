@@ -6,27 +6,37 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"testing"
 
+	"github.com/zalando/go-keyring"
+
 	"github.com/bluesky-social/roast/internal/auth/chatgpt"
-	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
-	storePath := testutil.SeedChatGPTAccounts(t, "account-b")
-	if err := os.WriteFile(storePath, []byte("invalid state"), 0600); err != nil {
-		t.Fatal(err)
+	// The library's mock replaces the native provider for the lifetime of the
+	// process. Keep it out of the process that can run opt-in live tests.
+	const child = "CHATGPT_KEYRING_TEST_CHILD"
+	if os.Getenv(child) != "1" {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestChatGPTAccountSnapshotKeepsInitializationFailure$")
+		cmd.Env = append(os.Environ(), child+"=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("keyring test subprocess: %v\n%s", err, output)
+		}
+		return
 	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	keyring.MockInitWithError(errors.New("keyring unavailable in test"))
 	operation := WithPinnedChatGPTAccount(t.Context())
 	_, initialErr := chatGPTAccount(operation)
 	if initialErr == nil {
-		t.Fatal("invalid state did not fail initialization")
+		t.Fatal("unavailable keyring did not fail initialization")
 	}
 	// Repair the store without a token so a regression still fails offline.
-	const repaired = `{"host_id":"urn:uuid:00000000-0000-4000-8000-000000000001","active":"","accounts":{}}`
-	if err := os.WriteFile(storePath, []byte(repaired), 0600); err != nil {
-		t.Fatal(err)
-	}
+	keyring.MockInit()
 	// Derived request contexts retain the original failed selection instead of
 	// silently adopting an account that appeared later in the operation.
 	request, cancel := context.WithCancel(operation)

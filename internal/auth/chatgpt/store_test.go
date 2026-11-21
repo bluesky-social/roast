@@ -6,20 +6,18 @@ import (
 	"context"
 	"errors"
 	"net/url"
-	"os"
 	"regexp"
+	"strings"
 	"testing"
-	"time"
+
+	"github.com/zalando/go-keyring"
 )
 
-func TestStoreRequiresPrivateFiles(t *testing.T) {
-	c := testClient(t)
-	seed(t, c, time.Now().Add(time.Hour))
-	if err := os.Chmod(c.storePath(), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.loadStore(); err == nil {
-		t.Fatal("accepted an account file readable by other users")
+func TestNewReportsUnavailableKeyring(t *testing.T) {
+	mockKeyring(t)
+	keyring.MockInitWithError(errors.New("test backend failure"))
+	if _, err := New(); err == nil || !strings.Contains(err.Error(), "system keyring") {
+		t.Fatalf("New on an unavailable keyring = %v", err)
 	}
 }
 

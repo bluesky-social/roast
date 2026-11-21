@@ -109,6 +109,9 @@ to your ChatGPT plan. Roast enables plan usage when OpenAI lists the required
 permissions in its sign-in response. Run `roast chatgpt models` to list available models.
 If plan access is disabled, run `roast chatgpt signin --account CLIENT_ID
 --enable-plan` with the displayed account ID to request consent again.
+On Linux, plan usage requires an unlocked Secret Service provider, such as
+GNOME Keyring, on your user D-Bus session. Headless runs can use an API-key
+profile or configure that service.
 
 To try a plan-backed review alongside an existing API-key setup, save this
 as `~/chatgpt.yaml`, outside the repository you want to review. Replace the
@@ -135,7 +138,7 @@ run `roast chatgpt signin --account CLIENT_ID`.
 Reviews and `roast doctor` spend plan usage. The output-token setting is a
 local budget estimate. OpenAI controls the response length, so a plan call can
 exceed the remaining shared token budget. Roast uses fixed
-OpenAI endpoints and stores credentials in an owner-only local file.
+OpenAI endpoints and stores credentials in the system keyring.
 [ChatGPT credential storage](docs/security-model.md#direct-chatgpt-plan-usage)
 
 ### Config file

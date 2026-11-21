@@ -21,23 +21,18 @@ and inference. Leave `endpoint`, `api_key`, `api_key_env`, and `session_header`
 unset. Roast rejects role overrides for the endpoint and API key and ignores
 `OPENAI_BASE_URL` and `OPENAI_API_KEY` for this protocol.
 
-Roast stores registrations, tokens, and pending refresh responses in an
-owner-only plaintext file on a supported local filesystem.
+Roast stores registrations, tokens, and pending refresh responses in the
+system keyring through [go-keyring](https://github.com/zalando/go-keyring).
+On macOS, access goes through `/usr/bin/security` and follows that tool's Keychain
+permissions. On Linux, a Secret Service provider must be reachable on your
+user D-Bus session, with a login or default collection that you can unlock.
+For unattended runs, arrange for that collection to be unlocked or use an
+API-key profile. A locked collection can prompt for unlock.
 
-- **macOS** uses `$HOME/Library/Application Support/roast/chatgpt-plan/accounts.json`
-  on APFS or HFS+ with ownership enabled and no extended ACLs on the store.
-- **Linux** uses `$XDG_CONFIG_HOME/roast/chatgpt-plan/accounts.json`, falling back
-  to `$HOME/.config/roast/chatgpt-plan/accounts.json`. Supported filesystems are
-  ext2/3/4, XFS, Btrfs, bcachefs, F2FS, ZFS, tmpfs, ramfs, and OverlayFS.
-
-A cross-process lock covers token renewal and account updates. Roast replaces
-the file atomically. Use a persistent mount with normal sync behavior to retain
-completed writes across crashes and reboots. tmpfs and ramfs lose the store on
-reboot, and volatile OverlayFS can lose recent writes after a crash.
-
-Keep the entire `chatgpt-plan` directory out of shared or synced folders.
-Include it in a backup or snapshot only if the copy is encrypted and has the
-same access restrictions as the live store.
+Roast uses a private directory under `/tmp` as a cross-process lock for each
+user config directory. Each update saves new keyring entries before publishing
+the snapshot that readers use. The next account update cleans up entries left
+by an interruption before attempting another token renewal.
 
 When an unusable refresh reply contains a complete, distinct replacement
 refresh token, Roast asks OpenAI to revoke it. It ignores credentials echoed
@@ -51,9 +46,10 @@ To revoke that unseen replacement, disconnect Roast in ChatGPT Settings.
 Signing out asks OpenAI to revoke the grant, then clears the local credentials
 even if OpenAI cannot be reached. To reconnect a saved account, fix any reported
 storage problem, then run `roast chatgpt signin --account CLIENT_ID` with the ID from
-`roast chatgpt status`. If you used the fork preview, sign in to this installation.
-To revoke the old registration, sign out through the fork or disconnect it in
-ChatGPT Settings.
+`roast chatgpt status`. If you used an earlier file-backed preview, sign in
+again to populate the keyring. Sign out using the preview to revoke and clear
+its saved grant. If you no longer have the preview, disconnect the old
+registration in ChatGPT Settings and remove the preview's credential file.
 
 ## Configuration templates
 

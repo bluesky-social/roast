@@ -1,28 +1,27 @@
 //go:build darwin || linux
 
-package testutil
+package chatgpttest
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/zalando/go-keyring"
+
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
-// SeedChatGPTAccounts seeds an isolated user config directory and returns the store path.
-func SeedChatGPTAccounts(t *testing.T, active string, others ...string) string {
+// SeedAccounts prepares an isolated test keyring and stores synthetic accounts.
+// Tests using the keyring library's global mock must run serially.
+func SeedAccounts(t *testing.T, active string, others ...string) {
 	t.Helper()
 	root := t.TempDir()
-	for _, name := range []string{"HOME", "APPDATA", "XDG_CONFIG_HOME"} {
+	for _, name := range []string{"HOME", "XDG_CONFIG_HOME"} {
 		t.Setenv(name, root)
 	}
-	configDir, err := os.UserConfigDir()
+	keyring.MockInit()
+	store, err := storage.Open()
 	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(configDir, "roast", "chatgpt-plan")
-	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	accounts := make(map[string]any)
@@ -40,17 +39,14 @@ func SeedChatGPTAccounts(t *testing.T, active string, others ...string) string {
 			"expires_at":   time.Now().Add(time.Hour),
 		}
 	}
-	path := filepath.Join(dir, "accounts.json")
-	data, err := json.Marshal(map[string]any{
+	snapshot := map[string]any{
 		"host_id":  "urn:uuid:00000000-0000-4000-8000-000000000001",
 		"active":   active,
 		"accounts": accounts,
-	})
-	if err != nil {
+	}
+	if err := store.WithLock(t.Context(), func(locked storage.Store) error {
+		return locked.WriteJSON(t.Context(), snapshot)
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }

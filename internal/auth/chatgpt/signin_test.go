@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -556,9 +555,6 @@ func TestSignInRejectsAccountChangesDuringBrowserWait(t *testing.T) {
 func TestDiscardedSignInGrantIsRevoked(t *testing.T) {
 	for _, failure := range []string{"identity unavailable", "canceled", "canceled during exchange", "canceled after verification", "unwritable store"} {
 		t.Run(failure, func(t *testing.T) {
-			if failure == "unwritable store" && os.Geteuid() == 0 {
-				t.Skip("requires Unix permission enforcement for the current user")
-			}
 			c := testClient(t)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -594,9 +590,7 @@ func TestDiscardedSignInGrantIsRevoked(t *testing.T) {
 						cancel()
 						return nil, context.Canceled
 					case "unwritable store":
-						if err := os.Chmod(c.dir, 0500); err != nil {
-							return nil, err
-						}
+						c.testStoreFaults().write = errors.New("keyring write failed")
 					}
 				case oauth.Issuer + "/revoke":
 					if err := r.ParseForm(); err != nil {
@@ -612,8 +606,6 @@ func TestDiscardedSignInGrantIsRevoked(t *testing.T) {
 				}
 				return base(r)
 			})
-			t.Cleanup(func() { _ = os.Chmod(c.dir, 0700) })
-
 			err := c.SignIn(ctx, "", func(raw string) error {
 				auth, err := url.Parse(raw)
 				if err != nil {
