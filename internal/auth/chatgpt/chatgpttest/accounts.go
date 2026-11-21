@@ -3,6 +3,7 @@
 package chatgpttest
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -11,15 +12,25 @@ import (
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
-// SeedAccounts prepares an isolated test keyring and stores synthetic accounts.
+// UseKeyring isolates the user directories and installs an empty test keyring.
 // Tests using the keyring library's global mock must run serially.
-func SeedAccounts(t *testing.T, active string, others ...string) {
+func UseKeyring(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"HOME", "XDG_CONFIG_HOME"} {
 		t.Setenv(name, root)
 	}
 	keyring.MockInit()
+	return root
+}
+
+// SeedAccounts prepares an isolated test keyring and stores synthetic accounts.
+func SeedAccounts(t *testing.T, active string, others ...string) {
+	t.Helper()
+	UseKeyring(t)
 	store, err := storage.Open()
 	if err != nil {
 		t.Fatal(err)

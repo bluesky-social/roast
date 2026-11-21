@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -24,6 +26,11 @@ const (
 	// On macOS, go-keyring base64-encodes it again. Leave room for both
 	// encodings and the item name under the security command's 4096-byte limit.
 	chunkSize = 2048
+	// Allow several maximum-size OAuth replies while bounding work on a
+	// corrupt index. Typical accounts need only a few entries.
+	maxSnapshotSize = 16 << 20
+	maxChunks       = maxSnapshotSize / chunkSize
+	maxManifestSize = 512
 )
 
 type keyringAccess interface {
@@ -53,11 +60,34 @@ type keyringStore struct {
 	lock      *storeLock
 }
 
-// Open creates a handle without accessing the vault or creating the lock directory.
+// Open prepares a handle without accessing the vault or creating the lock directory.
 func Open() (Store, error) {
-	// Use a common local root so moving the config directory or varying TMPDIR
-	// cannot give two processes separate locks for the same keyring entries.
-	return OpenWithKeyring(systemKeyring{}, "/tmp")
+	lockRoot, err := userLockRoot()
+	if err != nil {
+		return nil, err
+	}
+	return OpenWithKeyring(systemKeyring{}, lockRoot)
+}
+
+func userLockRoot() (string, error) {
+	if runtime.GOOS == "darwin" {
+		// A home-directory ACL can grant access beyond its POSIX mode bits.
+		// Use the system-managed local directory for the current user.
+		path, err := exec.Command("/usr/bin/getconf", "DARWIN_USER_DIR").Output()
+		if err != nil {
+			return "", fmt.Errorf("locate the macOS ChatGPT keyring lock directory: %w", err)
+		}
+		return strings.TrimSpace(string(path)), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		account, lookupErr := user.LookupId(fmt.Sprint(os.Geteuid()))
+		if lookupErr != nil {
+			return "", fmt.Errorf("locate the ChatGPT keyring lock directory: %w", lookupErr)
+		}
+		home = account.HomeDir
+	}
+	return home, nil
 }
 
 // OpenWithKeyring creates a store with the given keyring client and lock root.
@@ -66,12 +96,25 @@ func OpenWithKeyring(ring keyringAccess, lockRoot string) (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newStore(filepath.Join(dir, "roast", "chatgpt-plan"), lockRoot, ring), nil
+	if !filepath.IsAbs(lockRoot) {
+		return nil, errors.New("the ChatGPT keyring lock requires an absolute directory")
+	}
+	profile := filepath.Join(dir, "roast", "chatgpt-plan")
+	legacy := filepath.Join(profile, "accounts.json")
+	if _, err := os.Lstat(legacy); err == nil {
+		return nil, fmt.Errorf("found previous ChatGPT credentials at %q. Sign out with your previous Roast version or disconnect the old registration in ChatGPT Settings, then remove that file and sign in again", legacy)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("check for previous ChatGPT credential file: %w", err)
+	}
+	return newStore(profile, lockRoot, ring), nil
 }
 
 func newStore(profileDir, lockRoot string, ring keyringAccess) keyringStore {
-	namespace := fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(profileDir))))
-	lockDir := filepath.Join(lockRoot, fmt.Sprintf("roast-chatgpt-%d-%s", os.Geteuid(), namespace))
+	// Bind both paths to the keyring scope, so processes with different home
+	// overrides cannot write the same entries while holding different locks.
+	scope := filepath.Clean(profileDir) + "\x00" + filepath.Clean(lockRoot)
+	namespace := fmt.Sprintf("%x", sha256.Sum256([]byte(scope)))
+	lockDir := filepath.Join(lockRoot, ".roast-chatgpt-lock-"+namespace)
 	return keyringStore{ring: ring, lockDir: lockDir, namespace: namespace}
 }
 
@@ -84,7 +127,7 @@ func (v snapshot) valid() bool {
 	if v.ID == "" {
 		return v.Chunks == 0
 	}
-	return v.Chunks > 0 && len(v.ID) <= 64 && strings.IndexFunc(v.ID, func(r rune) bool {
+	return v.Chunks > 0 && v.Chunks <= maxChunks && len(v.ID) <= 64 && strings.IndexFunc(v.ID, func(r rune) bool {
 		return !(r >= 'A' && r <= 'Z' || r >= '2' && r <= '7')
 	}) == -1
 }
@@ -114,7 +157,7 @@ func (s keyringStore) readManifest() (manifest, error) {
 		return manifest{}, keyringError("read")
 	}
 	var m *manifest
-	if json.Unmarshal([]byte(raw), &m) != nil || m == nil || !m.Current.valid() || !m.Discard.valid() ||
+	if len(raw) > maxManifestSize || json.Unmarshal([]byte(raw), &m) != nil || m == nil || !m.Current.valid() || !m.Discard.valid() ||
 		m.Current.ID == m.Discard.ID {
 		return manifest{}, errors.New("invalid ChatGPT credential index in the keyring")
 	}
@@ -163,6 +206,9 @@ func (s keyringStore) readSnapshot(v snapshot) (string, error) {
 		if err != nil {
 			return "", keyringError("read")
 		}
+		if len(raw) > base64.RawStdEncoding.EncodedLen(chunkSize) {
+			return "", errors.New("oversized ChatGPT credential entry in the keyring")
+		}
 		chunk, err := base64.RawStdEncoding.DecodeString(raw)
 		if err != nil || len(chunk) == 0 || len(chunk) > chunkSize || (i+1 < v.Chunks && len(chunk) != chunkSize) {
 			return "", errors.New("invalid ChatGPT credential entry in the keyring")
@@ -182,6 +228,9 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
+	}
+	if len(data) > maxSnapshotSize {
+		return errors.New("ChatGPT credential snapshot exceeds the 16 MiB storage limit")
 	}
 	select {
 	case s.lock.writes <- struct{}{}:
@@ -263,6 +312,9 @@ func (s keyringStore) discard(ctx context.Context, v snapshot) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := s.lock.checkName(); err != nil {
+			return err
+		}
 		if err := s.deleteVerified(s.chunkItem(v, i)); err != nil {
 			return err
 		}
@@ -292,13 +344,10 @@ func (s keyringStore) removeDiscarded(ctx context.Context, m manifest) error {
 }
 
 func (s keyringStore) deleteVerified(item string) error {
-	err := s.ring.Delete(service, item)
-	if errors.Is(err, keyring.ErrNotFound) {
+	if errors.Is(s.ring.Delete(service, item), keyring.ErrNotFound) {
 		return nil
 	}
-	if err != nil {
-		return keyringError("remove superseded")
-	}
+	// A provider may report a transport error even after deleting the item.
 	if _, err := s.ring.Get(service, item); !errors.Is(err, keyring.ErrNotFound) {
 		return keyringError("confirm removal of superseded")
 	}

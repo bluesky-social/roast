@@ -449,11 +449,7 @@ func TestReviewWithUnreadableChatGPTVerifierAccount(t *testing.T) {
 }
 
 func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
-	root := t.TempDir()
-	for _, name := range []string{"HOME", "XDG_CONFIG_HOME", "APPDATA"} {
-		t.Setenv(name, root)
-	}
-	keyring.MockInit()
+	root := chatgpttest.UseKeyring(t)
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
