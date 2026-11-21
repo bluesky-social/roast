@@ -84,8 +84,7 @@ func TestChatGPTCommandRejectsInvalidArguments(t *testing.T) {
 }
 
 func TestChatGPTEmptyStatus(t *testing.T) {
-	isolateUserConfig(t)
-	keyring.MockInit()
+	chatgpttest.UseKeyring(t)
 	var out bytes.Buffer
 	cmd := newChatGPTCommand(&out)
 	cmd.SetArgs([]string{"status"})
@@ -98,8 +97,7 @@ func TestChatGPTEmptyStatus(t *testing.T) {
 }
 
 func TestChatGPTModelsRequiresSignIn(t *testing.T) {
-	isolateUserConfig(t)
-	keyring.MockInit()
+	chatgpttest.UseKeyring(t)
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	code, err := ExecuteContext(t.Context(), []string{"chatgpt", "models", "--error-format", "json"}, io.Discard, io.Discard)
 	if code != ExitAuth || !errors.Is(err, chatgpt.ErrAuth) {
@@ -116,7 +114,7 @@ func TestChatGPTModelsRequiresSignIn(t *testing.T) {
 }
 
 func TestChatGPTCommandsReportUnavailableKeyring(t *testing.T) {
-	configPath := isolateUserConfig(t)
+	configPath := filepath.Join(chatgpttest.UseKeyring(t), "plan.yaml")
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	writeAccountConfig(t, configPath, "chatgpt", "chatgpt")
 	keyring.MockInitWithError(errors.New("private keyring diagnostic"))

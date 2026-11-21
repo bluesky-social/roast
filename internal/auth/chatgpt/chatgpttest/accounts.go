@@ -3,12 +3,9 @@
 package chatgpttest
 
 import (
-	"errors"
 	"os"
 	"testing"
 	"time"
-
-	"github.com/zalando/go-keyring"
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
@@ -24,18 +21,7 @@ func UseKeyring(t *testing.T) string {
 	for _, name := range []string{"HOME", "XDG_CONFIG_HOME"} {
 		t.Setenv(name, root)
 	}
-	keyring.MockInit()
-	store, err := storage.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The test profile has a unique lock path under the system's user directory.
-	path := store.(interface{ LockPath() string }).LockPath()
-	t.Cleanup(func() {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Error(err)
-		}
-	})
+	t.Cleanup(storage.UseTestKeyring(root))
 	return root
 }
 

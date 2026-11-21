@@ -44,9 +44,12 @@ func TestNewDoesNotCreateCredentials(t *testing.T) {
 func mockKeyring(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
-	keyring.MockInit()
+	t.Cleanup(storage.UseTestKeyring(dir))
 }
 
 type transportFunc func(*http.Request) (*http.Response, error)

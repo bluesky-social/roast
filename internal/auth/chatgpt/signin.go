@@ -191,7 +191,8 @@ func (c *Client) finishSignIn(ctx context.Context, accounts *accountStore, previ
 		// Key retrieval can outlive the process. Keep the first grant exclusively
 		// for revocation until its identity has been verified.
 		pending := previous
-		if saveErr := accounts.markForRevocation(&pending, token, kind, kind == "access_token"); saveErr != nil {
+		if saveErr := accounts.markForRevocation(&pending, token, kind, kind == "access_token"); saveErr != nil &&
+			!(errors.Is(saveErr, storage.ErrPublished) && accounts.confirmRevocationCheckpoint(pending)) {
 			err = fmt.Errorf("could not save the first ChatGPT grant for recovery: %w", saveErr)
 		}
 	}
