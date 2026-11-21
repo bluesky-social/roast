@@ -1,7 +1,6 @@
 package oauth
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +8,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	josejson "github.com/go-jose/go-jose/v4/json"
 )
 
 // ErrorCategory returns a fixed category safe to show to the user. Provider
@@ -29,45 +30,27 @@ func ErrorCategory(code string) string {
 func oauthResponseCategory(raw json.RawMessage) string {
 	var code string
 	if json.Unmarshal(raw, &code) != nil {
-		field, value := uniqueJSONField(raw, "code")
-		if field != "code" || json.Unmarshal(value, &code) != nil {
+		if json.Unmarshal(errorField(raw, "code"), &code) != nil {
 			return "oauth_error"
 		}
 	}
 	return ErrorCategory(code)
 }
 
-// A terminal error can clear credentials. Duplicate spellings of a field
-// make its value ambiguous, even when both decode as valid JSON.
-func uniqueJSONField(raw json.RawMessage, name string) (string, json.RawMessage) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
-		return "", nil
+// A terminal error can clear credentials. Use go-jose's strict decoder to
+// reject duplicate names, and ignore mixed grant/error responses.
+func errorField(raw json.RawMessage, name string) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if josejson.Unmarshal(raw, &fields) != nil {
+		return nil
 	}
-	var matched string
-	var found json.RawMessage
-	for decoder.More() {
-		key, err := decoder.Token()
-		var value json.RawMessage
-		if err != nil || decoder.Decode(&value) != nil {
-			return "", nil
-		}
-		field, ok := key.(string)
-		if strings.EqualFold(field, "access_token") || strings.EqualFold(field, "refresh_token") || strings.EqualFold(field, "id_token") {
-			// A mixed grant/error response cannot confirm rejection. Never use its credentials for revocation.
-			return "", nil
-		}
-		if ok && strings.EqualFold(field, name) {
-			if found != nil {
-				return "", nil
-			}
-			matched, found = field, value
+	for key := range fields {
+		if (key != name && strings.EqualFold(key, name)) || strings.EqualFold(key, "access_token") ||
+			strings.EqualFold(key, "refresh_token") || strings.EqualFold(key, "id_token") {
+			return nil
 		}
 	}
-	if _, err := decoder.Token(); err != nil {
-		return "", nil
-	}
-	return matched, found
+	return fields[name]
 }
 
 var requestIDPattern = regexp.MustCompile(`^req_[A-Za-z0-9_-]{8,124}$`)
@@ -98,9 +81,7 @@ func responseError(resp *http.Response, catalog bool) error {
 	if contentTypes := resp.Header.Values("Content-Type"); len(contentTypes) == 1 {
 		mediaType, _, err := mime.ParseMediaType(contentTypes[0])
 		if err == nil && mediaType == "application/json" && readJSON(resp.Body, 1<<20, &body) == nil {
-			if field, value := uniqueJSONField(body, "error"); field == "error" {
-				failure.code = oauthResponseCategory(value)
-			}
+			failure.code = oauthResponseCategory(errorField(body, "error"))
 		}
 	}
 	if values := resp.Header.Values("X-Request-Id"); len(values) == 1 {

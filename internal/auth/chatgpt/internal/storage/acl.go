@@ -71,34 +71,7 @@ func checkPrivateMode(st os.FileInfo, directory bool) error {
 	return nil
 }
 
-func (store localFiles) checkPrivatePath(path string, directory bool) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	return store.checkPrivate(path, info, directory)
-}
-
 const privateReadFlags = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
-
-func (store localFiles) checkPrivate(path string, expected os.FileInfo, directory bool) error {
-	if err := checkPrivateMode(expected, directory); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, privateReadFlags, 0)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	info, err := store.privateFileInfo(f, directory)
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(info, expected) {
-		return errors.New("ChatGPT storage changed while checking permissions")
-	}
-	return nil
-}
 
 func (store localFiles) privateFileInfo(f *os.File, directory bool) (os.FileInfo, error) {
 	info, err := f.Stat()

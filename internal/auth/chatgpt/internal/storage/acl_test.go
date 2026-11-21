@@ -17,7 +17,7 @@ func TestStoreRejectsDarwinACLs(t *testing.T) {
 	requireDarwinACL(t)
 	root := t.TempDir()
 	setACL(t, root, "everyone allow list,search,readattr,readsecurity,file_inherit,directory_inherit")
-	err := files.ensureDir(filepath.Join(root, "store"))
+	err := files.WithLock(t.Context(), filepath.Join(root, "store"), func(Store) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "extended ACLs") {
 		t.Fatalf("inherited ACL accepted: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestFirstWriteBelowSearchOnlyAncestor(t *testing.T) {
 	}
 	parent := t.TempDir()
 	store := filepath.Join(parent, "store")
-	if err := files.ensureDir(store); err != nil {
+	if err := os.MkdirAll(store, 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(parent, 0100); err != nil {
