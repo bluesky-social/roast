@@ -408,12 +408,16 @@ func TestConflictingTokensCannotConfirmRevocation(t *testing.T) {
 	}
 }
 
-func TestConflictingRefreshTokensPreserveOnlyAUniqueAccessTokenForCleanup(t *testing.T) {
-	body := `{"access_token":"known","refresh_token":"first","refresh_token":"second"}`
-	var tokens TokenResponse
-	err := readTokenResponse(strings.NewReader(body), "", &tokens)
-	if !errors.Is(err, ErrAmbiguousRotation) || tokens.AccessToken != "known" || tokens.RefreshToken != "" {
-		t.Fatal("failed to distinguish the known access token from conflicting refresh tokens")
+func TestUnusableReplacementPreservesOnlyAKnownAccessTokenForCleanup(t *testing.T) {
+	for _, body := range []string{
+		`{"access_token":"known","refresh_token":"first","refresh_token":"second"}`,
+		`{"access_token":"known","refresh_token":"bad\ntoken"}`,
+	} {
+		var tokens TokenResponse
+		err := readTokenResponse(strings.NewReader(body), "previous", &tokens)
+		if !errors.Is(err, ErrAmbiguousRotation) || tokens.AccessToken != "known" || tokens.RefreshToken != "" {
+			t.Fatal("failed to distinguish the known access token from an unusable replacement")
+		}
 	}
 }
 

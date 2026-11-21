@@ -167,9 +167,9 @@ func (c Client) request(ctx context.Context, method, target string, form url.Val
 
 var errInvalidJSONResponse = errors.New("invalid ChatGPT response")
 
-// ErrAmbiguousRotation means distinct new refresh tokens were observed but no
-// single replacement could be identified for revocation.
-var ErrAmbiguousRotation = errors.New("ChatGPT returned conflicting replacement refresh tokens")
+// ErrAmbiguousRotation means a response supplied a replacement refresh token
+// but did not identify a single usable token for revocation.
+var ErrAmbiguousRotation = errors.New("ChatGPT returned an unusable or conflicting replacement refresh token")
 
 // Read one complete document. In particular, a truncated or ambiguous error
 // response must never be treated as grounds to discard a refresh token.
@@ -202,7 +202,7 @@ func readTokenResponse(body io.Reader, previousRefresh string, tokens *TokenResp
 // Decode each grant field by its exact name. Fully read tokens from a rejected
 // response are evidence for revocation only, including when the body is truncated.
 func scanTokenResponse(data []byte, previousRefresh string) (grant, issued TokenResponse, err error) {
-	var ambiguousAccess, ambiguousRefresh bool
+	var ambiguousAccess, ambiguousRefresh, invalidRefresh bool
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
 		return grant, issued, errInvalidJSONResponse
@@ -266,7 +266,9 @@ func scanTokenResponse(data []byte, previousRefresh string) (grant, issued Token
 				issued.AccessToken = token
 			}
 		case "refresh_token":
-			if token != previousRefresh && ValidRefreshToken(token) {
+			if !ValidRefreshToken(token) {
+				invalidRefresh = true
+			} else if token != previousRefresh {
 				ambiguousRefresh = ambiguousRefresh || (issued.RefreshToken != "" && issued.RefreshToken != token)
 				issued.RefreshToken = token
 			}
@@ -275,9 +277,9 @@ func scanTokenResponse(data []byte, previousRefresh string) (grant, issued Token
 	if ambiguousAccess {
 		issued.AccessToken = ""
 	}
-	if ambiguousRefresh {
-		// A uniquely identified access token can still be revoked after a new
-		// sign-in. The conflicting refresh tokens require manual disconnection.
+	if ambiguousRefresh || (invalidRefresh && issued.RefreshToken == "") {
+		// Keep a known access token for cleanup. The issuer must resolve
+		// replacement refresh tokens we cannot identify or use.
 		issued.RefreshToken = ""
 		return grant, issued, ErrAmbiguousRotation
 	}
