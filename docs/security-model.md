@@ -28,6 +28,8 @@ permissions. On Linux, a Secret Service provider must be reachable on your
 user D-Bus session, with a login or default collection that you can unlock.
 For unattended runs, arrange for that collection to be unlocked or use an
 API-key profile. A locked collection can prompt for unlock.
+Cancellation is checked between keyring operations. An operating-system
+request in progress can hold the lock until the provider responds.
 
 Roast uses a private lock file to serialize account updates and token renewal.
 On macOS it lives in the system's per-user directory. On Linux it lives in the

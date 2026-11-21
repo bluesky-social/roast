@@ -235,6 +235,12 @@ func (s keyringStore) readManifest(ctx context.Context) (manifest, error) {
 		m.Current.ID == m.Discard.ID {
 		return manifest{}, errors.New("invalid ChatGPT credential index in the keyring")
 	}
+	// An empty snapshot is encoded explicitly. Missing or duplicate fields
+	// must never be mistaken for an interrupted first write.
+	canonical, err := json.Marshal(m)
+	if err != nil || string(canonical) != raw {
+		return manifest{}, errors.New("invalid ChatGPT credential index in the keyring")
+	}
 	return *m, nil
 }
 
@@ -256,6 +262,9 @@ func (s keyringStore) ReadJSON(ctx context.Context, dst any) error {
 		if err != nil {
 			// A writer may have committed and removed the previous snapshot.
 			next, readErr := s.readManifest(ctx)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			if readErr == nil && next.Current != m.Current {
 				continue
 			}
@@ -347,7 +356,7 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 	if err != nil {
 		return err
 	}
-	if err := s.discard(ctx, m.Discard); err != nil {
+	if err := s.recoverDiscarded(ctx, m); err != nil {
 		return err
 	}
 	next := snapshot{ID: rand.Text(), Chunks: 1 + (len(data)-1)/chunkSize, Digest: fmt.Sprintf("%x", sha256.Sum256(data))}
@@ -446,6 +455,19 @@ func (s keyringStore) removeDiscarded(ctx context.Context, m manifest) error {
 	}
 	// An interrupted first write may leave only staging entries.
 	return s.deleteVerified(ctx, s.manifestItem())
+}
+
+func (s keyringStore) recoverDiscarded(ctx context.Context, m manifest) error {
+	if m.Discard.ID != "" && m.Current.ID != "" {
+		data, err := s.readSnapshot(ctx, m.Current)
+		if err != nil {
+			return fmt.Errorf("verify the current ChatGPT credential snapshot before recovery: %w", err)
+		}
+		if !json.Valid([]byte(data)) {
+			return errors.New("could not verify the current ChatGPT credential snapshot before recovery")
+		}
+	}
+	return s.removeDiscarded(ctx, m)
 }
 
 func (s keyringStore) deleteVerified(ctx context.Context, item string) error {
