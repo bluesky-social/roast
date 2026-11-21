@@ -10,7 +10,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/json"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -37,7 +36,14 @@ type Identity struct {
 var ErrInvalidID = errors.New("ChatGPT ID token validation failed")
 
 // ValidateID verifies a compact RS256 ID token for exactly one registration.
-func (c Client) ValidateID(ctx context.Context, raw, clientID, nonce string, now func() time.Time) (Identity, error) {
+func (c Client) ValidateID(ctx context.Context, raw, clientID, nonce string, now func() time.Time) (identity Identity, err error) {
+	// Canceled verification is recoverable, even when the token or signature
+	// would otherwise be rejected. A permanent failure can discard a grant.
+	defer func() {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			identity, err = Identity{}, ctxErr
+		}
+	}()
 	signed, err := jose.ParseSignedCompact(raw, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil || len(signed.Signatures) != 1 {
 		return Identity{}, ErrInvalidID
@@ -56,21 +62,23 @@ func (c Client) ValidateID(ctx context.Context, raw, clientID, nonce string, now
 	if err != nil {
 		return Identity{}, err
 	}
-	// StaticKeySet verifies the original signed bytes. The full OIDC verifier
-	// case-folds claim names, so use the same exact-name decoder before and
-	// after verification. Only the authenticated payload supplies the identity.
-	payload, err := keys.VerifySignature(ctx, raw)
-	if err != nil {
-		return Identity{}, ErrInvalidID
+	// Several eligible keys can share the same ID during rotation. Only
+	// authenticated claims can supply the identity returned to the caller.
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return Identity{}, err
+		}
+		payload, err := signed.Verify(key)
+		if err != nil {
+			continue
+		}
+		identity, valid := parseIdentity(payload, clientID, nonce, now())
+		if valid {
+			return identity, nil
+		}
+		break
 	}
-	identity, valid := parseIdentity(payload, clientID, nonce, now())
-	if err := ctx.Err(); err != nil {
-		return Identity{}, err
-	}
-	if !valid {
-		return Identity{}, ErrInvalidID
-	}
-	return identity, nil
+	return Identity{}, ErrInvalidID
 }
 
 func parseIdentity(payload []byte, clientID, nonce string, now time.Time) (Identity, bool) {
@@ -95,7 +103,7 @@ func parseIdentity(payload []byte, clientID, nonce string, now time.Time) (Ident
 // Fetch keys with the same deadline, response-size limit and redirect policy as
 // the rest of the client. A missing key can become available after rotation.
 // Only a failed verification with an eligible key can reject a pending grant.
-func (c Client) signingKeys(ctx context.Context, keyID string) (*oidc.StaticKeySet, error) {
+func (c Client) signingKeys(ctx context.Context, keyID string) ([]*rsa.PublicKey, error) {
 	var document json.RawMessage
 	if err := c.request(ctx, http.MethodGet, jwksURL, nil, "", &document); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -109,7 +117,7 @@ func (c Client) signingKeys(ctx context.Context, keyID string) (*oidc.StaticKeyS
 	if json.Unmarshal(document, &keySet) != nil || keySet.Keys == nil {
 		return nil, fmt.Errorf("%w: invalid ChatGPT identity key set", ErrNetwork)
 	}
-	var keys oidc.StaticKeySet
+	var keys []*rsa.PublicKey
 	for _, raw := range keySet.Keys {
 		// Reject overlong base64urlUInt encodings, including leading padding
 		// bytes that disappear when a JWK is decoded into an RSA public key.
@@ -129,16 +137,16 @@ func (c Client) signingKeys(ctx context.Context, keyID string) (*oidc.StaticKeyS
 		}
 		var key jose.JSONWebKey
 		if json.Unmarshal(raw, &key) != nil || key.KeyID != keyID ||
-			(key.Use != "" && key.Use != "sig") || (key.Algorithm != "" && key.Algorithm != oidc.RS256) {
+			(key.Use != "" && key.Use != "sig") || (key.Algorithm != "" && key.Algorithm != string(jose.RS256)) {
 			continue
 		}
 		pub, ok := key.Key.(*rsa.PublicKey)
 		if ok && pub.N.BitLen() >= 2048 && pub.E >= 3 && pub.E <= math.MaxInt32 && pub.E%2 == 1 {
-			keys.PublicKeys = append(keys.PublicKeys, pub)
+			keys = append(keys, pub)
 		}
 	}
-	if len(keys.PublicKeys) == 0 {
+	if len(keys) == 0 {
 		return nil, fmt.Errorf("%w: ChatGPT identity signing key unavailable; retry later", ErrNetwork)
 	}
-	return &keys, nil
+	return keys, nil
 }

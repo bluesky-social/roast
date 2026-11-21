@@ -32,23 +32,39 @@ func (c *Client) EnablePlan(ctx context.Context, clientID string, showURL func(s
 	return c.signIn(ctx, clientID, true, showURL)
 }
 
-func (c *Client) signIn(ctx context.Context, clientID string, consent bool, showURL func(string) error) error {
+func (c *Client) signIn(ctx context.Context, clientID string, consent bool, showURL func(string) error) (err error) {
 	ctx, cancel := signInContext(ctx)
 	defer cancel()
+	// Detached cleanup can finish after the user cancels. Report both
+	// failures, including when recovering a pending grant before opening a browser.
+	defer func() {
+		if ctxErr := ctx.Err(); err != nil && ctxErr != nil && !errors.Is(err, ctxErr) {
+			err = errors.Join(err, ctxErr)
+		}
+	}()
 
 	var hostID, generation, selection string
-	err := c.withStore(ctx, func(accounts *accountStore) error {
+	err = c.withStore(ctx, func(accounts *accountStore) error {
 		if clientID != "" {
 			previous, err := accounts.credential(clientID)
 			if err != nil {
 				return err
+			}
+			if previous.Pending != nil {
+				// Recover an interrupted rotation before reauthorization can replace it.
+				if err := c.acceptPending(ctx, accounts, &previous); err != nil {
+					if previous.Pending == nil {
+						return err // Cleanup already carries the applicable recovery instructions.
+					}
+					return fmt.Errorf("resolving a pending renewal for ChatGPT account %q: %w. If recovery keeps failing, run roast chatgpt signout CLIENT_ID, then roast chatgpt signin --account CLIENT_ID", previous.ClientID, err)
+				}
 			}
 			if previous.Subject == "" && !previous.PendingRegistration {
 				return errors.New("ChatGPT registration has no validated identity")
 			}
 			generation = previous.Generation
 		}
-		if err := accounts.ensureHost(); err != nil {
+		if err := accounts.ensureHost(ctx); err != nil {
 			return err
 		}
 		hostID, selection = accounts.HostID, accounts.Selection
@@ -66,40 +82,103 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 	defer listener.Close()
 
 	redirect := listener.RedirectURI()
-	if err := showURL(auth.URL(redirect)); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	callback, err := listener.Wait(ctx)
+	displayErr := showURL(auth.URL(redirect))
+	waitCtx := ctx
+	if displayErr != nil {
+		if clientID != "" {
+			return displayErr
+		}
+		// The URL may already have reached the browser. Drain an accepted
+		// registration without waiting for a new callback or exchanging its code.
+		var stop context.CancelFunc
+		waitCtx, stop = context.WithCancel(ctx)
+		stop()
+	}
+	callback, err := listener.Wait(waitCtx)
 	if err != nil {
+		if displayErr != nil {
+			err = displayErr
+		}
+		if clientID == "" {
+			return registrationRecovery(err)
+		}
 		return err
 	}
 
 	// Browser interaction leaves the store unlocked. From code exchange
 	// through publication, sign-in serializes with refresh and sign-out.
-	return c.withStore(ctx, func(accounts *accountStore) error {
+	storeCtx := ctx
+	checkpointed := false
+	if clientID == "" {
+		// The issuer has already created a registration. Allow enough time to finish a concurrent
+		// token exchange and identity-key request, even if sign-in is canceled.
+		var cancelStore context.CancelFunc
+		storeCtx, cancelStore = context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
+		defer cancelStore()
+	}
+	entered := false
+	finish := func(accounts *accountStore) error {
+		entered = true
 		if accounts.HostID != hostID {
 			return errors.New("ChatGPT host identity changed during sign-in")
 		}
 		previous, exists := accounts.Accounts[callback.ClientID]
 		if clientID == "" {
 			if exists {
+				checkpointed = true
 				return fmt.Errorf("ChatGPT registration %q already exists. Reauthorize it with roast chatgpt signin --account CLIENT_ID", callback.ClientID)
 			}
 			// Save the issued ID before consuming the one-use code, so a
-			// failed exchange can be retried for the same registration.
+			// failed exchange can be retried for the same registration. Complete
+			// this local checkpoint if canceled: the issuer already created the ID.
 			previous = credential{Account: Account{ClientID: callback.ClientID, PendingRegistration: true}}
-			if err := accounts.saveCredential(&previous); err != nil {
-				return fmt.Errorf("could not save pending ChatGPT registration: %w", err)
+			if err := accounts.saveCredentialContext(storeCtx, &previous); err != nil {
+				if errors.Is(err, storage.ErrPublished) {
+					checkpointed = true
+					return registrationRecovery(fmt.Errorf("registration %q was written but its location or durability could not be confirmed. Repair credential storage before retrying: %w", previous.ClientID, err))
+				}
+				return err
+			}
+			checkpointed = true
+			if displayErr != nil {
+				return fmt.Errorf("ChatGPT registration %q is saved. Resume with roast chatgpt signin --account CLIENT_ID: %w", previous.ClientID, displayErr)
 			}
 		} else if !exists || previous.Generation != generation {
 			return errors.New("ChatGPT credentials changed during sign-in; retry sign-in explicitly")
 		}
 		return c.finishSignIn(ctx, accounts, previous, auth, redirect, callback.Code, selection)
-	})
+	}
+	for {
+		err = c.withStore(storeCtx, finish)
+		// Retry only acquisition for a newly issued ID. Once the callback
+		// starts it can write credentials and consume the one-use code.
+		if clientID != "" || entered || storeCtx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+			break
+		}
+	}
+	if err != nil && clientID == "" {
+		if displayErr != nil && !errors.Is(err, displayErr) {
+			err = errors.Join(err, displayErr)
+		}
+		if !checkpointed {
+			return registrationRecovery(fmt.Errorf("could not record issued ChatGPT registration %q: %w", callback.ClientID, err))
+		}
+	}
+	return err
+}
+
+func registrationRecovery(err error) error {
+	return fmt.Errorf("%w. If you already approved Roast in the browser, check roast chatgpt status. If the registration is missing, disconnect it in ChatGPT Settings and run roast chatgpt signin again", err)
 }
 
 func (c *Client) finishSignIn(ctx context.Context, accounts *accountStore, previous credential, auth oauth.Authorization, redirect, code, selection string) error {
 	if err := ctx.Err(); err != nil {
+		if previous.PendingRegistration {
+			return fmt.Errorf("ChatGPT registration %q is saved. Resume with roast chatgpt signin --account CLIENT_ID: %w", previous.ClientID, err)
+		}
 		return err
 	}
 	// The one-use code can already be consumed when the user cancels. Read
@@ -111,6 +190,15 @@ func (c *Client) finishSignIn(ctx context.Context, accounts *accountStore, previ
 		err = errors.Join(ctxErr, err)
 	}
 	receivedAt := c.now()
+	token, kind := (credential{AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken}).revocationToken()
+	if err == nil && previous.PendingRegistration && token != "" {
+		// Key retrieval can outlive the process. Keep the first grant exclusively
+		// for revocation until its identity has been verified.
+		pending := previous
+		if saveErr := accounts.markForRevocation(&pending, token, kind, kind == "access_token"); saveErr != nil {
+			err = fmt.Errorf("could not save the first ChatGPT grant for recovery: %w", saveErr)
+		}
+	}
 	var next credential
 	if err == nil {
 		next, err = c.validateSignInGrant(ctx, previous, auth.Nonce, tokens, receivedAt)
@@ -120,19 +208,22 @@ func (c *Client) finishSignIn(ctx context.Context, accounts *accountStore, previ
 	}
 	if err != nil {
 		cause := fmt.Errorf("%w for ChatGPT account %q. Retry with roast chatgpt signin --account CLIENT_ID", err, previous.ClientID)
-		return c.revokeUnpublishedGrant(ctx, previous, tokens, cause)
+		return c.revokeUnpublishedGrant(ctx, accounts, previous, token, kind, cause)
 	}
 
-	if accounts.Selection == selection {
-		accounts.setActive(next.ClientID)
+	// Cleanup after a failed write must preserve the selection from before sign-in.
+	publication := *accounts
+	if publication.Selection == selection {
+		publication.setActive(next.ClientID)
 	}
-	if err := accounts.saveCredentialContext(ctx, &next); err != nil {
+	if err := publication.saveCredentialContext(ctx, &next); err != nil {
 		cause := fmt.Errorf("could not confirm saving ChatGPT credentials for account %q: %w", next.ClientID, err)
 		if errors.Is(err, storage.ErrPublished) {
-			// The new credentials are visible. Revoking would sign the user out.
-			return cause
+			// The original directory contains the grant. Its configured path may
+			// have moved, and revoking here could end the saved session.
+			return registrationRecovery(cause)
 		}
-		return c.revokeUnpublishedGrant(ctx, previous, tokens, cause)
+		return c.revokeUnpublishedGrant(ctx, accounts, previous, token, kind, cause)
 	}
 	if !next.planEnabled() {
 		return fmt.Errorf("ChatGPT plan usage is disabled for signed-in account %q. Run roast chatgpt signin --account CLIENT_ID --enable-plan or configure another billing path", next.ClientID)
@@ -149,6 +240,8 @@ func (c *Client) validateSignInGrant(ctx context.Context, previous credential, n
 		return credential{}, errors.New("ChatGPT account identity changed during reauthorization")
 	}
 
+	// Plan use requires the permission in the token response. Requesting it
+	// in the browser does not establish that the user granted it.
 	next := credential{Account: Account{ClientID: previous.ClientID, Subject: identity.Subject, Email: identity.Email}}
 	if err := next.applyTokenResponse(tokens, receivedAt); err != nil {
 		return credential{}, err
@@ -156,9 +249,13 @@ func (c *Client) validateSignInGrant(ctx context.Context, previous credential, n
 	return next, nil
 }
 
-func (c *Client) revokeUnpublishedGrant(ctx context.Context, previous credential, tokens oauth.TokenResponse, cause error) error {
-	token, tokenType := (credential{AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken}).revocationToken()
+func (c *Client) revokeUnpublishedGrant(ctx context.Context, accounts *accountStore, previous credential, token, tokenType string, cause error) error {
 	if token == "" {
+		// After an interrupted exchange the issuer may have consumed the code.
+		// A definitive OAuth rejection did not issue a grant.
+		if !oauth.DefinitiveGrantRejection(cause) {
+			return errors.Join(cause, unconfirmedRevocation(previous.ClientID))
+		}
 		return cause
 	}
 	if previous.Subject != "" || previous.hasRevocableGrant() {
@@ -166,16 +263,17 @@ func (c *Client) revokeUnpublishedGrant(ctx context.Context, previous credential
 		// after an unconfirmed sign-out. Revocation could end that session.
 		return errors.Join(cause, unconfirmedRevocation(previous.ClientID))
 	}
-	return c.revokeDiscardedToken(ctx, previous.ClientID, token, tokenType, cause)
+	return c.discardGrant(ctx, accounts, &previous, token, tokenType, cause, false)
 }
 
 func (c *Client) revokeDiscardedToken(ctx context.Context, clientID, token, tokenType string, cause error) error {
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := c.provider.Revoke(revokeCtx, clientID, token, tokenType); err != nil {
+	// An access token alone cannot establish what happened to a renewable grant.
+	if err := c.provider.Revoke(revokeCtx, clientID, token, tokenType); err != nil || tokenType == "access_token" {
 		return errors.Join(cause, unconfirmedRevocation(clientID))
 	}
-	return cause
+	return fmt.Errorf("%w. Check connected apps in ChatGPT Settings", cause)
 }
 
 func unconfirmedRevocation(clientID string) error {

@@ -11,15 +11,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Darwin ACL entries can grant access independently of the Unix mode bits.
-func checkFilesystemPermissions(f *os.File, fs *unix.Statfs_t) error {
-	if fs.Flags&(unix.MNT_LOCAL|unix.MNT_IGNORE_OWNERSHIP) != unix.MNT_LOCAL {
-		return errors.New("ChatGPT credential storage requires a local filesystem with ownership enabled on macOS")
-	}
-	switch unix.ByteSliceToString(fs.Fstypename[:]) {
-	case "apfs", "hfs":
-	default:
-		return errors.New("ChatGPT credential storage requires APFS or HFS+ on macOS")
+func init() {
+	platformStore = localFiles{checkMount: checkDarwinFile}
+}
+
+// fgetattrlist reads the extended ACL from the same open file whose mode was checked.
+func checkDarwinFile(f *os.File, fs *unix.Statfs_t) error {
+	localWithOwnership := fs.Flags&(unix.MNT_LOCAL|unix.MNT_IGNORE_OWNERSHIP) == unix.MNT_LOCAL
+	if err := checkDarwinMount(unix.ByteSliceToString(fs.Fstypename[:]), localWithOwnership); err != nil {
+		return err
 	}
 	attrs := unix.Attrlist{
 		Bitmapcount: 5,

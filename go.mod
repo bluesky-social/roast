@@ -5,9 +5,7 @@ go 1.27.4
 require (
 	charm.land/fantasy v0.48.1
 	github.com/charmbracelet/openai-go v0.0.0-20260921175203-216db9e71b83
-	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-jose/go-jose/v4 v4.1.9
-	github.com/gofrs/flock v0.13.2
 	github.com/invopop/jsonschema v0.14.0
 	github.com/klauspost/compress v1.20.4
 	github.com/minio/minio-go/v7 v7.4.1

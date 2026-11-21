@@ -34,7 +34,7 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 			if err := r.ParseForm(); err != nil {
 				return nil, err
 			}
-			if r.Form.Get("client_id") != "oaiapp_test" || r.Form.Get("redirect_uri") != redirect || r.Form.Get("resource") != oauth.APIBaseURL {
+			if r.Form.Get("client_id") != "oaiapp_test" || r.Form.Get("redirect_uri") != redirect || r.Form.Get("resource") != "https://api.openai.com/v1" {
 				t.Error("incorrect exchange")
 			}
 			verifier := r.Form.Get("code_verifier")
@@ -162,13 +162,11 @@ func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	c := testClient(t)
 	key := testutil.NewRSAKey(t)
-	accounts, err := c.loadStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts.HostID, accounts.Active = "stable-host", "oaiapp_existing"
-	existing := credential{Account: Account{ClientID: "oaiapp_existing", Subject: "existing-subject"}, AccessToken: "existing-access", Scopes: oauth.Scope}
-	if err := accounts.saveCredential(&existing); err != nil {
+	if err := c.withStore(t.Context(), func(accounts *accountStore) error {
+		accounts.HostID, accounts.Active = "stable-host", "oaiapp_existing"
+		existing := credential{Account: Account{ClientID: "oaiapp_existing", Subject: "existing-subject"}, AccessToken: "existing-access", Scopes: oauth.Scope}
+		return accounts.saveCredential(&existing)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var nonce string
@@ -557,7 +555,10 @@ func TestAsyncCallbackRejectionsAndDuplicate(t *testing.T) {
 	callbackGET(t, cb, 400)
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Disconnect Roast in ChatGPT Settings") {
+			t.Fatalf("interrupted exchange lost recovery guidance: %v", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("cancellation stuck")
 	}
@@ -860,7 +861,7 @@ func TestSignInRejectsAccountChangesDuringBrowserWait(t *testing.T) {
 				wantError = "host identity changed"
 				if err := c.withStore(t.Context(), func(accounts *accountStore) error {
 					accounts.HostID = "different-host"
-					return accounts.save()
+					return accounts.save(t.Context())
 				}); err != nil {
 					t.Fatal(err)
 				}
@@ -903,6 +904,10 @@ func TestDiscardedSignInGrantIsRevoked(t *testing.T) {
 					}
 				case jwksURL:
 					keysReturned = true
+					saved, err := c.loadCredential("account-b")
+					if err != nil || !saved.PendingRegistration || saved.signedIn() || saved.Pending == nil || !saved.Pending.RevokeOnly || saved.Pending.Response.RefreshToken != "authorized-refresh-account-b" {
+						t.Fatalf("first grant was not recoverable during identity verification: %v", err)
+					}
 					switch failure {
 					case "identity unavailable":
 						return nil, errors.New("identity keys unavailable")
@@ -919,6 +924,12 @@ func TestDiscardedSignInGrantIsRevoked(t *testing.T) {
 						return nil, err
 					}
 					revoked = r.Form.Get("token") == "authorized-refresh-account-b"
+					if failure != "unwritable store" {
+						saved, err := c.loadCredential("account-b")
+						if err != nil || !saved.PendingRegistration || saved.signedIn() || saved.Pending == nil || !saved.Pending.RevokeOnly || saved.Pending.Response.RefreshToken != r.Form.Get("token") {
+							t.Fatalf("rejected first grant could not be recovered for revocation: %v", err)
+						}
+					}
 				}
 				return base(r)
 			})
@@ -1011,6 +1022,75 @@ func TestSignInExchangeExcludesRefresh(t *testing.T) {
 	}
 }
 
+func TestCanceledNewCallbackRetainsOnlyRegistrationID(t *testing.T) {
+	c := testClient(t)
+	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		t.Error("exchanged a code after cancellation")
+		return nil, context.Canceled
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ready := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() { done <- c.SignIn(ctx, "", func(raw string) error { ready <- raw; return nil }) }()
+	var raw string
+	select {
+	case raw = <-ready:
+	case err := <-done:
+		t.Fatalf("sign-in exited before the callback: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("sign-in never opened the callback")
+	}
+	auth, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "issued-on-cancel"
+	err = c.withStore(t.Context(), func(*accountStore) error {
+		completeMockCallback(t, auth.Query(), id)
+		cancel()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := awaitMockSignIn(t, done); !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), id) || !strings.Contains(err.Error(), "--account CLIENT_ID") {
+		t.Fatalf("canceled sign-in did not give a way to resume: %v", err)
+	}
+	accounts, err := c.loadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := accounts.Accounts[id]
+	if accounts.Active != "" || !saved.PendingRegistration || saved.ClientID != id || saved.signedIn() || saved.hasRevocableGrant() {
+		t.Fatal("canceled sign-in did not preserve just the pending registration")
+	}
+	if _, err := c.Token(t.Context()); !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "signin --account CLIENT_ID") {
+		t.Fatalf("a review did not explain how to resume the saved registration: %v", err)
+	}
+}
+
+func TestDisplayFailureAfterCallbackSavesOnlyTheIssuedID(t *testing.T) {
+	c := testClient(t)
+	displayErr := errors.New("could not finish displaying the URL")
+	const id = "already-issued"
+	err := c.SignIn(t.Context(), "", func(raw string) error {
+		auth, err := url.Parse(raw)
+		if err != nil {
+			return err
+		}
+		completeMockCallback(t, auth.Query(), id)
+		return displayErr
+	})
+	if !errors.Is(err, displayErr) || !strings.Contains(err.Error(), id) {
+		t.Fatalf("missing the issued ID or the display error: %v", err)
+	}
+	saved, err := c.loadCredential(id)
+	if err != nil || !saved.PendingRegistration || saved.signedIn() {
+		t.Fatalf("unexpected saved registration after display failed: %v", err)
+	}
+}
+
 func TestCanceledReauthorizationPreservesExistingRegistration(t *testing.T) {
 	c := testClient(t)
 	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
@@ -1019,7 +1099,9 @@ func TestCanceledReauthorizationPreservesExistingRegistration(t *testing.T) {
 	})
 	for _, token := range []string{"existing", ""} {
 		saved := credential{Account: Account{ClientID: "known", Subject: "verified"}, RefreshToken: token}
-		err := c.revokeUnpublishedGrant(t.Context(), saved, oauth.TokenResponse{RefreshToken: "replacement"}, context.Canceled)
+		err := c.withStore(t.Context(), func(accounts *accountStore) error {
+			return c.revokeUnpublishedGrant(t.Context(), accounts, saved, "replacement", "refresh_token", context.Canceled)
+		})
 		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Disconnect Roast in ChatGPT Settings") {
 			t.Fatalf("missing cancellation or manual revocation guidance: %v", err)
 		}
