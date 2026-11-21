@@ -91,6 +91,30 @@ func TestKeyringReadsDistinguishMissingAndUnavailable(t *testing.T) {
 	}
 }
 
+func TestOpenReportsPreviousCredentialFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	config, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(config, "roast", "chatgpt-plan")
+	if err := os.MkdirAll(profile, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(profile, "accounts.json")
+	if err := os.WriteFile(path, []byte("synthetic previous credentials"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(); err == nil || !strings.Contains(err.Error(), "previous Roast version") {
+		t.Fatalf("opening with a previous credential file = %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "synthetic previous credentials" {
+		t.Fatalf("opening changed the previous credential file: %v", err)
+	}
+}
+
 func TestKeyringSplitsLargeSnapshots(t *testing.T) {
 	store, ring := testStore(t)
 	value := strings.Repeat("é☺🔑", chunkSize)
@@ -206,6 +230,24 @@ func TestUnconfirmedCleanupIsRetried(t *testing.T) {
 	}
 }
 
+func TestDeleteErrorAfterRemovingEntry(t *testing.T) {
+	store, ring := testStore(t)
+	if err := save(store, t.Context(), "current"); err != nil {
+		t.Fatal(err)
+	}
+	ring.onDrop = func(item string) error {
+		delete(ring.items, item)
+		return errors.New("keyring connection lost after deletion")
+	}
+	if err := save(store, t.Context(), "replacement"); err != nil {
+		t.Fatal(err)
+	}
+	assertSnapshot(t, store, "replacement")
+	if len(ring.items) != 2 {
+		t.Fatal("superseded credential entries remained")
+	}
+}
+
 func TestReadRetriesIfSnapshotWasRetired(t *testing.T) {
 	store, ring := testStore(t)
 	if err := save(store, t.Context(), "current"); err != nil {
@@ -245,10 +287,16 @@ func TestMissingCommittedEntryIsNotAnEmptyStore(t *testing.T) {
 
 func TestMalformedManifestIsNotAnEmptyStore(t *testing.T) {
 	store, ring := testStore(t)
-	ring.items[store.manifestItem()] = "{}"
-	var got string
-	if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("malformed credential index = %v", err)
+	oversized, err := json.Marshal(manifest{Discard: snapshot{ID: "INVALID", Chunks: maxChunks + 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"{}", string(oversized)} {
+		ring.items[store.manifestItem()] = raw
+		var got string
+		if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("malformed credential index = %v", err)
+		}
 	}
 }
 

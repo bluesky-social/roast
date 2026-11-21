@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -29,6 +30,14 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	if s.lock != nil {
 		return errors.New("WithLock cannot be nested on a locked credential store")
 	}
+	home, err := os.Stat(filepath.Dir(s.lockDir))
+	if err != nil {
+		return err
+	}
+	stat, ok := home.Sys().(*syscall.Stat_t)
+	if !ok || !home.IsDir() || stat.Uid != uint32(os.Geteuid()) || home.Mode().Perm()&0022 != 0 {
+		return errors.New("the ChatGPT keyring lock requires a user-owned home directory without shared write permissions")
+	}
 	if err := os.Mkdir(s.lockDir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
@@ -41,7 +50,7 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	if err != nil {
 		return err
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
+	stat, ok = info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0077 != 0 {
 		return errors.New("the ChatGPT keyring lock directory must be owned by the current user and private")
 	}
@@ -72,6 +81,9 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	}
 	if err := s.removeDiscarded(ctx, m); err != nil {
 		return fmt.Errorf("recover interrupted ChatGPT credential update: %w", err)
+	}
+	if err := s.lock.checkName(); err != nil {
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err

@@ -75,6 +75,25 @@ func TestReplacingConfigDirectoryKeepsKeyringLock(t *testing.T) {
 	}
 }
 
+func TestReplacingLockDuringPreflightBlocksOperation(t *testing.T) {
+	store, ring := testStore(t)
+	ring.onGet = func(item string) (string, error) {
+		if err := os.Rename(store.lockDir, store.lockDir+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(store.lockDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		return ring.get(item)
+	}
+	if err := store.WithLock(t.Context(), func(Store) error {
+		t.Error("account operation started after the lock directory was replaced")
+		return nil
+	}); err == nil {
+		t.Fatal("replacing the lock directory did not fail preflight")
+	}
+}
+
 func TestLockReleasedOnProcessDeath(t *testing.T) {
 	if dir := os.Getenv("ROAST_TEST_LOCK_DIR"); dir != "" {
 		store := keyringStore{lockDir: dir, ring: &memoryKeyring{}}
