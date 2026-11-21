@@ -167,6 +167,11 @@ func (c *Client) refresh(ctx context.Context, accounts *accountStore, saved cred
 // replacement that may be visible so the next call can resume its validation.
 func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountStore, saved *credential, previousGeneration string, writeErr error) error {
 	cause := fmt.Errorf("ChatGPT refresh completed for account %q but saving its replacement could not be confirmed: %w", saved.ClientID, writeErr)
+	const repair = "%w. Repair credential storage and retry. If renewal still fails, disconnect Roast in ChatGPT Settings and sign in again"
+	if errors.Is(writeErr, storage.ErrPublished) {
+		// A second attempt could retire entries the first write still references.
+		return fmt.Errorf(repair, cause)
+	}
 	current, err := loadAccountStore(context.WithoutCancel(ctx), accounts.storage)
 	if err == nil && current.HostID == accounts.HostID && current.Accounts[saved.ClientID].Generation == previousGeneration {
 		retryErr := accounts.saveCredential(saved)
@@ -174,10 +179,9 @@ func (c *Client) refreshCheckpointError(ctx context.Context, accounts *accountSt
 			return fmt.Errorf("%w. The replacement is now saved. Retry to finish validation", cause)
 		}
 		cause = errors.Join(cause, retryErr)
-		writeErr = retryErr
-	}
-	if errors.Is(writeErr, storage.ErrPublished) {
-		return fmt.Errorf("%w. Repair credential storage and retry. If renewal still fails, disconnect Roast in ChatGPT Settings and sign in again", cause)
+		if errors.Is(retryErr, storage.ErrPublished) {
+			return fmt.Errorf(repair, cause)
+		}
 	}
 
 	// Publication failed. A later read can only recover the earlier grant.
