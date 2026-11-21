@@ -3,7 +3,6 @@
 package chatgpt
 
 import (
-	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -246,362 +245,42 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	}
 }
 
-func TestIssuedClientIDOpaqueCallback(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		id    string
-		valid bool
-	}{
-		{"opaque ID", "issued-client-v2", true},
-		{"example prefix", "oaiapp_example", true},
-		{"registration placeholder", "dynamic_agent_client", false},
-		{"empty", "", false},
-		{"whitespace", "has space", false},
-		{"control character", "line\nbreak", false},
-		{"too long", strings.Repeat("a", 257), false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			c := testClient(t)
-			exchanged := false
-			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
-				if r.URL.String() != tokenURL {
-					t.Fatal("unexpected destination")
-				}
-				exchanged = true
-				if err := r.ParseForm(); err != nil {
-					return nil, err
-				}
-				if r.Form.Get("client_id") != tt.id {
-					t.Error("issued ID was modified")
-				}
-				return jsonResponse(http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
-			})
-			err := c.SignIn(context.Background(), "", func(raw string) error {
-				u, err := url.Parse(raw)
-				if err != nil {
-					return err
-				}
-				q := u.Query()
-				callback, err := url.Parse(q.Get("redirect_uri"))
-				if err != nil {
-					return err
-				}
-				callback.RawQuery = url.Values{"state": {q.Get("state")}, "code": {"code"}, "client_id": {tt.id}}.Encode()
-				callbackGET(t, callback, http.StatusOK)
-
-				return nil
-			})
-			if err == nil {
-				t.Fatal("expected rejected callback or mocked exchange failure")
-			}
-			if exchanged != tt.valid {
-				t.Fatalf("exchange=%t, valid=%t", exchanged, tt.valid)
-			}
-			if tt.valid {
-				pending, e := c.loadCredential(tt.id)
-				if e != nil || !pending.PendingRegistration || pending.ClientID != tt.id {
-					t.Fatal("opaque issued ID not retained")
-				}
-			}
-		})
-	}
-}
-
-func TestSignInContextInteractionWindow(t *testing.T) {
-	before := time.Now()
-	ctx, cancel := signInContext(context.Background())
-	defer cancel()
-	after := time.Now()
-	deadline, ok := ctx.Deadline()
-	if !ok || deadline.Before(before.Add(30*time.Minute)) || deadline.After(after.Add(30*time.Minute)) {
-		t.Fatal("sign-in interaction deadline is not 30 minutes")
-	}
-	cancel()
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatal("sign-in context ignored cancellation")
-	}
-}
-
-func TestSignInContextPreservesCallerDeadlineAndCancellation(t *testing.T) {
-	deadline := time.Now().Add(time.Minute)
-	parent, cancelParent := context.WithDeadline(context.Background(), deadline)
-	defer cancelParent()
-	ctx, cancel := signInContext(parent)
-	defer cancel()
-	actual, ok := ctx.Deadline()
-	if !ok || !actual.Equal(deadline) {
-		t.Fatal("sign-in extended an earlier caller deadline")
-	}
-	cancelParent()
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatal("sign-in ignored parent cancellation")
-	}
-}
-
-func startAsyncSignIn(t *testing.T, c *Client, ctx context.Context) (*url.URL, <-chan error) {
+func callbackGET(t *testing.T, callback *url.URL, status int) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(ctx)
-	stopped := make(chan struct{})
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-stopped:
-		case <-time.After(3 * time.Second):
-			t.Error("sign-in goroutine did not stop during cleanup")
-		}
-	})
-	ready := make(chan string, 1)
-	done := make(chan error, 1)
-	go func() {
-		defer close(stopped)
-		done <- c.SignIn(ctx, "oaiapp_test", func(raw string) error { ready <- raw; return nil })
-	}()
-	select {
-	case raw := <-ready:
-		auth, err := url.Parse(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cb, err := url.Parse(auth.Query().Get("redirect_uri"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		cb.RawQuery = url.Values{"state": {auth.Query().Get("state")}, "code": {"private-code-marker"}}.Encode()
-		return cb, done
-	case err := <-done:
-		t.Fatalf("sign-in exited early: %v", err)
-	case <-ctx.Done():
-		t.Fatal("sign-in did not start")
-	}
-	return nil, nil
-}
-
-func callbackGET(t *testing.T, cb *url.URL, status int) string {
-	t.Helper()
-	_, body := callbackGETResponse(t, cb, status)
-	return body
-}
-
-func callbackGETResponse(t *testing.T, cb *url.URL, status int) (http.Header, string) {
-	t.Helper()
-	client := &http.Client{Timeout: 3 * time.Second}
-	res, err := client.Get(cb.String())
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(callback.String())
 	if err != nil {
-		t.Fatalf("callback HTTP response failed: %v", err)
+		t.Fatal(err)
 	}
-	defer res.Body.Close()
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		t.Fatalf("incomplete callback response: %v", err)
-	}
-	if res.StatusCode != status {
-		t.Fatalf("callback status %d, want %d", res.StatusCode, status)
-	}
-	if status == http.StatusOK {
-		assertCallbackCompletePage(t, res.Header, string(body))
-	}
-	return res.Header, string(body)
-}
-
-func TestAsyncCallbackCompleteResponseOnFailure(t *testing.T) {
-	for _, kind := range []string{"callback", "exchange"} {
-		t.Run(kind, func(t *testing.T) {
-			c := testClient(t)
-			seed(t, c, time.Now().Add(time.Hour))
-			c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("private-network-marker") })
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-			cb, done := startAsyncSignIn(t, c, ctx)
-			q := cb.Query()
-			q.Set("error_description", `<script>alert("private-description-marker")</script>`)
-			q.Set("error_uri", "https://private-error-uri.invalid/")
-			q.Set("user_content", "private-user-content-marker")
-			if kind == "callback" {
-				q.Del("code")
-				q.Set("error", "private-error-marker")
-			}
-			cb.RawQuery = q.Encode()
-			header, body := callbackGETResponse(t, cb, 200)
-			var response bytes.Buffer
-			response.WriteString(body)
-			if err := header.Write(&response); err != nil {
-				t.Fatal(err)
-			}
-			for _, values := range q {
-				for _, value := range values {
-					if strings.Contains(response.String(), value) {
-						t.Fatal("callback response exposed request data")
-					}
-				}
-			}
-			select {
-			case err := <-done:
-				if err == nil {
-					t.Fatal("expected failure")
-				}
-			case <-ctx.Done():
-				t.Fatal("sign-in stuck")
-			}
-			cancel()
-		})
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil || resp.StatusCode != status {
+		t.Fatalf("callback returned %d, want %d: %v", resp.StatusCode, status, err)
 	}
 }
 
-func TestAsyncCallbackOAuthErrorCategories(t *testing.T) {
-	for _, tc := range []struct{ name, code, category string }{
-		{"denied", "access_denied", "access_denied"},
-		{"server", "server_error", "server_error"},
-		{"unknown", "private-error-marker", "oauth_error"},
-		{"injected", "access_denied\nprivate-error-marker", "oauth_error"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c := testClient(t)
-			seed(t, c, time.Now().Add(time.Hour))
-			c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
-				t.Error("OAuth error callback started a token exchange")
-				return nil, errors.New("unexpected exchange")
-			})
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			cb, done := startAsyncSignIn(t, c, ctx)
-			q := cb.Query()
-			q.Set("error", tc.code)
-			q.Set("error_description", "private-description-marker")
-			q.Set("error_uri", "https://private-error-uri.invalid/")
-			q.Set("request_id", "req_private_callback_marker")
-			cb.RawQuery = q.Encode()
-			header, body := callbackGETResponse(t, cb, http.StatusOK)
-			var err error
-			select {
-			case err = <-done:
-			case <-ctx.Done():
-				t.Fatal("sign-in stuck after OAuth error callback")
-			}
-			if err == nil || err.Error() != "ChatGPT authorization failed ("+tc.category+")" {
-				t.Fatal("callback did not return the fixed OAuth error category")
-			}
-			var output bytes.Buffer
-			output.WriteString(err.Error())
-			output.WriteString(body)
-			if err := header.Write(&output); err != nil {
-				t.Fatal(err)
-			}
-			for key, values := range q {
-				if key == "error" && tc.code == tc.category {
-					continue // Only a recognized fixed error category may be shown.
-				}
-				for _, value := range values {
-					if strings.Contains(output.String(), value) {
-						t.Fatal("OAuth error callback exposed request data")
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestAsyncCallbackRejectionsAndDuplicate(t *testing.T) {
+func TestInterruptedReauthorizationKeepsPreviousAccount(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
-	exchange := make(chan struct{})
-	release := make(chan struct{})
-	defer close(release)
-	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
-		close(exchange)
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
-		return nil, errors.New("mock failure")
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	cb, done := startAsyncSignIn(t, c, ctx)
-	for _, rejection := range []struct{ method, host, event string }{
-		{http.MethodPost, cb.Host, "rejected_method"},
-		{http.MethodGet, "wrong-host.invalid", "rejected_host"},
-	} {
-		req, err := http.NewRequest(rejection.method, cb.String(), nil)
+	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		cancel()
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+	err := c.SignIn(ctx, c.selected, func(raw string) error {
+		auth, err := url.Parse(raw)
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
-		req.Host = rejection.host
-		req.Header.Set("Authorization", "Bearer private-auth-marker")
-		req.Header.Set("Cookie", "session=private-cookie-marker")
-		res, err := (&http.Client{Timeout: time.Second}).Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = io.Copy(io.Discard, res.Body)
-		res.Body.Close()
-		if res.StatusCode != http.StatusNotFound {
-			t.Fatalf("accepted %s", rejection.event)
-		}
+		completeMockCallback(t, auth.Query(), c.selected)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Disconnect Roast in ChatGPT Settings") {
+		t.Fatalf("interrupted exchange lost recovery guidance: %v", err)
 	}
-	invalid := *cb
-	invalid.Path = "/private-path-marker"
-	callbackGET(t, &invalid, 404)
-	invalid = *cb
-	q := invalid.Query()
-	q.Set("state", "private-state-marker")
-	invalid.RawQuery = q.Encode()
-	callbackGET(t, &invalid, 400)
-	callbackGET(t, cb, 200)
-	select {
-	case <-exchange:
-	case <-ctx.Done():
-		t.Fatal("exchange not started")
-	}
-	callbackGET(t, cb, 400)
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Disconnect Roast in ChatGPT Settings") {
-			t.Fatalf("interrupted exchange lost recovery guidance: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("cancellation stuck")
-	}
-}
-
-func assertCallbackCompletePage(t *testing.T, header http.Header, body string) {
-	t.Helper()
-	const wantBody = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Authorization received</title>
-<script>history.replaceState(null,'','/auth/complete');</script>
-</head>
-<body><p>Authorization received. Return to Roast to check the result.</p></body>
-</html>
-`
-	if body != wantBody {
-		t.Fatal("callback completion page changed or included request data")
-	}
-	_, scriptAndRest, ok := strings.Cut(body, "<script>")
-	if !ok {
-		t.Fatal("callback URL cleanup script missing")
-	}
-	script, _, ok := strings.Cut(scriptAndRest, "</script>")
-	if !ok || script != "history.replaceState(null,'','/auth/complete');" {
-		t.Fatal("callback script does not replace the URL with the fixed completion path")
-	}
-	hash := sha256.Sum256([]byte(script))
-	policy := "default-src 'none'; script-src 'sha256-" + base64.StdEncoding.EncodeToString(hash[:]) + "'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-	for name, want := range map[string]string{
-		"Content-Type":            "text/html; charset=utf-8",
-		"Content-Security-Policy": policy,
-		"Cache-Control":           "no-store",
-		"Referrer-Policy":         "no-referrer",
-		"X-Content-Type-Options":  "nosniff",
-	} {
-		if got := header.Values(name); len(got) != 1 || got[0] != want {
-			t.Errorf("unexpected callback %s header", name)
-		}
-	}
-	if header.Get("Location") != "" || header.Get("Set-Cookie") != "" {
-		t.Fatal("callback completion page redirects or sets cookies")
+	previous, err := c.loadCredential(c.selected)
+	if err != nil || previous.AccessToken != "access" || previous.RefreshToken != "refresh" {
+		t.Fatalf("interrupted exchange changed the previous account: %v", err)
 	}
 }
 

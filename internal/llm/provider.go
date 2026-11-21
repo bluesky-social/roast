@@ -18,6 +18,7 @@ import (
 	fantasyanthropic "charm.land/fantasy/providers/anthropic"
 	fantasyopenai "charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
+	"github.com/charmbracelet/openai-go/option"
 
 	"github.com/bluesky-social/roast/internal/buildinfo"
 )
@@ -93,15 +94,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 			openaicompat.WithSDKOptions(deleteHeaders(envHeaders)...),
 		)
 	case "responses":
-		provider, err = fantasyopenai.New(
-			fantasyopenai.WithAPIKey(cfg.APIKey),
-			fantasyopenai.WithBaseURL(cfg.BaseURL),
-			fantasyopenai.WithHTTPClient(httpClient),
-			fantasyopenai.WithUserAgent(userAgent()),
-			fantasyopenai.WithSDKOptions(deleteHeaders(envHeaders)...),
-			fantasyopenai.WithUseResponsesAPI(),
-			fantasyopenai.WithResponsesAPIFunc(func(string) bool { return true }),
-		)
+		provider, err = responsesProvider(cfg.APIKey, cfg.BaseURL, httpClient, deleteHeaders(envHeaders))
 	case "anthropic":
 		// The Anthropic SDK appends /v1/messages itself; Roast profiles use the
 		// same base-URL convention as the OpenAI protocols and include /v1.
@@ -123,6 +116,18 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 		return nil, fmt.Errorf("initialize %s model %q: %w", protocolName(cfg), cfg.Model, err)
 	}
 	return &client{cfg: cfg, model: mdl, transport: httpClient.Transport.(*captureTransport)}, nil
+}
+
+func responsesProvider(apiKey, baseURL string, httpClient *http.Client, options []option.RequestOption) (fantasy.Provider, error) {
+	return fantasyopenai.New(
+		fantasyopenai.WithAPIKey(apiKey),
+		fantasyopenai.WithBaseURL(baseURL),
+		fantasyopenai.WithHTTPClient(httpClient),
+		fantasyopenai.WithUserAgent(userAgent()),
+		fantasyopenai.WithSDKOptions(options...),
+		fantasyopenai.WithUseResponsesAPI(),
+		fantasyopenai.WithResponsesAPIFunc(func(string) bool { return true }),
+	)
 }
 
 func userAgent() string { return "roast/" + buildinfo.Version }

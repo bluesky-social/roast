@@ -22,9 +22,13 @@ type chatGPTStreamBody struct {
 	completed bool
 	bytesRead int
 	err       error
-	fail      func(error) error
 	call      *chatGPTCall
 	owner     *responseBody
+}
+
+func newChatGPTStreamBody(body io.ReadCloser, call *chatGPTCall, owner *responseBody) *chatGPTStreamBody {
+	// Limit the source before ReadString, including a stream with no newline.
+	return &chatGPTStreamBody{body: body, reader: bufio.NewReader(io.LimitReader(body, maxCapturedResponseSize+1)), call: call, owner: owner}
 }
 
 func (b *chatGPTStreamBody) Read(p []byte) (int, error) {
@@ -35,7 +39,7 @@ func (b *chatGPTStreamBody) Read(p []byte) (int, error) {
 		b.pending, b.err = b.readEvent()
 		if b.err != nil && !errors.Is(b.err, io.EOF) {
 			// Preserve the guard error if the SDK maps the read failure.
-			b.fail(b.err)
+			b.owner.recordFailure(b.err)
 		}
 	}
 	if len(b.pending) > 0 {
@@ -53,7 +57,11 @@ func (b *chatGPTStreamBody) readEvent() ([]byte, error) {
 	var data []string
 	var eventName string
 	for {
-		line, err := b.readLine()
+		line, err := b.reader.ReadString('\n')
+		b.bytesRead += len(line)
+		if b.bytesRead > maxCapturedResponseSize {
+			return nil, errors.New("ChatGPT response exceeds the bounded stream size")
+		}
 		if err != nil {
 			// An event without a terminating blank line is incomplete.
 			if errors.Is(err, io.EOF) {
@@ -65,9 +73,6 @@ func (b *chatGPTStreamBody) readEvent() ([]byte, error) {
 				}
 			}
 			return nil, err
-		}
-		if frame.Len()+len(line) > maxCapturedResponseSize {
-			return nil, errors.New("ChatGPT stream event exceeds the bounded size")
 		}
 		frame.WriteString(line)
 		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
@@ -85,22 +90,6 @@ func (b *chatGPTStreamBody) readEvent() ([]byte, error) {
 			}
 		}
 		return frame.Bytes(), nil
-	}
-}
-
-// ReadSlice bounds allocation even when a peer never sends a newline.
-func (b *chatGPTStreamBody) readLine() (string, error) {
-	var line bytes.Buffer
-	for {
-		fragment, err := b.reader.ReadSlice('\n')
-		if len(fragment) > maxCapturedResponseSize-b.bytesRead {
-			return "", errors.New("ChatGPT response exceeds the bounded stream size")
-		}
-		b.bytesRead += len(fragment)
-		line.Write(fragment)
-		if !errors.Is(err, bufio.ErrBufferFull) {
-			return line.String(), err
-		}
 	}
 }
 

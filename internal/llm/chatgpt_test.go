@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -443,6 +442,17 @@ func TestChatGPTRequestRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestChatGPTStreamBoundsUnterminatedLine(t *testing.T) {
+	source := strings.NewReader(strings.Repeat("x", maxCapturedResponseSize+2))
+	body := newChatGPTStreamBody(io.NopCloser(source), nil, nil)
+	if _, err := io.Copy(io.Discard, body); err == nil || !strings.Contains(err.Error(), "bounded stream size") {
+		t.Fatalf("oversized frame returned %v", err)
+	}
+	if source.Len() != 1 {
+		t.Fatal("oversized frame consumed input beyond the limit sentinel")
+	}
+}
+
 func TestChatGPTUnsafeStreamsNeverDispatch(t *testing.T) {
 	good := string(planStream(t, "read", `{}`))
 	terminal := strings.Index(good, "event: response.completed")
@@ -622,7 +632,7 @@ func TestChatGPTRejectsOversizedRestoredHistoryBeforeCredentials(t *testing.T) {
 
 func TestChatGPTStreamAllowsCommentsCRLFAndMultilineData(t *testing.T) {
 	stream := ": keepalive\r\n\r\ndata: {\"type\":\"response.completed\",\r\ndata: \"response\":{\"status\":\"completed\",\"output\":[]}}\r\n\r\n"
-	b := &chatGPTStreamBody{body: io.NopCloser(strings.NewReader(stream)), reader: bufio.NewReader(strings.NewReader(stream)), fail: func(e error) error { return e }}
+	b := newChatGPTStreamBody(io.NopCloser(strings.NewReader(stream)), nil, nil)
 	got, err := io.ReadAll(b)
 	if err != nil || string(got) != stream || !b.completed {
 		t.Fatalf("completed=%v error=%v stream=%q", b.completed, err, got)

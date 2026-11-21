@@ -37,7 +37,7 @@ func (store localFiles) WithLock(ctx context.Context, dir string, fn func(Store)
 		return errors.New("missing ChatGPT credential directory")
 	}
 	dir = filepath.Clean(dir)
-	if err := store.ensureDir(dir); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	// Kernel-owned advisory locks are released even if Roast is killed. Never
@@ -160,11 +160,4 @@ func privateLock(directory *os.File) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
-}
-
-func (store localFiles) ensureDir(dir string) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	return store.checkPrivatePath(dir, true)
 }

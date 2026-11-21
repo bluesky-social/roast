@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"strings"
 
-	fantasyopenai "charm.land/fantasy/providers/openai"
 	"github.com/charmbracelet/openai-go/option"
 
 	"github.com/bluesky-social/roast/internal/config"
@@ -37,17 +35,9 @@ func newChatGPTResponsesClient(ctx context.Context, cfg ClientConfig, token func
 		return http.ErrUseLastResponse
 	}}
 	opts := append(deleteHeaders(headers), option.WithMaxRetries(0))
-	provider, err := fantasyopenai.New(
-		// A nonempty placeholder prevents the SDK from selecting ambient API
-		// credentials. The transport replaces it on every request, after refresh.
-		fantasyopenai.WithAPIKey("roast-managed-oauth"),
-		fantasyopenai.WithBaseURL(chatGPTBaseURL),
-		fantasyopenai.WithHTTPClient(httpClient),
-		fantasyopenai.WithUserAgent(userAgent()),
-		fantasyopenai.WithSDKOptions(opts...),
-		fantasyopenai.WithUseResponsesAPI(),
-		fantasyopenai.WithResponsesAPIFunc(func(string) bool { return true }),
-	)
+	// The placeholder prevents ambient API credentials from entering the SDK.
+	// The transport supplies the selected account's token for each request.
+	provider, err := responsesProvider("roast-managed-oauth", chatGPTBaseURL, httpClient, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -106,9 +96,7 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 		_ = resp.Body.Close()
 		return nil, owner.recordFailure(errors.New("ChatGPT returned a non-streaming response; no tools were executed"))
 	}
-	resp.Body = &chatGPTStreamBody{
-		call: call, owner: owner, body: resp.Body, reader: bufio.NewReader(resp.Body), fail: owner.recordFailure,
-	}
+	resp.Body = newChatGPTStreamBody(resp.Body, call, owner)
 	return resp, nil
 }
 

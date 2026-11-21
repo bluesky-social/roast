@@ -29,7 +29,6 @@ func newChatGPTCommand(stdout io.Writer) *cobra.Command {
 	root.SetFlagErrorFunc(flagUsageError)
 	for _, command := range root.Commands() {
 		command.Args = usageArgs(command.Args)
-		command.SetFlagErrorFunc(flagUsageError)
 	}
 	return root
 }
@@ -77,18 +76,25 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 	return signin
 }
 
+// Open the account selected when the command starts and bound the operation.
+func runAccountCommand(timeout time.Duration, run func(context.Context, *chatgpt.Client, []string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		client, err := chatgpt.New()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+		defer cancel()
+		return run(ctx, client, args)
+	}
+}
+
 func newChatGPTStatusCommand(stdout io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "List saved accounts and the active registration",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := chatgpt.New()
-			if err != nil {
-				return err
-			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
-			defer cancel()
+		RunE: runAccountCommand(10*time.Second, func(ctx context.Context, client *chatgpt.Client, _ []string) error {
 			accounts, err := client.Status(ctx)
 			if err != nil {
 				return err
@@ -105,7 +111,7 @@ func newChatGPTStatusCommand(stdout io.Writer) *cobra.Command {
 				}
 			}
 			return nil
-		},
+		}),
 	}
 }
 
@@ -122,15 +128,9 @@ func newChatGPTSelectCommand() *cobra.Command {
 			}
 			return nil
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := chatgpt.New()
-			if err != nil {
-				return err
-			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
-			defer cancel()
+		RunE: runAccountCommand(10*time.Second, func(ctx context.Context, client *chatgpt.Client, args []string) error {
 			return client.Select(ctx, args[0])
-		},
+		}),
 	}
 }
 
@@ -147,17 +147,11 @@ func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 			}
 			return nil
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := chatgpt.New()
-			if err != nil {
-				return err
-			}
+		RunE: runAccountCommand(time.Minute, func(ctx context.Context, client *chatgpt.Client, args []string) error {
 			id := ""
 			if len(args) > 0 {
 				id = args[0]
 			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
-			defer cancel()
 			if err := client.SignOut(ctx, id); err != nil {
 				return err
 			}
@@ -165,7 +159,7 @@ func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 				return fmt.Errorf("cleared local ChatGPT credentials, but could not write confirmation: %w", err)
 			}
 			return nil
-		},
+		}),
 	}
 }
 
@@ -174,13 +168,7 @@ func newChatGPTModelsCommand(stdout io.Writer) *cobra.Command {
 		Use:   "models",
 		Short: "List models available to the selected ChatGPT account",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := chatgpt.New()
-			if err != nil {
-				return err
-			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
-			defer cancel()
+		RunE: runAccountCommand(time.Minute, func(ctx context.Context, client *chatgpt.Client, _ []string) error {
 			models, err := client.Models(ctx)
 			if err != nil {
 				return err
@@ -193,6 +181,6 @@ func newChatGPTModelsCommand(stdout io.Writer) *cobra.Command {
 				}
 			}
 			return nil
-		},
+		}),
 	}
 }

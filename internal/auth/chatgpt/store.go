@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
@@ -104,15 +105,6 @@ func (s *accountStore) ensureHost(ctx context.Context) error {
 	if s.HostID != "" {
 		return nil
 	}
-	s.HostID = newHostID()
+	s.HostID = oauth.NewHostID()
 	return s.save(ctx)
-}
-
-// The provider expects a version 4 UUID in URN form.
-func newHostID() string {
-	var b [16]byte
-	rand.Read(b[:])
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("urn:uuid:%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

@@ -2,8 +2,9 @@ package oauth
 
 import (
 	"crypto/rand"
-	"net/url"
+	"strings"
 
+	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 
 	"github.com/bluesky-social/roast/internal/config"
@@ -20,6 +21,11 @@ type Authorization struct {
 	Consent  bool
 }
 
+// NewHostID identifies this Roast installation to OpenAI across browser sign-ins.
+func NewHostID() string {
+	return uuid.New().URN()
+}
+
 // NewAuthorization binds a fresh state, OIDC nonce, and PKCE verifier to one sign-in.
 func NewAuthorization(clientID, hostID string, consent bool) Authorization {
 	return Authorization{
@@ -34,24 +40,24 @@ func NewAuthorization(clientID, hostID string, consent bool) Authorization {
 
 // URL omits any retained ID token because the URL may appear in terminal scrollback.
 func (a Authorization) URL(redirect string) string {
-	query := url.Values{
-		"client_id":             {a.ClientID},
-		"ext_agent_host_id":     {a.HostID},
-		"response_type":         {"code"},
-		"redirect_uri":          {redirect},
-		"scope":                 {Scope},
-		"resource":              {config.OpenAIBaseURL},
-		"state":                 {a.State},
-		"nonce":                 {a.Nonce},
-		"code_challenge_method": {"S256"},
-		"code_challenge":        {oauth2.S256ChallengeFromVerifier(a.Verifier)},
+	client := oauth2.Config{
+		ClientID:    a.ClientID,
+		RedirectURL: redirect,
+		Endpoint:    oauth2.Endpoint{AuthURL: authorizeURL},
+		Scopes:      strings.Fields(Scope),
 	}
-	if a.ClientID == "" {
-		query.Set("client_id", DynamicClientID)
-		query.Set("agent_name_hint", "Roast")
+	options := []oauth2.AuthCodeOption{
+		oauth2.S256ChallengeOption(a.Verifier),
+		oauth2.SetAuthURLParam("nonce", a.Nonce),
+		oauth2.SetAuthURLParam("resource", config.OpenAIBaseURL),
+		oauth2.SetAuthURLParam("ext_agent_host_id", a.HostID),
+	}
+	if client.ClientID == "" {
+		client.ClientID = DynamicClientID
+		options = append(options, oauth2.SetAuthURLParam("agent_name_hint", "Roast"))
 	}
 	if a.Consent {
-		query.Set("prompt", "consent")
+		options = append(options, oauth2.SetAuthURLParam("prompt", "consent"))
 	}
-	return authorizeURL + "?" + query.Encode()
+	return client.AuthCodeURL(a.State, options...)
 }
