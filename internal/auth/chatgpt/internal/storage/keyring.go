@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -189,13 +190,15 @@ func (s keyringStore) LockPath() string {
 type snapshot struct {
 	ID     string `json:"id"`
 	Chunks int    `json:"chunks"`
+	Digest string `json:"sha256"`
 }
 
 func (v snapshot) valid() bool {
 	if v.ID == "" {
-		return v.Chunks == 0
+		return v.Chunks == 0 && v.Digest == ""
 	}
-	return v.Chunks > 0 && v.Chunks <= maxChunks && len(v.ID) <= 64 && strings.IndexFunc(v.ID, func(r rune) bool {
+	_, digestErr := hex.DecodeString(v.Digest)
+	return len(v.Digest) == sha256.Size*2 && digestErr == nil && v.Chunks > 0 && v.Chunks <= maxChunks && len(v.ID) <= 64 && strings.IndexFunc(v.ID, func(r rune) bool {
 		return !(r >= 'A' && r <= 'Z' || r >= '2' && r <= '7')
 	}) == -1
 }
@@ -216,8 +219,11 @@ func (s keyringStore) chunkItem(v snapshot, index int) string {
 	return fmt.Sprintf("%s.%s.%d", s.namespace, v.ID, index)
 }
 
-func (s keyringStore) readManifest() (manifest, error) {
-	raw, err := s.getItem(context.Background(), s.manifestItem())
+func (s keyringStore) readManifest(ctx context.Context) (manifest, error) {
+	raw, err := s.getItem(ctx, s.manifestItem())
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return manifest{}, ctxErr
+	}
 	if errors.Is(err, keyring.ErrNotFound) {
 		return manifest{}, nil
 	}
@@ -232,24 +238,24 @@ func (s keyringStore) readManifest() (manifest, error) {
 	return *m, nil
 }
 
-func (s keyringStore) ReadJSON(dst any) error {
+func (s keyringStore) ReadJSON(ctx context.Context, dst any) error {
 	if s.lock != nil {
 		if err := s.lock.checkName(); err != nil {
 			return err
 		}
 	}
 	for range 3 {
-		m, err := s.readManifest()
+		m, err := s.readManifest(ctx)
 		if err != nil {
 			return err
 		}
 		if m.Current.ID == "" {
 			return os.ErrNotExist
 		}
-		data, err := s.readSnapshot(context.Background(), m.Current)
+		data, err := s.readSnapshot(ctx, m.Current)
 		if err != nil {
 			// A writer may have committed and removed the previous snapshot.
-			next, readErr := s.readManifest()
+			next, readErr := s.readManifest(ctx)
 			if readErr == nil && next.Current != m.Current {
 				continue
 			}
@@ -301,7 +307,11 @@ func (s keyringStore) readSnapshot(ctx context.Context, v snapshot) (string, err
 		}
 		data.Write(chunk)
 	}
-	return data.String(), nil
+	value := data.String()
+	if fmt.Sprintf("%x", sha256.Sum256([]byte(value))) != v.Digest {
+		return "", errors.New("ChatGPT credential snapshot failed its integrity check")
+	}
+	return value, nil
 }
 
 func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
@@ -333,14 +343,14 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 	if err := s.lock.checkName(); err != nil {
 		return err
 	}
-	m, err := s.readManifest()
+	m, err := s.readManifest(ctx)
 	if err != nil {
 		return err
 	}
 	if err := s.discard(ctx, m.Discard); err != nil {
 		return err
 	}
-	next := snapshot{ID: rand.Text(), Chunks: 1 + (len(data)-1)/chunkSize}
+	next := snapshot{ID: rand.Text(), Chunks: 1 + (len(data)-1)/chunkSize, Digest: fmt.Sprintf("%x", sha256.Sum256(data))}
 	if _, err := s.writeManifest(ctx, manifest{Current: m.Current, Discard: next}); err != nil {
 		return err
 	}
@@ -404,6 +414,9 @@ func (s keyringStore) setVerified(ctx context.Context, item, value string) (bool
 			return false, nil
 		}
 		uncertain = err != nil && !errors.Is(err, keyring.ErrNotFound)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return uncertain, ctxErr
+		}
 		if errors.Is(setErr, keyring.ErrSetDataTooBig) {
 			return uncertain, errors.New("ChatGPT credential entry exceeds the system keyring size limit")
 		}
@@ -447,6 +460,9 @@ func (s keyringStore) deleteVerified(ctx context.Context, item string) error {
 		_ = s.deleteItem(item)
 		if _, err := s.getItem(ctx, item); errors.Is(err, keyring.ErrNotFound) {
 			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
 	return keyringError("confirm removal of superseded")

@@ -42,7 +42,7 @@ func tokenGrantContext(parent context.Context) (context.Context, context.CancelF
 }
 
 // New opens Roast's registration store and pins the active registration.
-func New() (*Client, error) {
+func New(ctx context.Context) (*Client, error) {
 	store, err := storage.Open()
 	if err != nil {
 		return nil, err
@@ -52,7 +52,7 @@ func New() (*Client, error) {
 		provider: oauth.NewClient(),
 		now:      time.Now,
 	}
-	accounts, err := c.loadStore()
+	accounts, err := c.loadStore(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +89,7 @@ func ValidAccountID(id string) bool {
 
 // Status reads the saved registrations and their current local grant state.
 func (c *Client) Status(ctx context.Context) ([]Account, error) {
-	accounts, err := c.loadStore()
+	accounts, err := c.loadStore(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +188,7 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 // Verify the checkpoint before revoking when the keyring could not confirm its
 // write or finish cleanup. The caller still holds the account lock.
 func (s *accountStore) confirmRevocationCheckpoint(saved credential) bool {
-	current, err := loadAccountStore(s.storage)
+	current, err := loadAccountStore(context.Background(), s.storage)
 	if err != nil {
 		return false
 	}

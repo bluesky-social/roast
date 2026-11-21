@@ -19,13 +19,13 @@ type accountStore struct {
 	Accounts  map[string]credential `json:"accounts"`
 }
 
-func (c *Client) loadStore() (*accountStore, error) {
-	return loadAccountStore(c.store)
+func (c *Client) loadStore(ctx context.Context) (*accountStore, error) {
+	return loadAccountStore(ctx, c.store)
 }
 
-func loadAccountStore(store storage.Store) (*accountStore, error) {
+func loadAccountStore(ctx context.Context, store storage.Store) (*accountStore, error) {
 	s := &accountStore{storage: store}
-	err := store.ReadJSON(s)
+	err := store.ReadJSON(ctx, s)
 	if errors.Is(err, os.ErrNotExist) {
 		s.Accounts = make(map[string]credential)
 		return s, nil
@@ -55,7 +55,7 @@ func loadAccountStore(store storage.Store) (*accountStore, error) {
 // withStore serializes updates and token rotation across Roast processes.
 func (c *Client) withStore(ctx context.Context, fn func(*accountStore) error) error {
 	return c.store.WithLock(ctx, func(locked storage.Store) error {
-		s, err := loadAccountStore(locked)
+		s, err := loadAccountStore(ctx, locked)
 		if err != nil {
 			return err
 		}

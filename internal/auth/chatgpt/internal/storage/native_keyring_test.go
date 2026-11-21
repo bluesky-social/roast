@@ -21,7 +21,7 @@ func TestNativeKeyringRoundTrip(t *testing.T) {
 		ctx := context.Background()
 		if err := store.WithLock(ctx, func(s Store) error {
 			locked := s.(keyringStore)
-			m, err := locked.readManifest()
+			m, err := locked.readManifest(ctx)
 			if err != nil {
 				return err
 			}
