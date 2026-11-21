@@ -228,15 +228,14 @@ func (s keyringStore) ReadJSON(dst any) error {
 			return os.ErrNotExist
 		}
 		data, err := s.readSnapshot(m.Current)
-		if errors.Is(err, keyring.ErrNotFound) {
+		if err != nil && s.lock == nil {
 			// A writer may have committed and removed the previous snapshot.
-			next, err := s.readManifest()
-			if err != nil {
-				return err
-			}
-			if next.Current != m.Current {
+			next, readErr := s.readManifest()
+			if readErr == nil && next.Current != m.Current {
 				continue
 			}
+		}
+		if errors.Is(err, keyring.ErrNotFound) {
 			return errors.New("incomplete ChatGPT credential snapshot in the keyring")
 		}
 		if err != nil {
@@ -318,18 +317,12 @@ func (s keyringStore) WriteJSON(ctx context.Context, value any) error {
 		}
 		start := i * chunkSize
 		value := base64.RawStdEncoding.EncodeToString(data[start:min(start+chunkSize, len(data))])
-		if _, err := s.setVerified(s.chunkItem(next, i), value); err != nil {
+		if _, err := s.setVerified(ctx, s.chunkItem(next, i), value); err != nil {
 			return err
 		}
 	}
 	published := manifest{Current: next, Discard: m.Current}
 	uncertain, err := s.writeManifest(ctx, published)
-	if err != nil && ctx.Err() == nil {
-		// All chunks are verified. Retry a failed publication before giving
-		// up a replacement token the issuer may have already rotated.
-		retryUncertain, retryErr := s.writeManifest(ctx, published)
-		uncertain, err = uncertain || retryUncertain, retryErr
-	}
 	if err != nil {
 		if uncertain {
 			return errors.Join(ErrPublished, err)
@@ -353,7 +346,7 @@ func (s keyringStore) writeManifest(ctx context.Context, m manifest) (bool, erro
 	if err != nil {
 		return false, err
 	}
-	uncertain, err := s.setVerified(s.manifestItem(), string(data))
+	uncertain, err := s.setVerified(ctx, s.manifestItem(), string(data))
 	if lockErr := s.lock.checkName(); lockErr != nil {
 		return true, errors.Join(err, lockErr)
 	}
@@ -361,17 +354,28 @@ func (s keyringStore) writeManifest(ctx context.Context, m manifest) (bool, erro
 }
 
 // A provider can acknowledge a write without saving it, or fail after saving.
+// Retry the same write once and use the latest readback to determine its outcome.
 // The bool reports whether a failed write still might be visible.
-func (s keyringStore) setVerified(item, value string) (bool, error) {
-	setErr := s.ring.Set(service, item, value)
-	got, err := s.ring.Get(service, item)
-	if err == nil && got == value {
-		return false, nil
+func (s keyringStore) setVerified(ctx context.Context, item, value string) (bool, error) {
+	uncertain := false
+	for range 2 {
+		if err := ctx.Err(); err != nil {
+			return uncertain, err
+		}
+		if err := s.lock.checkName(); err != nil {
+			return uncertain, err
+		}
+		setErr := s.ring.Set(service, item, value)
+		got, err := s.ring.Get(service, item)
+		if err == nil && got == value {
+			return false, nil
+		}
+		uncertain = err != nil && !errors.Is(err, keyring.ErrNotFound)
+		if errors.Is(setErr, keyring.ErrSetDataTooBig) {
+			return uncertain, errors.New("ChatGPT credential entry exceeds the system keyring size limit")
+		}
 	}
-	if errors.Is(setErr, keyring.ErrSetDataTooBig) {
-		return false, errors.New("ChatGPT credential entry exceeds the system keyring size limit")
-	}
-	return err != nil && !errors.Is(err, keyring.ErrNotFound), keyringError("save")
+	return uncertain, keyringError("save")
 }
 
 func (s keyringStore) discard(ctx context.Context, v snapshot) error {

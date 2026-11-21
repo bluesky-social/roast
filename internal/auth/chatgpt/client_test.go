@@ -250,26 +250,28 @@ func TestSignOutRevokesAccessOnlyGrant(t *testing.T) {
 func TestSignOutResumesAfterPublishedCheckpointError(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
+	id := c.selected
 	faults := c.testStoreFaults()
 	faults.afterWrite = func() error {
 		faults.read = errors.New("keyring readback unavailable")
 		return storage.ErrPublished
 	}
-	if err := c.SignOut(t.Context(), ""); !errors.Is(err, storage.ErrPublished) {
+	if err := c.SignOut(t.Context(), ""); !errors.Is(err, storage.ErrPublished) ||
+		!strings.Contains(err.Error(), "roast chatgpt signout -- "+id) {
 		t.Fatalf("unconfirmed sign-out checkpoint = %v", err)
 	}
 	faults.afterWrite, faults.read = nil, nil
 	accounts, err := c.loadStore()
-	if err != nil || accounts.Active != c.selected {
-		t.Fatalf("interrupted sign-out lost the active registration: %v", err)
+	if err != nil || accounts.Active != "" || accounts.Accounts[id].Pending == nil {
+		t.Fatalf("interrupted sign-out was not checkpointed: %v", err)
 	}
 	c.selected = accounts.Active
 	c.provider.HTTP.Transport = mockSignInTransport(t, nil)
-	if err := c.SignOut(t.Context(), ""); err != nil {
+	if err := c.SignOut(t.Context(), id); err != nil {
 		t.Fatal(err)
 	}
 	accounts, err = c.loadStore()
-	if err != nil || accounts.Active != "" || accounts.Accounts[c.selected].signedIn() {
+	if err != nil || accounts.Active != "" || accounts.Accounts[id].signedIn() {
 		t.Fatalf("sign-out retry did not clear the saved grant: %v", err)
 	}
 }
