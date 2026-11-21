@@ -91,8 +91,8 @@ func TestKeyringReadsDistinguishMissingAndUnavailable(t *testing.T) {
 	if err := store.ReadJSON(&got); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("empty keyring = %v", err)
 	}
-	if _, err := os.Stat(store.lockDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a read created the lock directory: %v", err)
+	if _, err := os.Stat(store.lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a read created the lock file: %v", err)
 	}
 	ring.onGet = func(string) (string, error) { return "", errors.New("private backend output") }
 	if err := store.ReadJSON(&got); err == nil || errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "private backend output") {
@@ -112,15 +112,20 @@ func TestOpenReportsPreviousCredentialFile(t *testing.T) {
 	if err := os.MkdirAll(profile, 0700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(profile, "accounts.json")
-	if err := os.WriteFile(path, []byte("synthetic previous credentials"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(); err == nil || !strings.Contains(err.Error(), "previous Roast version") {
-		t.Fatalf("opening with a previous credential file = %v", err)
-	}
-	if got, err := os.ReadFile(path); err != nil || string(got) != "synthetic previous credentials" {
-		t.Fatalf("opening changed the previous credential file: %v", err)
+	for _, name := range []string{"accounts.json", ".credentials-interrupted"} {
+		path := filepath.Join(profile, name)
+		if err := os.WriteFile(path, []byte("synthetic previous credentials"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(); err == nil || !strings.Contains(err.Error(), "previous Roast version") {
+			t.Fatalf("opening with previous credential file %q = %v", name, err)
+		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != "synthetic previous credentials" {
+			t.Fatalf("opening changed previous credential file %q: %v", name, err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -141,9 +146,9 @@ func TestKeyringSplitsLargeSnapshots(t *testing.T) {
 	if err != nil || first.Current.Chunks < 2 {
 		t.Fatalf("snapshot did not span several entries: %v", err)
 	}
-	entries, err := os.ReadDir(store.lockDir)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("storing credentials wrote files to the lock directory: %v", err)
+	lockData, err := os.ReadFile(store.lockPath)
+	if err != nil || len(lockData) != 0 {
+		t.Fatalf("credential lock file was not empty: %v", err)
 	}
 	if err := save(store, t.Context(), "replacement"); err != nil {
 		t.Fatal(err)
@@ -152,6 +157,31 @@ func TestKeyringSplitsLargeSnapshots(t *testing.T) {
 	if len(ring.items) != 2 {
 		t.Fatal("retired credential entries remained after the update")
 	}
+}
+
+func TestProfileAliasUsesSameKeyringScope(t *testing.T) {
+	root := privateTestHome(t)
+	link := filepath.Join(t.TempDir(), "config-alias")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	ring := &memoryKeyring{items: make(map[string]string)}
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", root)
+	store, err := OpenWithKeyring(ring, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := save(store, t.Context(), "current"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", link)
+	t.Setenv("XDG_CONFIG_HOME", link)
+	alias, err := OpenWithKeyring(ring, link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSnapshot(t, alias, "current")
 }
 
 func TestInterruptedWritePreservesCurrentSnapshot(t *testing.T) {
@@ -210,6 +240,36 @@ func TestUncertainPublicationPreservesReplacement(t *testing.T) {
 		t.Fatalf("unconfirmed commit = %v", err)
 	}
 	ring.onGet = nil
+	assertSnapshot(t, store, "replacement")
+}
+
+func TestPublicationRetriesAfterDefiniteFailure(t *testing.T) {
+	store, ring := testStore(t)
+	if err := save(store, t.Context(), "current"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.readManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	ring.onSet = func(item, value string) error {
+		if !failed && item == store.manifestItem() {
+			var index manifest
+			if err := json.Unmarshal([]byte(value), &index); err != nil {
+				t.Fatal(err)
+			}
+			if index.Current != m.Current {
+				failed = true
+				return errors.New("transient error before publishing")
+			}
+		}
+		ring.items[item] = value
+		return nil
+	}
+	if err := save(store, t.Context(), "replacement"); err != nil || !failed {
+		t.Fatalf("retry after failed publication = %v", err)
+	}
 	assertSnapshot(t, store, "replacement")
 }
 
