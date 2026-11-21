@@ -46,7 +46,7 @@ func TestLockRejectsSymlinkDirectory(t *testing.T) {
 }
 
 func TestReplacingConfigDirectoryKeepsKeyringLock(t *testing.T) {
-	root := t.TempDir()
+	root := privateTestHome(t)
 	profile := filepath.Join(root, "config")
 	if err := os.Mkdir(profile, 0700); err != nil {
 		t.Fatal(err)
@@ -72,6 +72,36 @@ func TestReplacingConfigDirectoryKeepsKeyringLock(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReplacingLockDuringPreflightBlocksOperation(t *testing.T) {
+	store, ring := testStore(t)
+	if err := save(store, t.Context(), "current"); err != nil {
+		t.Fatal(err)
+	}
+	ring.onDrop = func(string) error { return errors.New("cleanup failed") }
+	if err := save(store, t.Context(), "replacement"); !errors.Is(err, ErrPublished) {
+		t.Fatalf("unconfirmed cleanup = %v", err)
+	}
+	ring.onDrop = func(string) error {
+		t.Error("credential cleanup started after the lock directory was replaced")
+		return nil
+	}
+	ring.onGet = func(item string) (string, error) {
+		if err := os.Rename(store.lockDir, store.lockDir+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(store.lockDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		return ring.get(item)
+	}
+	if err := store.WithLock(t.Context(), func(Store) error {
+		t.Error("account operation started after the lock directory was replaced")
+		return nil
+	}); err == nil {
+		t.Fatal("replacing the lock directory did not fail preflight")
 	}
 }
 
