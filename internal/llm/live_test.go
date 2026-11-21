@@ -17,7 +17,7 @@ import (
 )
 
 // Live tests run a minimal two-turn review loop against a real endpoint. They
-// are opt-in: each skips unless its ROAST_LIVE_*_API_KEY is set. Keys are
+// are opt-in through their provider-specific ROAST_LIVE_* settings. Keys are
 // never logged; failures report only tool choices and provider findings.
 
 func liveSetting(name, fallback string) string {
@@ -138,34 +138,15 @@ func runLiveTwoTurn(t *testing.T, cfg ClientConfig, recorder *liveRecorder) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token := rand.Text()
-	read := false
-	var out struct {
-		Primes int    `json:"primes"`
-		Token  string `json:"token"`
-	}
-	err = c.Converse(t.Context(),
-		// The arithmetic invites a thinking block on the first turn, which is
-		// what the replay check needs; adaptive models may still skip it.
-		"You are checking a tool loop. Before calling any tool, think carefully: how many of 2^31-1, 2^61-1, and 2^67-1 are prime? Then call read_note exactly once. Then call submit with primes set to that count and token set to the token read_note returned.",
-		"Begin.",
-		ConverseOpts{MaxTurns: 2, FinalTool: "submit", Tools: []Tool{
-			{Name: "read_note", Description: "Read the note that holds the token.", Schema: map[string]any{
-				"type": "object", "properties": map[string]any{}, "additionalProperties": false,
-			}, Run: func(context.Context, map[string]any) (any, error) {
-				read = true
-				return map[string]any{"token": token}, nil
-			}},
-			{Name: "submit", Description: "Submit the result.", Schema: reflectSchema(&out)},
-		}}, &out)
+	err = runLiveToolLoop(t.Context(), c)
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	t.Logf("requests=%d thinking blocks=%d tool choices=%v", len(recorder.choices), recorder.thinking, recorder.choices)
 	if err != nil {
 		t.Fatalf("two-turn loop failed: %v", err)
 	}
-	if !read || out.Token != token || len(recorder.choices) < 2 {
-		t.Fatalf("tool result did not round-trip: read=%v token match=%v requests=%d", read, out.Token == token, len(recorder.choices))
+	if len(recorder.choices) < 2 {
+		t.Fatalf("expected two model calls, got %d", len(recorder.choices))
 	}
 	for _, choice := range recorder.choices {
 		if choice != "" && choice != `"auto"` && !strings.Contains(choice, `"type":"auto"`) {
@@ -243,5 +224,75 @@ func TestLiveDeepSeekReasoningCeiling(t *testing.T) {
 	t.Logf("error: %v", err)
 	if !errors.Is(err, ErrNoFinalCall) || !strings.Contains(err.Error(), `finish reason "length"`) || !strings.Contains(err.Error(), "raise max_output_tokens") {
 		t.Fatalf("error = %v, want the length finish named with the max_output_tokens hint", err)
+	}
+}
+
+func runLiveToolLoop(ctx context.Context, c Client) error {
+	token := rand.Text()
+	read := false
+	var out struct {
+		Primes int    `json:"primes"`
+		Token  string `json:"token"`
+	}
+	err := c.Converse(ctx,
+		// The arithmetic invites a thinking block on the first turn, which is
+		// what the replay check needs; adaptive models may still skip it.
+		"You are checking a tool loop. Before calling any tool, think carefully: how many of 2^31-1, 2^61-1, and 2^67-1 are prime? Then call read_note exactly once. Then call submit with primes set to that count and token set to the token read_note returned.",
+		"Begin.",
+		ConverseOpts{MaxTurns: 2, FinalTool: "submit", Tools: []Tool{
+			{Name: "read_note", Description: "Read the note that holds the token.", Schema: map[string]any{
+				"type": "object", "properties": map[string]any{}, "additionalProperties": false,
+			}, Run: func(context.Context, map[string]any) (any, error) {
+				read = true
+				return map[string]any{"token": token}, nil
+			}},
+			{Name: "submit", Description: "Submit the result.", Schema: reflectSchema(&out)},
+		}}, &out)
+	if err != nil {
+		return err
+	}
+	if !read || out.Token != token {
+		return errors.New("live tool result did not round-trip")
+	}
+	return nil
+}
+
+// TestLiveChatGPTTwoTurnReview spends plan usage on a fixed diagnostic prompt
+// and a random tool result. Use an authorized account from roast chatgpt signin
+// and a model slug from roast chatgpt models.
+//
+//	ROAST_LIVE_CHATGPT=1 ROAST_LIVE_CHATGPT_MODELS='<model-slug>' \
+//	  go test ./internal/llm -run TestLiveChatGPTTwoTurnReview -count=1 -v
+func TestLiveChatGPTTwoTurnReview(t *testing.T) {
+	if liveEnv["ROAST_LIVE_CHATGPT"] != "1" {
+		t.Skip("set ROAST_LIVE_CHATGPT=1 after roast chatgpt signin to test the direct plan route")
+	}
+	ran := false
+	for _, model := range strings.Split(liveSetting("ROAST_LIVE_CHATGPT_MODELS", "gpt-6.1-sol"), ",") {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		ran = true
+		t.Run(model, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+			defer cancel()
+			c, err := New(ctx, ClientConfig{Protocol: "chatgpt", Model: model, MaxOutputTokens: 2048, MaxAttempts: 1, RequestTimeout: 2 * time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// ChatGPT credentials can only go to the real endpoint, so this test
+			// uses the same two-turn check directly, without the recording proxy.
+			if err := runLiveToolLoop(ctx, c); err != nil {
+				t.Fatal(err)
+			}
+			if c.Usage().Calls < 2 {
+				t.Fatalf("expected two model calls, got %d", c.Usage().Calls)
+			}
+			t.Logf("direct plan route passed: %d model calls", c.Usage().Calls)
+		})
+	}
+	if !ran {
+		t.Fatal("ROAST_LIVE_CHATGPT_MODELS contains no model slugs")
 	}
 }

@@ -18,6 +18,7 @@ import (
 	fantasyanthropic "charm.land/fantasy/providers/anthropic"
 	fantasyopenai "charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
+	"github.com/charmbracelet/openai-go/option"
 
 	"github.com/bluesky-social/roast/internal/buildinfo"
 )
@@ -69,6 +70,9 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if cfg.MaxOutputTokens <= 0 {
 		return nil, fmt.Errorf("%s: max output tokens must be positive", cfg.Model)
 	}
+	if cfg.Protocol == "chatgpt" {
+		return newChatGPTClient(ctx, cfg)
+	}
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		// Fantasy omits an empty key, and the SDKs then fall back to ambient
 		// credentials: environment variables, profile files, or federation.
@@ -90,15 +94,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 			openaicompat.WithSDKOptions(deleteHeaders(envHeaders)...),
 		)
 	case "responses":
-		provider, err = fantasyopenai.New(
-			fantasyopenai.WithAPIKey(cfg.APIKey),
-			fantasyopenai.WithBaseURL(cfg.BaseURL),
-			fantasyopenai.WithHTTPClient(httpClient),
-			fantasyopenai.WithUserAgent(userAgent()),
-			fantasyopenai.WithSDKOptions(deleteHeaders(envHeaders)...),
-			fantasyopenai.WithUseResponsesAPI(),
-			fantasyopenai.WithResponsesAPIFunc(func(string) bool { return true }),
-		)
+		provider, err = responsesProvider(cfg.APIKey, cfg.BaseURL, httpClient, deleteHeaders(envHeaders))
 	case "anthropic":
 		// The Anthropic SDK appends /v1/messages itself; Roast profiles use the
 		// same base-URL convention as the OpenAI protocols and include /v1.
@@ -122,6 +118,18 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	return &client{cfg: cfg, model: mdl, transport: httpClient.Transport.(*captureTransport)}, nil
 }
 
+func responsesProvider(apiKey, baseURL string, httpClient *http.Client, options []option.RequestOption) (fantasy.Provider, error) {
+	return fantasyopenai.New(
+		fantasyopenai.WithAPIKey(apiKey),
+		fantasyopenai.WithBaseURL(baseURL),
+		fantasyopenai.WithHTTPClient(httpClient),
+		fantasyopenai.WithUserAgent(userAgent()),
+		fantasyopenai.WithSDKOptions(options...),
+		fantasyopenai.WithUseResponsesAPI(),
+		fantasyopenai.WithResponsesAPIFunc(func(string) bool { return true }),
+	)
+}
+
 func userAgent() string { return "roast/" + buildinfo.Version }
 
 func (c *client) Name() string { return c.cfg.Model }
@@ -139,6 +147,9 @@ func (c *client) addUsage(providerUsage fantasy.Usage) Usage {
 	uncached := input
 	// OpenAI-shaped protocols report cached input as a subset of input_tokens;
 	// Anthropic reports input, cache-read, and cache-creation as disjoint counts.
+	// chatgpt deliberately stays out of this branch: the pinned Fantasy
+	// Responses adapter already subtracts cached input in responsesUsage.
+	// Its end-to-end wire test guards against subtracting that cache twice.
 	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" {
 		cacheRead = min(cacheRead, input)
 		cacheWrite = min(cacheWrite, input-cacheRead)
@@ -183,7 +194,20 @@ type sessionContextKey struct{}
 // reading at a terminal SSE event rather than EOF. Never share bodies between
 // concurrent verifier calls.
 type responseBodyKey struct{}
-type responseBody struct{ body io.ReadCloser }
+type responseBody struct {
+	body io.ReadCloser
+	// A direct plan-usage request retains its precise failure independently
+	// of SDK error mapping. Each attempt owns this state.
+	failure       error
+	terminalUsage *fantasy.Usage
+}
+
+func (b *responseBody) recordFailure(err error) error {
+	if b != nil {
+		b.failure = err
+	}
+	return err
+}
 
 func (b *responseBody) close() error {
 	if b.body == nil {
@@ -352,6 +376,12 @@ func normalizeProviderError(ctx context.Context, modelName string, err error) er
 		return err
 	}
 	if status, ok := errorStatus(err); ok && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		var planErr *chatGPTError
+		if errors.As(err, &planErr) {
+			// Direct plan usage has its own OAuth/eligibility recovery. Preserve
+			// that error and never suggest an API key for this route.
+			return fmt.Errorf("%w: %w", ErrAuth, err)
+		}
 		return fmt.Errorf("%w: %v; check the configured API key", ErrAuth, err)
 	}
 	return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)

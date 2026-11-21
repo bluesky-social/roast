@@ -12,6 +12,66 @@ does not load repository-local configuration. A checked-out repository therefore
 cannot select a network destination or credential merely by adding a config
 file.
 
+## Direct ChatGPT plan usage
+
+On macOS and Linux, run `roast chatgpt signin` and select a `chatgpt` profile.
+Roast uses `https://auth.openai.com` for sign-in, refresh, and revocation
+and sends access tokens to `https://api.openai.com/v1` for model listing
+and inference. Leave `endpoint`, `api_key`, `api_key_env`, and `session_header`
+unset. Roast rejects role overrides for the endpoint and API key and ignores
+`OPENAI_BASE_URL` and `OPENAI_API_KEY` for this protocol.
+
+Roast stores registrations, tokens, and pending refresh responses in the
+system keyring through [go-keyring](https://github.com/zalando/go-keyring).
+On macOS, access goes through `/usr/bin/security` and follows that tool's Keychain
+permissions. On Linux, a Secret Service provider must be reachable on your
+user D-Bus session, with a login or default collection that you can unlock.
+For unattended runs, arrange for that collection to be unlocked or use an
+API-key profile. A locked collection can prompt for unlock. Encryption at rest
+and access control depend on the provider. Other programs with access to your
+session bus may be able to read credentials from an unlocked collection.
+An in-progress keyring operation can hold the lock until the provider responds,
+including during a read on Linux.
+After a forced exit on Linux, Secret Service can finish an already dispatched
+write after the process releases its lock. Wait for the keyring provider before
+retrying a command that was forcibly stopped during a write.
+
+Roast uses a private lock file to serialize account updates and token renewal.
+On macOS it lives in the system's per-user directory. On Linux it lives in the
+user's home, which must be user-owned and have no shared write permissions.
+Keep the lock location under directories you trust, and leave the lock file
+in place while any Roast command is running.
+Before moving your user config directory, finish or cancel any running Roast
+commands, including browser sign-ins. At the old config path, use
+`roast chatgpt status` to find each registration and run
+`roast chatgpt signout -- CLIENT_ID` for each. If local cleanup fails, repair
+keyring access and retry from the old path before moving. If revocation is
+unconfirmed, disconnect the registration in ChatGPT Settings. After moving,
+run `roast chatgpt signin` to connect the new profile.
+Each update saves new keyring entries before publishing the snapshot that
+readers use. Roast cleans up entries left by an interruption before attempting
+another token renewal.
+
+When an unusable refresh reply contains a complete, distinct replacement
+refresh token, Roast asks OpenAI to revoke it. It ignores credentials echoed
+in OAuth errors. If revocation cannot be confirmed, disconnect Roast in ChatGPT
+Settings. If OpenAI's identity verification keys are temporarily unavailable,
+Roast saves the replacement and retries verification on the next request.
+
+If the connection drops after OpenAI rotates a token but before Roast receives
+the replacement, or Roast exits before saving it, you may need to sign in again.
+To revoke that unseen replacement, disconnect Roast in ChatGPT Settings.
+Signing out asks OpenAI to revoke the grant, then clears the local credentials
+even if OpenAI cannot be reached. If a sign-out reported unconfirmed remote
+revocation, check Connected Apps in ChatGPT Settings after retrying local cleanup.
+To reconnect a saved account, fix any reported
+storage problem, then run `roast chatgpt signin --account CLIENT_ID` with the ID from
+`roast chatgpt status`. If you used an earlier file-backed preview, sign in
+again to populate the keyring. First sign out using the preview, or disconnect
+its registration in ChatGPT Settings. Then remove the preview's credential file.
+For a file-backed preview, check its profile directory for `accounts.json`
+and any `.credentials-*` files left by interrupted writes.
+
 ## Configuration templates
 
 An organization can publish a configuration template at a URL. A template is
@@ -73,9 +133,8 @@ stderr, so redirected review output is never mixed with them.
 
 ## Credentials and endpoints
 
-Each inference profile binds a model, endpoint, protocol, and credential
-source as one unit. Provider environment variables are a fallback, never an
-override:
+API-key profiles bind a model, endpoint, protocol, and credential source.
+Provider environment variables supply fallback values.
 
 - `ROAST_FINDER_*` and `ROAST_VERIFIER_*` variables override the selected
   profile's fields, and command-line role flags override both.
@@ -113,19 +172,25 @@ withheld.
 A review sends its prompt, selected diff or repository manifest, file content,
 tool schemas, and local tool results to the configured finder endpoint. Candidate
 findings and the code needed to adjudicate them are sent to the configured
-verifier endpoint. `roast doctor` makes two small inference requests to each
-configured role (a fixed probe prompt, one tool call and its result, then a
-submission) in addition to querying its model-listing endpoint.
+verifier endpoint. For each valid role, `roast doctor` runs a two-turn probe
+with a fixed prompt, a diagnostic tool call and result, and a final submission.
+It also queries the model list for API-key profiles.
 
-Each inference request carries only the credential, base URL, and headers from
+Each `chatgpt` inference request sends the conversation so far, including
+prior replies, completed reasoning, and tool results. Roast sets `store: false`
+to ask OpenAI to skip saving the response. It validates the completed response
+before running local tools. Reviews and the `roast doctor` probe count toward
+your plan. The output-token budget is a local estimate.
+
+API-key inference requests use only the credential, base URL, and headers from
 Roast's resolved configuration. Roast ignores the provider SDKs' ambient
 defaults, such as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, Anthropic
 profile files, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, and
 `OPENAI_CUSTOM_HEADERS`; `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the
 `*_BASE_URL` variables apply only as inputs to Roast's own configuration.
-A profile's `session_header`, which a template may also set, only adds one more
-header carrying the per-conversation session ID; it cannot name a credential or
-framing header, or one Roast or the provider SDK sets.
+An API-key profile's `session_header`, which a template may also set, adds a
+header carrying the per-conversation session ID. Roast rejects names reserved
+for credentials or framing and names set by Roast or the provider SDK.
 
 Roast does not infer trust from a model name. An OpenAI-compatible gateway,
 hosted provider, and local server are all treated as the operator-configured
