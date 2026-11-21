@@ -76,7 +76,7 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	if err != nil {
 		return err
 	}
-	if err := s.recoverDiscarded(ctx, m); err != nil {
+	if err := s.cleanupDiscarded(ctx, m); err != nil {
 		return fmt.Errorf("recover interrupted ChatGPT credential update: %w", err)
 	}
 	if err := s.lock.checkName(); err != nil {
