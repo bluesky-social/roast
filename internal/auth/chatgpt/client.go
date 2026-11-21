@@ -143,7 +143,8 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 			return err
 		}
 		// Publish deselection together with the revocation checkpoint.
-		if accounts.Active == id {
+		deselect := accounts.Active == id
+		if deselect {
 			accounts.setActive("")
 		}
 
@@ -156,7 +157,7 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 		}
 		if token != "" {
 			// A crash during revocation must never leave a locally usable grant.
-			if saved.Pending == nil || !saved.Pending.RevokeOnly {
+			if deselect || saved.Pending == nil || !saved.Pending.RevokeOnly {
 				if err := accounts.markForRevocation(&saved, token, tokenType, unknownRefresh); err != nil {
 					if !errors.Is(err, storage.ErrPublished) || !accounts.confirmRevocationCheckpoint(saved) {
 						return errors.Join(fmt.Errorf("could not confirm saving the pending sign-out: %w. Repair credential storage and retry with roast chatgpt signout -- %s", err, id), unconfirmedRevocation(id))
