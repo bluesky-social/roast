@@ -12,6 +12,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/chatgpttest"
 )
 
 func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
@@ -26,9 +27,7 @@ func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
 		}
 		return
 	}
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	chatgpttest.UseKeyring(t)
 	keyring.MockInitWithError(errors.New("keyring unavailable in test"))
 	operation := WithPinnedChatGPTAccount(t.Context())
 	_, initialErr := chatGPTAccount(operation)
