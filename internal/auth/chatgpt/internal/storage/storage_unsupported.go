@@ -11,9 +11,7 @@ var errUnsupported = errors.New("Roast's ChatGPT sign-in is available on macOS a
 
 func CheckSupported() error { return errUnsupported }
 
-func ReadJSON(string, any) error { return errUnsupported }
-
-func WriteJSON(string, any) error { return errUnsupported }
+func readPrivateFile(string) ([]byte, error) { return nil, errUnsupported }
 
 func WriteJSONContext(context.Context, string, any) error { return errUnsupported }
 
