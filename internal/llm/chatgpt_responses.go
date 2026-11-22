@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"strings"
 
@@ -43,7 +44,10 @@ func newChatGPTResponsesClient(ctx context.Context, cfg ClientConfig, token func
 	if err != nil {
 		return nil, err
 	}
-	return &chatGPTClient{client: &client{cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture}}, nil
+	return &client{
+		cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture,
+		measurePrompt: chatGPTConversationBytes, fixedOutputLimit: true,
+	}, nil
 }
 
 type chatGPTTransport struct {
@@ -59,21 +63,38 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
-		return resp, err
+		if interruption := chatGPTInterruption(err); interruption != nil {
+			return nil, call.recordFailure(interruption)
+		}
+		return nil, call.recordFailure(errors.New("ChatGPT connection failed before a valid HTTP response"))
 	}
 	if resp.Body == nil {
 		resp.Body = http.NoBody
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		_ = resp.Body.Close()
-		if readErr != nil {
-			// The HTTP status still determines recovery when the optional error body is incomplete.
-			data = nil
+		const maxErrorBody = 64 << 10
+		if resp.ContentLength > maxErrorBody {
+			_ = resp.Body.Close()
+			rejection := permanentModelError{err: newChatGPTError(resp.StatusCode, nil)}
+			return nil, call.recordFailure(rejection)
 		}
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
+		_ = resp.Body.Close()
 		// Handle rejections here so the SDK never sees their raw diagnostics
 		// and the HTTP client never follows a redirect.
-		return nil, call.recordFailure(newChatGPTError(resp.StatusCode, data))
+		lengthMismatch := resp.ContentLength > 0 && int64(len(data)) != resp.ContentLength
+		oversized := len(data) > maxErrorBody
+		if oversized || (lengthMismatch && int64(len(data)) > resp.ContentLength) {
+			data = nil
+		}
+		rejection := newChatGPTError(resp.StatusCode, data)
+		if readErr != nil || oversized || lengthMismatch {
+			rejection = permanentModelError{err: rejection}
+		}
+		if interruption := chatGPTInterruption(readErr); interruption != nil {
+			rejection = providerCallError{fmt.Errorf("%w: %w", rejection, interruption)}
+		}
+		return nil, call.recordFailure(rejection)
 	}
 	if resp.ContentLength > maxCapturedResponseSize {
 		_ = resp.Body.Close()
@@ -144,6 +165,24 @@ func (t *chatGPTTransport) prepareRequest(original *http.Request, call *chatGPTC
 	return req, nil
 }
 
+func chatGPTInterruption(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if cause == context.DeadlineExceeded {
+			return context.DeadlineExceeded
+		}
+	}
+	// A socket timeout can match DeadlineExceeded without coming from the
+	// request context. Keep it as a reported failure at the work cutoff.
+	networkErr, ok := errors.AsType[net.Error](err)
+	if errors.Is(err, context.DeadlineExceeded) || (ok && networkErr.Timeout()) {
+		return providerCallError{context.DeadlineExceeded}
+	}
+	return nil
+}
+
 // chatGPTError keeps the status and code needed for recovery and Fantasy's
 // retry policy. Display fixed diagnostics because provider error text and
 // headers can contain authentication data.
@@ -152,29 +191,118 @@ type chatGPTError struct {
 	Code       string
 }
 
+const (
+	chatGPTUsageLimit            = "subscription_sharing_usage_limit_exceeded"
+	chatGPTUserNotEligible       = "subscription_sharing_user_not_eligible"
+	chatGPTUnsupportedCapability = "subscription_sharing_unsupported_capability"
+	chatGPTUsageUnavailable      = "subscription_sharing_usage_unavailable"
+	chatGPTUserUnavailable       = "subscription_sharing_user_unavailable"
+	chatGPTUnknownCode           = "unknown"
+)
+
 func newChatGPTError(status int, body []byte) error {
-	var wire struct {
-		Code  string `json:"code"`
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(body, &wire)
-	err := &chatGPTError{StatusCode: status, Code: cmp.Or(wire.Error.Code, wire.Code)}
+	err := &chatGPTError{StatusCode: status, Code: chatGPTRejectionCode(body)}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return fmt.Errorf("%w: %w", ErrAuth, err)
 	}
 	return err
 }
 
+func chatGPTRejectionCode(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if !uniqueJSONObject(body, nil) {
+		return chatGPTUnknownCode
+	}
+	type envelope struct {
+		code, problem, response json.RawMessage
+		status, output, usage   json.RawMessage
+	}
+	malformed, duplicate := false, false
+	decode := func(raw json.RawMessage) envelope {
+		var result envelope
+		if len(raw) == 0 {
+			return result
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil || fields == nil {
+			malformed = true
+			return result
+		}
+		known := map[string]*json.RawMessage{
+			"code": &result.code, "error": &result.problem, "response": &result.response,
+			"status": &result.status, "output": &result.output, "usage": &result.usage,
+		}
+		for name, value := range fields {
+			if field := known[foldJSONName(name)]; field != nil {
+				if len(*field) != 0 {
+					duplicate = true
+					return envelope{}
+				}
+				*field = value
+			}
+		}
+		return result
+	}
+	// Parse each known location independently so malformed fields cannot
+	// authorize retries or hide an actionable code elsewhere in the body.
+	root := decode(body)
+	directError := decode(root.problem)
+	response := decode(root.response)
+	responseError := decode(response.problem)
+	if duplicate {
+		return chatGPTUnknownCode
+	}
+	possiblyProcessed := false
+	for _, field := range []envelope{root, response} {
+		var status string
+		if len(field.status) != 0 && (json.Unmarshal(field.status, &status) != nil || status != "failed") {
+			possiblyProcessed = true
+		}
+		if jsonValuePresent(field.output) || jsonValuePresent(field.usage) {
+			possiblyProcessed = true
+		}
+	}
+	code := knownChatGPTErrorCode(malformed || possiblyProcessed, responseError.code, directError.code, response.code, root.code)
+	return cmp.Or(code, chatGPTUnknownCode)
+}
+
+func knownChatGPTErrorCode(unknown bool, codes ...json.RawMessage) string {
+	var temporary string
+	for _, field := range codes {
+		if len(field) == 0 {
+			continue
+		}
+		var code string
+		if err := json.Unmarshal(field, &code); err != nil {
+			unknown = true
+			continue
+		}
+		switch code {
+		case chatGPTUsageLimit, chatGPTUserNotEligible, chatGPTUnsupportedCapability:
+			return code
+		case chatGPTUsageUnavailable, chatGPTUserUnavailable:
+			temporary = cmp.Or(temporary, code)
+		default:
+			unknown = true
+		}
+	}
+	// A 503 with an unknown code stays nonretryable even with another hint.
+	if unknown {
+		return chatGPTUnknownCode
+	}
+	return temporary
+}
+
 func (e *chatGPTError) Error() string {
 	detail := fmt.Sprintf("ChatGPT plan usage failed (HTTP %d)", e.StatusCode)
 	switch {
-	case e.Code == "subscription_sharing_usage_limit_exceeded":
+	case e.Code == chatGPTUsageLimit:
 		return detail + ". Pause new plan requests and check https://chatgpt.com/settings/usage"
-	case e.Code == "subscription_sharing_user_not_eligible":
+	case e.Code == chatGPTUserNotEligible:
 		return detail + ". This user, workspace, or policy is ineligible for plan usage."
-	case e.Code == "subscription_sharing_unsupported_capability":
+	case e.Code == chatGPTUnsupportedCapability:
 		return detail + ". Remove the unsupported capability before retrying."
 	case e.StatusCode == http.StatusUnauthorized:
 		return detail + ". Check the account with roast chatgpt status and reauthorize it with roast chatgpt signin --account CLIENT_ID"
@@ -186,7 +314,7 @@ func (e *chatGPTError) Error() string {
 
 func (e *chatGPTError) IsRetryable() bool {
 	switch e.Code {
-	case "", "subscription_sharing_usage_unavailable", "subscription_sharing_user_unavailable":
+	case "", chatGPTUsageUnavailable, chatGPTUserUnavailable:
 		return e.StatusCode == http.StatusServiceUnavailable
 	}
 	return false

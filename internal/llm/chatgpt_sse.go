@@ -8,8 +8,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
+	fantasyopenai "charm.land/fantasy/providers/openai"
 )
 
 // Validate complete SSE frames before passing their original bytes to the SDK
@@ -60,16 +63,20 @@ func (b *chatGPTStreamBody) readEvent() ([]byte, error) {
 			return nil, errors.New("ChatGPT response exceeds the bounded stream size")
 		}
 		if err != nil {
-			// An event without a terminating blank line is incomplete.
-			if errors.Is(err, io.EOF) {
-				if b.call.output == nil {
-					return nil, errors.New("ChatGPT stream ended without response.completed; no tools were executed")
+			if !errors.Is(err, io.EOF) {
+				if interruption := chatGPTInterruption(err); interruption != nil {
+					return nil, interruption
 				}
-				if line != "" || frame.Len() != 0 {
-					return nil, errors.New("ChatGPT stream ended with an unterminated frame after response.completed")
-				}
+				return nil, errors.New("ChatGPT connection failed while reading the response stream")
 			}
-			return nil, err
+			// An event without a terminating blank line is incomplete.
+			if b.call.output == nil {
+				return nil, errors.New("ChatGPT stream ended without response.completed; no tools were executed")
+			}
+			if line != "" || frame.Len() != 0 {
+				return nil, errors.New("ChatGPT stream ended with an unterminated frame after response.completed")
+			}
+			return nil, io.EOF
 		}
 		frame.WriteString(line)
 		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
@@ -122,70 +129,150 @@ func (b *chatGPTStreamBody) validate(name string, data []byte) error {
 				Details struct {
 					Cached int64 `json:"cached_tokens"`
 				} `json:"input_tokens_details"`
+				OutputDetails struct {
+					Reasoning int64 `json:"reasoning_tokens"`
+				} `json:"output_tokens_details"`
 			} `json:"usage"`
 		} `json:"response"`
 	}
-	if err := json.Unmarshal(data, &event); err != nil || event.Type == "" {
+	if !uniqueJSONObject(data, foldJSONName) || json.Unmarshal(data, &event) != nil || event.Type == "" {
 		return errors.New("invalid ChatGPT stream event")
 	}
-	if named && name != event.Type {
+	kind := event.Type
+	if named && name != kind {
 		return errors.New("ChatGPT stream event name does not match its payload")
 	}
-	completed := event.Type == "response.completed"
+	response := event.Response
+	completed := kind == "response.completed"
 	// Failed and incomplete responses can still spend plan usage. Retain the
 	// provider's terminal count when no successful SDK finish reaches Roast.
-	switch event.Type {
+	switch kind {
 	case "response.completed", "response.failed", "response.incomplete":
-		if u := event.Response.Usage; u != nil {
-			valid := u.Input >= 0 && u.Output >= 0 && u.Details.Cached >= 0 && u.Details.Cached <= u.Input
+		if u := response.Usage; u != nil {
+			input, output, cached, reasoning := u.Input, u.Output, u.Details.Cached, u.OutputDetails.Reasoning
+			valid := input >= 0 && output >= 0 && cached >= 0 && cached <= input && reasoning >= 0
 			if !valid && completed {
 				return errors.New("ChatGPT reported inconsistent token usage")
 			}
 			if valid {
-				b.call.usage = &fantasy.Usage{InputTokens: u.Input - u.Details.Cached, CacheReadTokens: u.Details.Cached, OutputTokens: u.Output}
+				output, total := fantasyopenai.FoldDisjointReasoning(output, reasoning, input+output)
+				b.call.usage = &fantasy.Usage{
+					InputTokens: input - cached, CacheReadTokens: cached, OutputTokens: output,
+					ReasoningTokens: reasoning, TotalTokens: total,
+				}
 			}
 		}
 	}
-	switch event.Type {
-	case "response.incomplete":
+	// The SDK treats any top-level error field as an error, including null.
+	// Keep diagnostics out of SDK errors and raw response capture.
+	if kind == "response.failed" || kind == "error" ||
+		len(event.Error) != 0 || jsonValuePresent(response.Error) {
+		return newChatGPTError(http.StatusOK, data)
+	}
+	if kind == "response.incomplete" {
 		return errors.New("ChatGPT response was incomplete; no tools were executed (max_output_tokens is unsupported on this route)")
-	case "response.failed":
-		return newChatGPTError(http.StatusOK, event.Response.Error)
-	case "error":
-		return newChatGPTError(http.StatusOK, data)
 	}
-	// The SDK includes the raw payload in errors from this envelope.
-	if len(event.Error) != 0 {
-		return newChatGPTError(http.StatusOK, data)
-	}
-	if len(event.Item) > 0 {
+	if len(event.Item) != 0 {
 		if _, err := decodeChatGPTOutputItem(event.Item, false); err != nil {
 			return err
 		}
 	}
-	for _, item := range event.Response.Output {
+	seenItemIDs := make(map[string]bool)
+	for _, item := range response.Output {
 		output, err := decodeChatGPTOutputItem(item, completed)
 		if err != nil {
 			return err
 		}
-		if completed && output.Type == "function_call" {
+		if !completed {
+			continue
+		}
+		if output.ID != "" {
+			if seenItemIDs[output.ID] {
+				return errors.New("ChatGPT finalized output contains duplicate item IDs")
+			}
+			seenItemIDs[output.ID] = true
+		}
+		if output.Type == "function_call" {
 			b.call.completedCalls = append(b.call.completedCalls, output)
 		}
 	}
 	if completed {
-		if event.Response.Output == nil {
+		if response.Output == nil {
 			return errors.New("ChatGPT finalized output is missing")
 		}
-		if event.Response.Status != "completed" {
+		if response.Status != "completed" {
 			return errors.New("ChatGPT completion event has a non-completed status")
 		}
-		if jsonValuePresent(event.Response.Error) || jsonValuePresent(event.Response.IncompleteDetails) {
-			return errors.New("ChatGPT completion event reported an error or incomplete response")
+		if jsonValuePresent(response.IncompleteDetails) {
+			return errors.New("ChatGPT completion event reported an incomplete response")
 		}
-		output := event.Response.Output
+		output := response.Output
 		b.call.output = &output
 	}
 	return nil
+}
+
+// Protocol envelopes use folded names to match Go's struct decoder. Metadata
+// and tool arguments preserve case-sensitive names.
+func uniqueJSONObject(data []byte, foldKey func(string) string) bool {
+	if !utf8.Valid(data) || !json.Valid(data) || !bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return uniqueJSONValue(decoder, foldKey)
+}
+
+func uniqueJSONValue(decoder *json.Decoder, foldKey func(string) string) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	if token != json.Delim('{') && token != json.Delim('[') {
+		return true
+	}
+	var fields map[string]bool
+	if token == json.Delim('{') {
+		fields = make(map[string]bool)
+	}
+	for decoder.More() {
+		foldChild := foldKey
+		if fields != nil {
+			rawKey, err := decoder.Token()
+			name, ok := rawKey.(string)
+			if err != nil || !ok {
+				return false
+			}
+			if foldKey != nil {
+				name = foldKey(name)
+				if name == "metadata" {
+					foldChild = nil
+				}
+			}
+			if fields[name] {
+				return false
+			}
+			fields[name] = true
+		}
+		if !uniqueJSONValue(decoder, foldChild) {
+			return false
+		}
+	}
+	_, err = decoder.Token()
+	return err == nil
+}
+
+func foldJSONName(name string) string {
+	return strings.Map(func(r rune) rune {
+		next := unicode.SimpleFold(r)
+		for next > r {
+			r, next = next, unicode.SimpleFold(next)
+		}
+		if 'A' <= next && next <= 'Z' {
+			return next + ('a' - 'A')
+		}
+		return next
+	}, name)
 }
 
 func jsonValuePresent(raw json.RawMessage) bool {
@@ -193,18 +280,51 @@ func jsonValuePresent(raw json.RawMessage) bool {
 }
 
 type chatGPTOutputItem struct {
-	Type      string `json:"type"`
-	Role      string `json:"role"`
-	Namespace string `json:"namespace"`
-	Status    string `json:"status"`
-	CallID    string `json:"call_id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	ID        string
+	Type      string
+	Role      string
+	Namespace string
+	Status    string
+	CallID    string
+	Name      string
+	Arguments string
+}
+
+func (item *chatGPTOutputItem) decode(raw json.RawMessage) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return false
+	}
+	fields := map[string]*string{
+		"id": &item.ID, "type": &item.Type, "role": &item.Role, "namespace": &item.Namespace,
+		"status": &item.Status, "call_id": &item.CallID, "name": &item.Name, "arguments": &item.Arguments,
+	}
+	var ignored json.RawMessage
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return false
+		}
+		var destination any = &ignored
+		key := foldJSONName(name)
+		if field, known := fields[key]; known {
+			if name != key {
+				return false
+			}
+			destination = field
+		}
+		if err := decoder.Decode(destination); err != nil {
+			return false
+		}
+	}
+	token, err := decoder.Token()
+	return err == nil && token == json.Delim('}')
 }
 
 func decodeChatGPTOutputItem(raw json.RawMessage, final bool) (chatGPTOutputItem, error) {
 	var item chatGPTOutputItem
-	if err := json.Unmarshal(raw, &item); err != nil {
+	if !item.decode(raw) {
 		return item, errors.New("invalid ChatGPT stream output item")
 	}
 	if final && item.Status != "" && item.Status != "completed" {
@@ -214,6 +334,9 @@ func decodeChatGPTOutputItem(raw json.RawMessage, final bool) (chatGPTOutputItem
 	case "function_call":
 		if item.Namespace != chatGPTToolNamespace {
 			return item, errors.New("ChatGPT returned a function outside the Roast tool namespace")
+		}
+		if final && !uniqueJSONObject([]byte(item.Arguments), nil) {
+			return item, errors.New("ChatGPT finalized output contains invalid tool arguments")
 		}
 	case "message":
 		if item.Role != "assistant" {

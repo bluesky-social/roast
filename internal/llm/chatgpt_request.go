@@ -48,6 +48,16 @@ func encodeChatGPTRequest(body []byte, prompt fantasy.Prompt) ([]byte, error) {
 	return json.Marshal(request)
 }
 
+func chatGPTConversationBytes(prompt fantasy.Prompt) int {
+	input, err := chatGPTInput(prompt)
+	if err == nil {
+		if body, err := json.Marshal(input); err == nil {
+			return len(body)
+		}
+	}
+	return fantasyConversationBytes(prompt)
+}
+
 // chatGPTInput encodes the full conversation for a stateless Responses call.
 func chatGPTInput(prompt fantasy.Prompt) ([]any, error) {
 	input := make([]any, 0, len(prompt))
@@ -55,7 +65,7 @@ func chatGPTInput(prompt fantasy.Prompt) ([]any, error) {
 		parts := message.Content
 		for i, part := range parts {
 			if output, ok := part.Options()[chatGPTOutputKey].(*chatGPTOutput); ok {
-				if message.Role != fantasy.MessageRoleAssistant || output == nil {
+				if message.Role != fantasy.MessageRoleAssistant || output == nil || *output == nil {
 					return nil, errors.New("ChatGPT history is missing finalized assistant output")
 				}
 				for _, item := range *output {

@@ -60,6 +60,10 @@ type client struct {
 	cfg       ClientConfig
 	model     fantasy.LanguageModel
 	transport *captureTransport
+	// A provider that rewrites history can measure the prompt it will send.
+	measurePrompt func(fantasy.Prompt) int
+	// A provider-owned output limit cannot be raised through MaxOutputTokens.
+	fixedOutputLimit bool
 
 	mu    sync.Mutex
 	usage Usage
@@ -181,6 +185,12 @@ func protocolName(cfg ClientConfig) string {
 }
 
 type captureError struct{ err error }
+
+// A failure reported by an adapter stays available if a deadline or
+// cancellation arrives before the agent handles it.
+type providerCallError struct{ error }
+
+func (e providerCallError) Unwrap() error { return e.error }
 
 type sessionContextKey struct{}
 
@@ -347,10 +357,22 @@ func normalizeProviderError(ctx context.Context, modelName string, err error) er
 	if err == nil {
 		return nil
 	}
+	noSubmission := errors.Is(err, ErrNoFinalCall)
+	_, captureFailed := errors.AsType[*captureError](err)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
+		_, reported := errors.AsType[providerCallError](err)
+		if !reported && !captureFailed && !noSubmission {
+			return ctxErr
+		}
+		if errors.Is(err, ctxErr) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", ctxErr, err)
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if noSubmission {
+		return err
+	}
+	if captureFailed || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)
 	}
 	if errors.Is(err, ErrAuth) || errors.Is(err, ErrEndpoint) || errors.Is(err, ErrBudgetExhausted) {

@@ -9,31 +9,6 @@ import (
 	"charm.land/fantasy"
 )
 
-type chatGPTClient struct{ *client }
-
-type chatGPTDeadlineKey struct{}
-
-type chatGPTDeadline struct {
-	session string
-	reached bool
-	failure error
-}
-
-func (c *chatGPTClient) Converse(ctx context.Context, system, user string, opts ConverseOpts, out any) error {
-	if !opts.WorkDeadline.IsZero() {
-		deadline := &chatGPTDeadline{}
-		ctx = context.WithValue(ctx, chatGPTDeadlineKey{}, deadline)
-		onDeadline := opts.OnWorkDeadline
-		opts.OnWorkDeadline = func() {
-			deadline.reached = true
-			if onDeadline != nil {
-				onDeadline()
-			}
-		}
-	}
-	return c.client.Converse(ctx, system, user, opts, out)
-}
-
 const chatGPTOutputKey = "roast_chatgpt_output"
 
 type chatGPTCallKey struct{}
@@ -43,7 +18,6 @@ type chatGPTCall struct {
 	completedCalls []chatGPTOutputItem
 	usage          *fantasy.Usage
 	failure        error
-	deadline       *chatGPTDeadline
 }
 
 func (c *chatGPTCall) recordFailure(err error) error {
@@ -66,31 +40,11 @@ func (o *chatGPTOutput) UnmarshalJSON(b []byte) error {
 type chatGPTModel struct{ fantasy.LanguageModel }
 
 func (m *chatGPTModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-	deadline, _ := ctx.Value(chatGPTDeadlineKey{}).(*chatGPTDeadline)
-	if deadline != nil {
-		// A tool can start another agent run with this context. The deadline
-		// state belongs to the outer run's session.
-		session, _ := ctx.Value(sessionContextKey{}).(string)
-		switch {
-		case deadline.session == "":
-			deadline.session = session
-		case deadline.session != session:
-			deadline = nil
-		}
-	}
-	if deadline != nil {
-		// The reserved wrap-up can follow a deadline interruption. Reuse a
-		// provider failure already received at the cutoff without a new request.
-		if deadline.reached && deadline.failure != nil {
-			return nil, deadline.failure
-		}
-		deadline.failure = nil
-	}
-	state := &chatGPTCall{prompt: call.Prompt, deadline: deadline}
+	state := &chatGPTCall{prompt: call.Prompt}
 	ctx = context.WithValue(ctx, chatGPTCallKey{}, state)
 	stream, err := m.LanguageModel.Stream(ctx, call)
 	if err != nil {
-		return nil, state.rememberFailure(cmp.Or(state.failure, err))
+		return nil, chatGPTCallError(cmp.Or(state.failure, err))
 	}
 	return func(yield func(fantasy.StreamPart) bool) {
 		state.stream(stream, yield)
@@ -115,7 +69,11 @@ func (c *chatGPTCall) stream(stream fantasy.StreamResponse, yield func(fantasy.S
 			}
 			calls[part.ID] = part
 		case fantasy.StreamPartTypeFinish:
+			if c.usage != nil {
+				part.Usage = *c.usage
+			}
 			finish = &part
+			c.usage = &part.Usage
 		default:
 			if !yield(part) {
 				return
@@ -153,19 +111,18 @@ func (c *chatGPTCall) stream(stream fantasy.StreamResponse, yield func(fantasy.S
 }
 
 func (c *chatGPTCall) yieldError(yield func(fantasy.StreamPart) bool, err error) {
-	c.rememberFailure(err)
 	// Report usage from the failed attempt before propagating the error.
 	if c.usage != nil && !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonError, Usage: *c.usage}) {
 		return
 	}
-	yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
+	yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: chatGPTCallError(err)})
 }
 
-func (c *chatGPTCall) rememberFailure(err error) error {
-	if c.deadline != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		c.deadline.failure = err
+func chatGPTCallError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
-	return err
+	return providerCallError{err}
 }
 
 func (c *chatGPTCall) finalizedToolCalls(calls map[string]fantasy.StreamPart) ([]fantasy.StreamPart, error) {
