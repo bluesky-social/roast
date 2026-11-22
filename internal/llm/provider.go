@@ -60,6 +60,10 @@ type client struct {
 	cfg       ClientConfig
 	model     fantasy.LanguageModel
 	transport *captureTransport
+	// Providers that rewrite the conversation can supply their own byte count.
+	measurePrompt func(fantasy.Prompt) int
+	// A provider-owned output limit cannot be raised through MaxOutputTokens.
+	fixedOutputLimit bool
 
 	mu    sync.Mutex
 	usage Usage
@@ -131,6 +135,13 @@ func userAgent() string { return "roast/" + buildinfo.Version }
 
 func (c *client) Name() string { return c.cfg.Model }
 
+func (c *client) conversationBytes(prompt fantasy.Prompt) int {
+	if c.measurePrompt != nil {
+		return c.measurePrompt(prompt)
+	}
+	return fantasyConversationBytes(prompt)
+}
+
 func (c *client) Usage() Usage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -185,6 +196,18 @@ func protocolName(cfg ClientConfig) string {
 
 type captureError struct{ err error }
 
+// A provider can report a specific call failure independently of deadline
+// cancellation. Even if the work deadline passes, preserve that failure
+// instead of opening another request solely to wrap up.
+type providerCallError struct{ error }
+
+func (e providerCallError) Unwrap() error { return e.error }
+
+func isProviderCallFailure(err error) bool {
+	var reported providerCallError
+	return errors.As(err, &reported) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
 type sessionContextKey struct{}
 
 // Each model attempt owns its response body, including when a provider stops
@@ -193,15 +216,14 @@ type sessionContextKey struct{}
 type responseBodyKey struct{}
 type responseBody struct {
 	body io.ReadCloser
-	// A direct plan-usage request retains its precise failure independently
-	// of SDK error mapping. Each attempt owns this state.
+	// The transport can report terminal details that an SDK may discard.
 	failure       error
 	terminalUsage *fantasy.Usage
 }
 
 func (b *responseBody) recordFailure(err error) error {
 	if b != nil {
-		b.failure = err
+		b.failure = providerCallError{err}
 	}
 	return err
 }
@@ -373,12 +395,6 @@ func normalizeProviderError(ctx context.Context, modelName string, err error) er
 		return err
 	}
 	if status, ok := errorStatus(err); ok && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
-		var planErr *chatGPTError
-		if errors.As(err, &planErr) {
-			// Direct plan usage has its own OAuth/eligibility recovery. Preserve
-			// that error and never suggest an API key for this route.
-			return fmt.Errorf("%w: %w", ErrAuth, err)
-		}
 		return fmt.Errorf("%w: %v; check the configured API key", ErrAuth, err)
 	}
 	return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)

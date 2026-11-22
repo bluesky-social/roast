@@ -45,7 +45,10 @@ func newChatGPTResponsesClient(ctx context.Context, cfg ClientConfig, token func
 	if err != nil {
 		return nil, err
 	}
-	return &client{cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture}, nil
+	return &client{
+		cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture,
+		measurePrompt: chatGPTConversationBytes, fixedOutputLimit: true,
+	}, nil
 }
 
 type chatGPTTransport struct {
@@ -155,7 +158,7 @@ type chatGPTError struct {
 	Code       string
 }
 
-func newChatGPTError(status int, body []byte) *chatGPTError {
+func newChatGPTError(status int, body []byte) error {
 	var wire struct {
 		Code  string `json:"code"`
 		Error *struct {
@@ -166,7 +169,11 @@ func newChatGPTError(status int, body []byte) *chatGPTError {
 	if wire.Error != nil && wire.Error.Code != "" {
 		wire.Code = wire.Error.Code
 	}
-	return &chatGPTError{StatusCode: status, Code: wire.Code}
+	err := &chatGPTError{StatusCode: status, Code: wire.Code}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return fmt.Errorf("%w: %w", ErrAuth, err)
+	}
+	return err
 }
 
 func (e *chatGPTError) Error() string {

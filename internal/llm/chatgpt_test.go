@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
 	"time"
 
 	"charm.land/fantasy"
@@ -349,7 +350,7 @@ func TestChatGPTTerminalGuardFailureStopsBeforeDispatch(t *testing.T) {
 			// Simulate an SDK which stops reading at a completion event. The
 			// transport has flagged it, but no subsequent Read exposes the error.
 			owner := ctx.Value(responseBodyKey{}).(*responseBody)
-			owner.failure = errors.New("terminal stream guard rejected output")
+			owner.recordFailure(errors.New("terminal stream guard rejected output"))
 			if yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: "read", ToolCallName: "read", ToolCallInput: `{}`}) {
 				if yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: "submit", ToolCallName: "submit", ToolCallInput: `{"answer":"must not succeed"}`}) {
 					yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonToolCalls})
@@ -625,7 +626,7 @@ func TestChatGPTRejectsOversizedRestoredHistoryBeforeCredentials(t *testing.T) {
 		}),
 	}
 	resp, err := transport.RoundTrip(req)
-	if resp != nil || err == nil || !strings.Contains(err.Error(), "exceeds the bounded input size") || owner.failure != err {
+	if resp != nil || err == nil || !strings.Contains(err.Error(), "exceeds the bounded input size") || !errors.Is(owner.failure, err) {
 		t.Fatalf("response=%v error=%v retained failure=%v", resp, err, owner.failure)
 	}
 }
@@ -674,14 +675,14 @@ func TestChatGPTBudgetCountsSharedOutputOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := &agentRunState{chatGPT: true}
-	if n := state.conversationBytes(prompt); n != len(wire) {
+	c := planTestClient(t, ClientConfig{}, http.DefaultTransport).(*client)
+	if n := c.conversationBytes(prompt); n != len(wire) {
 		t.Fatalf("budgeted %d bytes, sent %d", n, len(wire))
 	}
 }
 
 func TestChatGPTWrapUpRetainsProviderFailure(t *testing.T) {
-	state := &agentRunState{chatGPT: true, cutoff: ErrBudgetExhausted}
+	state := &agentRunState{cutoff: ErrBudgetExhausted}
 	err := state.cutoffError("wrap-up call failed", ErrAuth)
 	if !errors.Is(err, ErrBudgetExhausted) || !errors.Is(err, ErrAuth) {
 		t.Fatalf("lost the cutoff or provider failure: %v", err)
@@ -702,6 +703,25 @@ func TestChatGPTWrapUpDoesNotRetryPlanRejection(t *testing.T) {
 	if requests != 1 || !errors.Is(err, ErrWorkDeadline) || !errors.As(err, &planErr) || planErr.Code != "subscription_sharing_usage_unavailable" {
 		t.Fatalf("wrap-up made %d requests, returned %v", requests, err)
 	}
+}
+
+func TestChatGPTRejectionAtWorkDeadlineDoesNotStartWrapUp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		requests := 0
+		c := planTestClient(t, ClientConfig{MaxAttempts: 3}, planRoundTripper(func(req *http.Request) (*http.Response, error) {
+			requests++
+			if requests == 1 {
+				<-req.Context().Done()
+			}
+			return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: http.NoBody}, nil
+		}))
+		var out struct{ Answer string }
+		opts := ConverseOpts{MaxTurns: 4, FinalTool: "submit", Tools: basicTools(nil), WorkDeadline: time.Now().Add(time.Second)}
+		err := c.Converse(t.Context(), "system", "user", opts, &out)
+		if requests != 1 || !errors.Is(err, ErrWorkDeadline) || !errors.Is(err, ErrAuth) {
+			t.Fatalf("made %d requests, returned %v, want one request and both deadline and auth errors", requests, err)
+		}
+	})
 }
 
 func TestChatGPTTransportRejectsUnexpectedRoutes(t *testing.T) {

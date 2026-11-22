@@ -85,13 +85,22 @@ func (m *chatGPTModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 	ctx = context.WithValue(ctx, chatGPTCallKey{}, state)
 	stream, err := m.LanguageModel.Stream(ctx, call)
 	if err != nil {
-		return nil, err
+		return nil, providerCallError{err}
 	}
 	return func(yield func(fantasy.StreamPart) bool) {
+		yieldError := func(err error) {
+			if err != nil {
+				err = providerCallError{err}
+			}
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
+		}
 		calls := make(map[string]fantasy.StreamPart)
 		markedOutput := false
 		for part := range stream {
 			switch part.Type {
+			case fantasy.StreamPartTypeError:
+				yieldError(part.Error)
+				return
 			case fantasy.StreamPartTypeToolCall, fantasy.StreamPartTypeTextEnd, fantasy.StreamPartTypeReasoningEnd:
 				markedOutput = true
 				metadata := make(fantasy.ProviderMetadata, len(part.ProviderMetadata)+1)
@@ -100,7 +109,7 @@ func (m *chatGPTModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 				part.ProviderMetadata = metadata
 				if part.Type == fantasy.StreamPartTypeToolCall {
 					if _, exists := calls[part.ID]; exists || part.ID == "" || part.ProviderExecuted {
-						yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: errors.New("invalid ChatGPT streamed tool call")})
+						yieldError(errors.New("invalid ChatGPT streamed tool call"))
 						return
 					}
 					calls[part.ID] = part
@@ -114,7 +123,7 @@ func (m *chatGPTModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					// The managed model records finish usage and discards its
 					// buffered output when the error follows.
 					if yield(part) {
-						yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
+						yieldError(err)
 					}
 					return
 				}
@@ -196,6 +205,14 @@ func chatGPTInput(prompt fantasy.Prompt) (json.RawMessage, error) {
 		}
 	}
 	return json.Marshal(input)
+}
+
+func chatGPTConversationBytes(prompt fantasy.Prompt) int {
+	// Replay shared finalized output once, as it appears on the wire.
+	if input, err := chatGPTInput(prompt); err == nil {
+		return len(input)
+	}
+	return fantasyConversationBytes(prompt)
 }
 
 func chatGPTInputPart(role fantasy.MessageRole, part fantasy.MessagePart) (map[string]string, error) {
