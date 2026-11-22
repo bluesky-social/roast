@@ -158,11 +158,6 @@ func newStore(profileDir, lockRoot string, ring keyringAccess) keyringStore {
 	return keyringStore{ring: ring, lockPath: lockPath, namespace: namespace}
 }
 
-// LockPath reports the location of the credential-free coordination file.
-func (s keyringStore) LockPath() string {
-	return s.lockPath
-}
-
 type snapshot struct {
 	ID     string `json:"id"`
 	Chunks int    `json:"chunks"`

@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zalando/go-keyring"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,19 +27,15 @@ func openSystemStore() (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return OpenWithKeyring(systemKeyring{}, lockRoot)
-}
-
-// UseTestKeyring isolates both the operating-system keyring and the lock
-// location. Tests using the library's process-wide mock must run serially.
-func UseTestKeyring(lockRoot string) (restore func()) {
-	keyring.MockInit()
-	previous := openStore
-	openStore = func() (Store, error) {
-		// Use the library mock instead of the native macOS mutation path.
-		return OpenWithKeyring(struct{ systemKeyring }{}, lockRoot)
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, err
 	}
-	return func() { openStore = previous }
+	configDir, err = filepath.Abs(configDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ChatGPT configuration directory: %w", err)
+	}
+	return OpenWithKeyring(systemKeyring{}, configDir, lockRoot)
 }
 
 func userLockRoot() (string, error) {
@@ -61,25 +56,27 @@ func userLockRoot() (string, error) {
 	return os.UserHomeDir()
 }
 
-// OpenWithKeyring creates a store with the given keyring client and lock root.
-func OpenWithKeyring(ring keyringAccess, lockRoot string) (Store, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return nil, err
+// OpenWithKeyring creates a store with the given keyring client and absolute directories.
+func OpenWithKeyring(ring keyringAccess, configDir, lockRoot string) (Store, error) {
+	if !filepath.IsAbs(configDir) {
+		return nil, errors.New("the ChatGPT keyring requires an absolute configuration directory")
 	}
 	if !filepath.IsAbs(lockRoot) {
 		return nil, errors.New("the ChatGPT keyring lock requires an absolute directory")
 	}
-	lockRoot, err = filepath.EvalSymlinks(lockRoot)
+	lockRoot, err := filepath.EvalSymlinks(lockRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ChatGPT keyring lock directory: %w", err)
 	}
-	profile, err := resolveProfilePath(filepath.Join(dir, "roast", "chatgpt-plan"))
+	profile, err := resolveProfilePath(filepath.Join(configDir, "roast", "chatgpt-plan"))
 	if err != nil {
 		return nil, fmt.Errorf("resolve ChatGPT profile directory: %w", err)
 	}
 	if err := checkPreviewFiles(profile); err != nil {
 		return nil, err
+	}
+	if ring == nil {
+		return nil, errors.New("a ChatGPT keyring backend is required")
 	}
 	return newStore(profile, lockRoot, ring), nil
 }
