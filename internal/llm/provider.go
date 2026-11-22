@@ -60,10 +60,6 @@ type client struct {
 	cfg       ClientConfig
 	model     fantasy.LanguageModel
 	transport *captureTransport
-	// A provider that rewrites history can measure the prompt it will send.
-	measurePrompt func(fantasy.Prompt) int
-	// A provider-owned output limit cannot be raised through MaxOutputTokens.
-	fixedOutputLimit bool
 
 	mu    sync.Mutex
 	usage Usage

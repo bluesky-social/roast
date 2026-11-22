@@ -44,10 +44,39 @@ func newChatGPTResponsesClient(ctx context.Context, cfg ClientConfig, token func
 	if err != nil {
 		return nil, err
 	}
-	return &client{
-		cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture,
-		measurePrompt: chatGPTConversationBytes, fixedOutputLimit: true,
-	}, nil
+	return &chatGPTClient{client: &client{cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture}}, nil
+}
+
+type chatGPTClient struct{ *client }
+
+type chatGPTDeadlineKey struct{}
+
+type chatGPTDeadline struct {
+	session     string
+	reached     bool
+	failure     error
+	usedFailure bool
+}
+
+func (c *chatGPTClient) Converse(ctx context.Context, system, user string, opts ConverseOpts, out any) error {
+	if opts.WorkDeadline.IsZero() {
+		return c.client.Converse(ctx, system, user, opts, out)
+	}
+	deadline := &chatGPTDeadline{}
+	ctx = context.WithValue(ctx, chatGPTDeadlineKey{}, deadline)
+	onDeadline := opts.OnWorkDeadline
+	opts.OnWorkDeadline = func() {
+		deadline.reached = true
+		if onDeadline != nil {
+			onDeadline()
+		}
+	}
+	err := c.client.Converse(ctx, system, user, opts, out)
+	// The ledger can refuse wrap-up before the model sees the saved failure.
+	if deadline.failure != nil && !deadline.usedFailure && errors.Is(err, ErrWorkDeadline) {
+		return fmt.Errorf("%w: %w", err, deadline.failure)
+	}
+	return err
 }
 
 type chatGPTTransport struct {
@@ -75,7 +104,7 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 		const maxErrorBody = 64 << 10
 		if resp.ContentLength > maxErrorBody {
 			_ = resp.Body.Close()
-			rejection := permanentModelError{err: newChatGPTError(resp.StatusCode, nil)}
+			rejection := chatGPTNonRetryableError{newChatGPTError(resp.StatusCode, nil)}
 			return nil, call.recordFailure(rejection)
 		}
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
@@ -89,7 +118,7 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 		}
 		rejection := newChatGPTError(resp.StatusCode, data)
 		if readErr != nil || oversized || lengthMismatch {
-			rejection = permanentModelError{err: rejection}
+			rejection = chatGPTNonRetryableError{rejection}
 		}
 		if interruption := chatGPTInterruption(readErr); interruption != nil {
 			rejection = providerCallError{fmt.Errorf("%w: %w", rejection, interruption)}
@@ -182,6 +211,11 @@ func chatGPTInterruption(err error) error {
 	}
 	return nil
 }
+
+type chatGPTNonRetryableError struct{ error }
+
+func (e chatGPTNonRetryableError) Unwrap() error   { return e.error }
+func (chatGPTNonRetryableError) IsRetryable() bool { return false }
 
 // chatGPTError keeps the status and code needed for recovery and Fantasy's
 // retry policy. Display fixed diagnostics because provider error text and

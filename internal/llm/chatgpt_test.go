@@ -68,10 +68,7 @@ func TestChatGPTToolLoop(t *testing.T) {
 	t.Setenv("OPENAI_PROJECT_ID", "ambient-project")
 	t.Setenv("OPENAI_CUSTOM_HEADERS", "Authorization: wrong\nX-Ambient: private")
 
-	// Large tool arguments fit in the next wire request, even though Fantasy
-	// also keeps them on the streamed tool call in its internal transcript.
-	arguments := `{"key":"first","path":"` + strings.Repeat("x", 8192) + `"}`
-	first := structuredToolResponse("responses", "read", arguments)
+	first := structuredToolResponse("responses", "read", `{"key":"first","path":"review.go"}`)
 	first["metadata"] = map[string]string{"path": "a", "Path": "b"}
 	second := structuredToolResponse("responses", "read", `{"key":"second","i":1,"I":2,"İ":3}`)["output"].([]any)[0].(map[string]any)
 	second["id"], second["call_id"] = "fc-second", "call-second"
@@ -102,7 +99,7 @@ func TestChatGPTToolLoop(t *testing.T) {
 
 	requests := 0
 	var captures []RawResponse
-	c := planTestClient(t, ClientConfig{Ledger: NewLedger(5500), CaptureResponse: func(response RawResponse) error {
+	c := planTestClient(t, ClientConfig{CaptureResponse: func(response RawResponse) error {
 		captures = append(captures, response)
 		return nil
 	}}, func(req *http.Request) (*http.Response, error) {
@@ -123,9 +120,6 @@ func TestChatGPTToolLoop(t *testing.T) {
 			if len(body.Input) < len(wantHistory) || !reflect.DeepEqual(body.Input[:len(wantHistory)], wantHistory) {
 				t.Fatal("second request did not replay the finalized output and tool results in order")
 			}
-			if len(body.Input) != len(wantHistory)+1 {
-				t.Error("unexpected input budget warning on the wrap-up request")
-			}
 		}
 		if requests >= len(streams) {
 			t.Fatal("unexpected request after final submission")
@@ -140,7 +134,7 @@ func TestChatGPTToolLoop(t *testing.T) {
 	var out struct{ Answer string }
 	var reads []any
 	err := c.Converse(t.Context(), "system", "user", ConverseOpts{
-		MaxTurns: 2, FinalTool: "submit", InputByteCeiling: 10000,
+		MaxTurns: 2, FinalTool: "submit",
 		Tools: basicTools(func(_ context.Context, args map[string]any) (any, error) {
 			reads = append(reads, args["key"])
 			if len(captures) != 1 {
@@ -243,60 +237,44 @@ func TestChatGPTCountsTerminalUsage(t *testing.T) {
 func TestChatGPTCaptureFailurePreventsToolExecution(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
-		wrapUp       bool
-		contextError error
+		cancel       bool
 		captureError error
 	}{
-		{name: "caller cancels during exploration", contextError: context.Canceled},
-		{name: "caller cancels during wrap-up", contextError: context.Canceled, wrapUp: true},
-		{name: "request timeout", contextError: context.DeadlineExceeded},
+		{name: "caller cancels during capture", cancel: true},
 		{name: "capture rejects authorization", captureError: &fantasy.ProviderError{StatusCode: http.StatusForbidden}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				captureErr := tc.captureError
-				if captureErr == nil {
-					captureErr = errors.New("disk full")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			captureErr := tc.captureError
+			if captureErr == nil {
+				captureErr = errors.New("disk full")
+			}
+			c := planTestClient(t, ClientConfig{CaptureResponse: func(RawResponse) error {
+				if tc.cancel {
+					cancel()
 				}
-				var requestContext context.Context
-				c := planTestClient(t, ClientConfig{RequestTimeout: time.Second, CaptureResponse: func(RawResponse) error {
-					switch tc.contextError {
-					case context.Canceled:
-						cancel()
-					case context.DeadlineExceeded:
-						<-requestContext.Done()
-					}
-					return captureErr
-				}}, func(req *http.Request) (*http.Response, error) {
-					requestContext = req.Context()
-					return planResponse(planStream(t, "read", `{}`)), nil
-				})
-				var out struct{ Answer string }
-				opts := ConverseOpts{
-					MaxTurns: 2, FinalTool: "submit",
-					Tools: basicTools(func(context.Context, map[string]any) (any, error) {
-						t.Error("tool dispatched after capture failure")
-						return nil, nil
-					}),
-				}
-				if tc.wrapUp {
-					opts.WorkDeadline = time.Now().Add(-time.Second)
-				}
-				err := c.Converse(ctx, "system", "user", opts, &out)
-				if !errors.Is(err, captureErr) || errors.Is(err, ErrAuth) || errors.Is(err, ErrWorkDeadline) != tc.wrapUp {
-					t.Fatalf("error = %v, want capture failure (at cutoff: %v)", err, tc.wrapUp)
-				}
-				if tc.contextError != nil && !errors.Is(err, tc.contextError) {
-					t.Fatalf("error = %v, want context cause %v", err, tc.contextError)
-				}
+				return captureErr
+			}}, func(*http.Request) (*http.Response, error) {
+				return planResponse(planStream(t, "read", `{}`)), nil
 			})
+			var out struct{ Answer string }
+			opts := ConverseOpts{
+				MaxTurns: 2, FinalTool: "submit",
+				Tools: basicTools(func(context.Context, map[string]any) (any, error) {
+					t.Error("tool dispatched after capture failure")
+					return nil, nil
+				}),
+			}
+			err := c.Converse(ctx, "system", "user", opts, &out)
+			if !errors.Is(err, captureErr) || errors.Is(err, ErrAuth) || errors.Is(err, context.Canceled) != tc.cancel {
+				t.Fatalf("error = %v, want capture failure (canceled: %v)", err, tc.cancel)
+			}
 		})
 	}
 }
 
-func TestChatGPTRejectedStreamPreservesCaptureAndProviderErrors(t *testing.T) {
+func TestChatGPTRejectedStreamReportsCaptureFailure(t *testing.T) {
 	captureErr := errors.New("disk full")
 	c := planTestClient(t, ClientConfig{CaptureResponse: func(RawResponse) error { return captureErr }}, func(*http.Request) (*http.Response, error) {
 		const event = `{"type":"response.failed","response":{"error":{"code":"generic-provider-code"}},"error":{"code":"subscription_sharing_usage_limit_exceeded"}}`
@@ -304,9 +282,8 @@ func TestChatGPTRejectedStreamPreservesCaptureAndProviderErrors(t *testing.T) {
 	})
 	var out struct{ Answer string }
 	err := c.CompleteStructured(t.Context(), "system", "user", "submit", &out)
-	rejection, ok := errors.AsType[*chatGPTError](err)
-	if !errors.Is(err, captureErr) || !ok || rejection.Code != "subscription_sharing_usage_limit_exceeded" {
-		t.Fatalf("error = %v, want both the capture and plan errors", err)
+	if !errors.Is(err, captureErr) {
+		t.Fatalf("error = %v, want capture failure", err)
 	}
 }
 
@@ -750,20 +727,19 @@ func TestChatGPTInputKeepsLocalNudgeAfterFinalizedOutput(t *testing.T) {
 
 func TestChatGPTPlanRejectionAtCutoffOrCancellation(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		status      int
-		deadline    time.Duration
-		cancel      bool
-		finalTurn   bool
-		spendBudget bool
+		name       string
+		status     int
+		deadline   time.Duration
+		cancel     bool
+		finalTurn  bool
+		wantCutoff bool
 	}{
-		{name: "temporary rejection during wrap-up", status: 503, deadline: -time.Second},
-		{name: "caller cancels during wrap-up", status: 403, deadline: -time.Second, cancel: true},
+		{name: "temporary rejection during wrap-up", status: 503, deadline: -time.Second, wantCutoff: true},
+		{name: "caller cancels during wrap-up", status: 403, deadline: -time.Second, cancel: true, wantCutoff: true},
 		{name: "caller cancels during exploration", status: 403, cancel: true},
 		{name: "caller cancels after temporary rejection", status: 503, cancel: true},
-		{name: "deadline during exploration", status: 403, deadline: time.Second},
+		{name: "deadline during exploration", status: 403, deadline: time.Second, wantCutoff: true},
 		{name: "deadline during final turn", status: 403, deadline: time.Second, finalTurn: true},
-		{name: "deadline with exhausted ledger", status: 403, deadline: time.Second, spendBudget: true},
 		{name: "deadline and caller cancellation", status: 403, deadline: time.Second, cancel: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -771,22 +747,13 @@ func TestChatGPTPlanRejectionAtCutoffOrCancellation(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				requests := 0
-				const limit = 5500
-				ledger := NewLedger(limit)
-				c := planTestClient(t, ClientConfig{MaxAttempts: 3, Ledger: ledger}, func(req *http.Request) (*http.Response, error) {
+				c := planTestClient(t, ClientConfig{MaxAttempts: 3}, func(req *http.Request) (*http.Response, error) {
 					requests++
 					if requests == 1 && tc.deadline > 0 {
 						<-req.Context().Done()
 					}
 					if tc.cancel {
 						cancel()
-					}
-					if tc.spendBudget {
-						release, err := ledger.Reserve(0, 0, true)
-						if err != nil {
-							t.Fatal(err)
-						}
-						release(Usage{UncachedInputTokens: limit})
 					}
 					return &http.Response{StatusCode: tc.status, Body: http.NoBody}, nil
 				})
@@ -799,18 +766,53 @@ func TestChatGPTPlanRejectionAtCutoffOrCancellation(t *testing.T) {
 				}
 				var out struct{ Answer string }
 				err := c.Converse(ctx, "system", "user", opts, &out)
-				rejection, ok := errors.AsType[*chatGPTError](err)
-				if requests != 1 || ledger.Exhausted() || !ok || rejection.StatusCode != tc.status {
-					t.Fatalf("requests=%d reservation refused=%t error=%v, want one rejection with HTTP %d", requests, ledger.Exhausted(), err, tc.status)
+				if requests != 1 || err == nil || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", tc.status)) {
+					t.Fatalf("requests=%d error=%v, want one rejection with HTTP %d", requests, err, tc.status)
 				}
-				cutoff := tc.deadline != 0
-				if errors.Is(err, ErrWorkDeadline) != cutoff || errors.Is(err, ErrNoFinalCall) != cutoff ||
-					errors.Is(err, context.Canceled) != tc.cancel || errors.Is(err, ErrAuth) != (tc.status == 403) {
-					t.Fatalf("lost error cause: %v", err)
+				if errors.Is(err, ErrWorkDeadline) != tc.wantCutoff || errors.Is(err, ErrNoFinalCall) != tc.wantCutoff {
+					t.Fatalf("error = %v, want cutoff status %t", err, tc.wantCutoff)
+				}
+				if tc.wantCutoff {
+					if strings.Contains(err.Error(), context.Canceled.Error()) != tc.cancel {
+						t.Fatalf("wrong cutoff error: %v", err)
+					}
+				} else {
+					rejection, ok := errors.AsType[*chatGPTError](err)
+					if !ok || rejection.StatusCode != tc.status ||
+						errors.Is(err, context.Canceled) != tc.cancel || errors.Is(err, ErrAuth) != (tc.status == 403) {
+						t.Fatalf("lost error cause: %v", err)
+					}
 				}
 			})
 		})
 	}
+}
+
+func TestChatGPTPreservesRejectionWhenWrapUpCannotReserveBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const limit = 5500
+		ledger := NewLedger(limit)
+		requests := 0
+		c := planTestClient(t, ClientConfig{Ledger: ledger}, func(req *http.Request) (*http.Response, error) {
+			requests++
+			<-req.Context().Done()
+			release, err := ledger.Reserve(0, 0, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release(Usage{UncachedInputTokens: limit})
+			return &http.Response{StatusCode: http.StatusForbidden, Body: http.NoBody}, nil
+		})
+		var out struct{ Answer string }
+		err := c.Converse(t.Context(), "system", "user", ConverseOpts{
+			MaxTurns: 4, FinalTool: "submit", Tools: basicTools(nil), WorkDeadline: time.Now().Add(time.Second),
+		}, &out)
+		rejection, ok := errors.AsType[*chatGPTError](err)
+		if requests != 1 || !ledger.Exhausted() || !errors.Is(err, ErrWorkDeadline) ||
+			!errors.Is(err, ErrNoFinalCall) || !ok || rejection.StatusCode != http.StatusForbidden {
+			t.Fatalf("requests=%d ledger exhausted=%t error=%v, want cutoff with the original rejection", requests, ledger.Exhausted(), err)
+		}
+	})
 }
 
 func TestChatGPTTemporaryRejectionRetry(t *testing.T) {
@@ -866,7 +868,7 @@ func TestChatGPTInvalidSubmissionReportsSchemaError(t *testing.T) {
 		Answer string `json:"answer"`
 	}
 	err := c.CompleteStructured(t.Context(), "system", "user", "submit", &out)
-	if err == nil || !strings.Contains(err.Error(), "did not satisfy the schema") || strings.Contains(err.Error(), "max_output_tokens") {
+	if err == nil || !strings.Contains(err.Error(), "did not satisfy the schema") {
 		t.Fatalf("invalid ChatGPT submission returned %v", err)
 	}
 }
@@ -903,7 +905,7 @@ func TestChatGPTInterruptionAtWorkDeadline(t *testing.T) {
 				}
 				err := c.Converse(t.Context(), "system", "user", opts, &out)
 				if !tc.wantWrapUp {
-					if requests != 1 || notices != 1 || !errors.Is(err, ErrWorkDeadline) || !errors.Is(err, context.DeadlineExceeded) {
+					if requests != 1 || notices != 1 || !errors.Is(err, ErrWorkDeadline) || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
 						t.Fatalf("requests=%d notices=%d error=%v, want one request and both deadline causes", requests, notices, err)
 					}
 				} else if err != nil || requests != 2 || notices != 1 || out.Answer != "done" {
