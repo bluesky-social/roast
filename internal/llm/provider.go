@@ -60,6 +60,10 @@ type client struct {
 	cfg       ClientConfig
 	model     fantasy.LanguageModel
 	transport *captureTransport
+	// A provider that rewrites history can measure the prompt it will send.
+	measurePrompt func(fantasy.Prompt) int
+	// A provider-owned output limit cannot be raised through MaxOutputTokens.
+	fixedOutputLimit bool
 
 	mu    sync.Mutex
 	usage Usage
@@ -94,7 +98,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 			openaicompat.WithSDKOptions(deleteHeaders(envHeaders)...),
 		)
 	case "responses":
-		provider, err = responsesProvider(cfg.APIKey, cfg.BaseURL, httpClient, deleteHeaders(envHeaders))
+		provider, err = responsesProvider(cfg.APIKey, cfg.BaseURL, httpClient, deleteHeaders(envHeaders)...)
 	case "anthropic":
 		// The Anthropic SDK appends /v1/messages itself; Roast profiles use the
 		// same base-URL convention as the OpenAI protocols and include /v1.
@@ -118,7 +122,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	return &client{cfg: cfg, model: mdl, transport: httpClient.Transport.(*captureTransport)}, nil
 }
 
-func responsesProvider(apiKey, baseURL string, httpClient *http.Client, options []option.RequestOption) (fantasy.Provider, error) {
+func responsesProvider(apiKey, baseURL string, httpClient *http.Client, options ...option.RequestOption) (fantasy.Provider, error) {
 	return fantasyopenai.New(
 		fantasyopenai.WithAPIKey(apiKey),
 		fantasyopenai.WithBaseURL(baseURL),
@@ -145,11 +149,8 @@ func (c *client) addUsage(providerUsage fantasy.Usage) Usage {
 	cacheRead := max(int(providerUsage.CacheReadTokens), 0)
 	cacheWrite := max(int(providerUsage.CacheCreationTokens), 0)
 	uncached := input
-	// OpenAI-shaped protocols report cached input as a subset of input_tokens;
-	// Anthropic reports input, cache-read, and cache-creation as disjoint counts.
-	// chatgpt deliberately stays out of this branch: the pinned Fantasy
-	// Responses adapter already subtracts cached input in responsesUsage.
-	// Its end-to-end wire test guards against subtracting that cache twice.
+	// Anthropic and the ChatGPT adapter supply disjoint input and cache
+	// counts. The other routes treat cached tokens as a subset of input.
 	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" {
 		cacheRead = min(cacheRead, input)
 		cacheWrite = min(cacheWrite, input-cacheRead)
@@ -188,26 +189,19 @@ func protocolName(cfg ClientConfig) string {
 
 type captureError struct{ err error }
 
+// A failure reported by an adapter stays available if a deadline or
+// cancellation arrives before the agent handles it.
+type providerCallError struct{ error }
+
+func (e providerCallError) Unwrap() error { return e.error }
+
 type sessionContextKey struct{}
 
 // Each model attempt owns its response body, including when a provider stops
 // reading at a terminal SSE event rather than EOF. Never share bodies between
 // concurrent verifier calls.
 type responseBodyKey struct{}
-type responseBody struct {
-	body io.ReadCloser
-	// A direct plan-usage request retains its precise failure independently
-	// of SDK error mapping. Each attempt owns this state.
-	failure       error
-	terminalUsage *fantasy.Usage
-}
-
-func (b *responseBody) recordFailure(err error) error {
-	if b != nil {
-		b.failure = err
-	}
-	return err
-}
+type responseBody struct{ body io.ReadCloser }
 
 func (b *responseBody) close() error {
 	if b.body == nil {
@@ -366,22 +360,28 @@ func normalizeProviderError(ctx context.Context, modelName string, err error) er
 	if err == nil {
 		return nil
 	}
+	noSubmission := errors.Is(err, ErrNoFinalCall)
+	_, captureFailed := errors.AsType[*captureError](err)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
+		_, reported := errors.AsType[providerCallError](err)
+		if !reported && !captureFailed && !noSubmission {
+			return ctxErr
+		}
+		if errors.Is(err, ctxErr) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", ctxErr, err)
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if noSubmission {
+		return err
+	}
+	if captureFailed || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)
 	}
 	if errors.Is(err, ErrAuth) || errors.Is(err, ErrEndpoint) || errors.Is(err, ErrBudgetExhausted) {
 		return err
 	}
 	if status, ok := errorStatus(err); ok && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
-		var planErr *chatGPTError
-		if errors.As(err, &planErr) {
-			// Direct plan usage has its own OAuth/eligibility recovery. Preserve
-			// that error and never suggest an API key for this route.
-			return fmt.Errorf("%w: %w", ErrAuth, err)
-		}
 		return fmt.Errorf("%w: %v; check the configured API key", ErrAuth, err)
 	}
 	return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)

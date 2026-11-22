@@ -2,12 +2,14 @@ package llm
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"strings"
 
@@ -29,15 +31,12 @@ func newChatGPTResponsesClient(ctx context.Context, cfg ClientConfig, token func
 		return nil, errors.New("max output tokens must be positive")
 	}
 	cfg.Protocol = "chatgpt"
-	headers := sdkEnvironmentHeaders("responses")
 	capture := &captureTransport{cfg: cfg, base: &chatGPTTransport{base: base, token: token}}
-	httpClient := &http.Client{Transport: capture, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	opts := append(deleteHeaders(headers), option.WithMaxRetries(0))
+	httpClient := &http.Client{Transport: capture}
+	opts := append(deleteHeaders(sdkEnvironmentHeaders("responses")), option.WithMaxRetries(0))
 	// The placeholder prevents ambient API credentials from entering the SDK.
 	// The transport supplies the selected account's token for each request.
-	provider, err := responsesProvider("roast-managed-oauth", chatGPTBaseURL, httpClient, opts)
+	provider, err := responsesProvider("roast-managed-oauth", chatGPTBaseURL, httpClient, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +44,10 @@ func newChatGPTResponsesClient(ctx context.Context, cfg ClientConfig, token func
 	if err != nil {
 		return nil, err
 	}
-	return &client{cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture}, nil
+	return &client{
+		cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture,
+		measurePrompt: chatGPTConversationBytes, fixedOutputLimit: true,
+	}, nil
 }
 
 type chatGPTTransport struct {
@@ -54,49 +56,66 @@ type chatGPTTransport struct {
 }
 
 func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, error) {
-	owner, _ := original.Context().Value(responseBodyKey{}).(*responseBody)
 	call, _ := original.Context().Value(chatGPTCallKey{}).(*chatGPTCall)
 	req, err := t.prepareRequest(original, call)
 	if err != nil {
-		return nil, owner.recordFailure(err)
+		return nil, call.recordFailure(err)
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
-		return resp, err
+		if interruption := chatGPTInterruption(err); interruption != nil {
+			return nil, call.recordFailure(interruption)
+		}
+		return nil, call.recordFailure(errors.New("ChatGPT connection failed before a valid HTTP response"))
 	}
 	if resp.Body == nil {
 		resp.Body = http.NoBody
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		const maxErrorBody = 64 << 10
+		if resp.ContentLength > maxErrorBody {
+			_ = resp.Body.Close()
+			rejection := permanentModelError{err: newChatGPTError(resp.StatusCode, nil)}
+			return nil, call.recordFailure(rejection)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
 		_ = resp.Body.Close()
-		if readErr != nil {
-			// The HTTP status still determines recovery when the optional error body is incomplete.
+		// Handle rejections here so the SDK never sees their raw diagnostics
+		// and the HTTP client never follows a redirect.
+		lengthMismatch := resp.ContentLength > 0 && int64(len(data)) != resp.ContentLength
+		oversized := len(data) > maxErrorBody
+		if oversized || (lengthMismatch && int64(len(data)) > resp.ContentLength) {
 			data = nil
 		}
-		// Redact an echoed bearer before handing the response body to the SDK.
-		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
-		data = bytes.ReplaceAll(data, []byte(token), []byte("[redacted]"))
-		resp.Body = io.NopCloser(bytes.NewReader(data))
-		owner.recordFailure(newChatGPTError(resp.StatusCode, data))
-		return resp, nil
+		rejection := newChatGPTError(resp.StatusCode, data)
+		if readErr != nil || oversized || lengthMismatch {
+			rejection = permanentModelError{err: rejection}
+		}
+		if interruption := chatGPTInterruption(readErr); interruption != nil {
+			rejection = providerCallError{fmt.Errorf("%w: %w", rejection, interruption)}
+		}
+		return nil, call.recordFailure(rejection)
 	}
 	if resp.ContentLength > maxCapturedResponseSize {
 		_ = resp.Body.Close()
-		return nil, owner.recordFailure(errors.New("ChatGPT response exceeds the bounded stream size"))
+		return nil, call.recordFailure(errors.New("ChatGPT response exceeds the bounded stream size"))
 	}
-	if types := resp.Header.Values("Content-Type"); len(types) == 0 {
+	types := resp.Header.Values("Content-Type")
+	if len(types) == 0 {
 		// The plan endpoint can omit Content-Type on an SSE response. Let
 		// capture and the SDK stream it through the usual completion checks.
 		if resp.Header == nil {
 			resp.Header = make(http.Header)
 		}
 		resp.Header.Set("Content-Type", "text/event-stream")
-	} else if mediaType, _, _ := mime.ParseMediaType(types[0]); mediaType != "text/event-stream" {
-		_ = resp.Body.Close()
-		return nil, owner.recordFailure(errors.New("ChatGPT returned a non-streaming response; no tools were executed"))
+	} else {
+		mediaType, _, err := mime.ParseMediaType(types[0])
+		if len(types) != 1 || err != nil || mediaType != "text/event-stream" {
+			_ = resp.Body.Close()
+			return nil, call.recordFailure(errors.New("ChatGPT returned a non-streaming response"))
+		}
 	}
-	resp.Body = newChatGPTStreamBody(resp.Body, call, owner)
+	resp.Body = newChatGPTStreamBody(resp.Body, call)
 	return resp, nil
 }
 
@@ -137,14 +156,31 @@ func (t *chatGPTTransport) prepareRequest(original *http.Request, call *chatGPTC
 		return nil, fmt.Errorf("%w: no ChatGPT access token; run roast chatgpt signin", ErrAuth)
 	}
 	req := original.Clone(original.Context())
+	req.Host = req.URL.Host
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
 	req.GetBody = nil
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Del("OpenAI-Organization")
-	req.Header.Del("OpenAI-Project")
 	return req, nil
+}
+
+func chatGPTInterruption(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if cause == context.DeadlineExceeded {
+			return context.DeadlineExceeded
+		}
+	}
+	// A socket timeout can match DeadlineExceeded without coming from the
+	// request context. Keep it as a reported failure at the work cutoff.
+	networkErr, ok := errors.AsType[net.Error](err)
+	if errors.Is(err, context.DeadlineExceeded) || (ok && networkErr.Timeout()) {
+		return providerCallError{context.DeadlineExceeded}
+	}
+	return nil
 }
 
 // chatGPTError keeps the status and code needed for recovery and Fantasy's
@@ -155,40 +191,131 @@ type chatGPTError struct {
 	Code       string
 }
 
-func newChatGPTError(status int, body []byte) *chatGPTError {
-	var wire struct {
-		Code  string `json:"code"`
-		Error *struct {
-			Code string `json:"code"`
-		} `json:"error"`
+const (
+	chatGPTUsageLimit            = "subscription_sharing_usage_limit_exceeded"
+	chatGPTUserNotEligible       = "subscription_sharing_user_not_eligible"
+	chatGPTUnsupportedCapability = "subscription_sharing_unsupported_capability"
+	chatGPTUsageUnavailable      = "subscription_sharing_usage_unavailable"
+	chatGPTUserUnavailable       = "subscription_sharing_user_unavailable"
+	chatGPTUnknownCode           = "unknown"
+)
+
+func newChatGPTError(status int, body []byte) error {
+	err := &chatGPTError{StatusCode: status, Code: chatGPTRejectionCode(body)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return fmt.Errorf("%w: %w", ErrAuth, err)
 	}
-	_ = json.Unmarshal(body, &wire)
-	if wire.Error != nil && wire.Error.Code != "" {
-		wire.Code = wire.Error.Code
+	return err
+}
+
+func chatGPTRejectionCode(body []byte) string {
+	if len(body) == 0 {
+		return ""
 	}
-	return &chatGPTError{StatusCode: status, Code: wire.Code}
+	if !uniqueJSONObject(body, nil) {
+		return chatGPTUnknownCode
+	}
+	type envelope struct {
+		code, problem, response json.RawMessage
+		status, output, usage   json.RawMessage
+	}
+	malformed, duplicate := false, false
+	decode := func(raw json.RawMessage) envelope {
+		var result envelope
+		if len(raw) == 0 {
+			return result
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil || fields == nil {
+			malformed = true
+			return result
+		}
+		known := map[string]*json.RawMessage{
+			"code": &result.code, "error": &result.problem, "response": &result.response,
+			"status": &result.status, "output": &result.output, "usage": &result.usage,
+		}
+		for name, value := range fields {
+			if field := known[foldJSONName(name)]; field != nil {
+				if len(*field) != 0 {
+					duplicate = true
+					return envelope{}
+				}
+				*field = value
+			}
+		}
+		return result
+	}
+	// Parse each known location independently so malformed fields cannot
+	// authorize retries or hide an actionable code elsewhere in the body.
+	root := decode(body)
+	directError := decode(root.problem)
+	response := decode(root.response)
+	responseError := decode(response.problem)
+	if duplicate {
+		return chatGPTUnknownCode
+	}
+	possiblyProcessed := false
+	for _, field := range []envelope{root, response} {
+		var status string
+		if len(field.status) != 0 && (json.Unmarshal(field.status, &status) != nil || status != "failed") {
+			possiblyProcessed = true
+		}
+		if jsonValuePresent(field.output) || jsonValuePresent(field.usage) {
+			possiblyProcessed = true
+		}
+	}
+	code := knownChatGPTErrorCode(malformed || possiblyProcessed, responseError.code, directError.code, response.code, root.code)
+	return cmp.Or(code, chatGPTUnknownCode)
+}
+
+func knownChatGPTErrorCode(unknown bool, codes ...json.RawMessage) string {
+	var temporary string
+	for _, field := range codes {
+		if len(field) == 0 {
+			continue
+		}
+		var code string
+		if err := json.Unmarshal(field, &code); err != nil {
+			unknown = true
+			continue
+		}
+		switch code {
+		case chatGPTUsageLimit, chatGPTUserNotEligible, chatGPTUnsupportedCapability:
+			return code
+		case chatGPTUsageUnavailable, chatGPTUserUnavailable:
+			temporary = cmp.Or(temporary, code)
+		default:
+			unknown = true
+		}
+	}
+	// A 503 with an unknown code stays nonretryable even with another hint.
+	if unknown {
+		return chatGPTUnknownCode
+	}
+	return temporary
 }
 
 func (e *chatGPTError) Error() string {
 	detail := fmt.Sprintf("ChatGPT plan usage failed (HTTP %d)", e.StatusCode)
-	switch e.Code {
-	case "subscription_sharing_usage_limit_exceeded":
-		detail += "; pause new plan-usage requests and check https://chatgpt.com/settings/usage (the reset time and scope of this limit are not known)"
-	case "subscription_sharing_user_not_eligible":
-		detail += "; this user, workspace, or policy is not eligible; repeating OAuth will not resolve eligibility"
-	case "subscription_sharing_unsupported_capability":
-		detail += "; remove the unsupported capability rather than retrying the same request"
-	default:
-		switch e.StatusCode {
-		case http.StatusUnauthorized:
-			detail += "; check the selected account with roast chatgpt status and reauthorize it with roast chatgpt signin --account CLIENT_ID"
-		case http.StatusForbidden:
-			detail += "; check ChatGPT plan permission and account/workspace eligibility; if plan permission is missing, request consent with roast chatgpt signin --account CLIENT_ID --enable-plan"
-		}
+	switch {
+	case e.Code == chatGPTUsageLimit:
+		return detail + ". Pause new plan requests and check https://chatgpt.com/settings/usage"
+	case e.Code == chatGPTUserNotEligible:
+		return detail + ". This user, workspace, or policy is ineligible for plan usage."
+	case e.Code == chatGPTUnsupportedCapability:
+		return detail + ". Remove the unsupported capability before retrying."
+	case e.StatusCode == http.StatusUnauthorized:
+		return detail + ". Check the account with roast chatgpt status and reauthorize it with roast chatgpt signin --account CLIENT_ID"
+	case e.StatusCode == http.StatusForbidden:
+		return detail + ". If plan permission is missing, request consent with roast chatgpt signin --account CLIENT_ID --enable-plan"
 	}
 	return detail
 }
 
 func (e *chatGPTError) IsRetryable() bool {
-	return e.StatusCode == http.StatusServiceUnavailable && (e.Code == "" || e.Code == "subscription_sharing_usage_unavailable" || e.Code == "subscription_sharing_user_unavailable")
+	switch e.Code {
+	case "", chatGPTUsageUnavailable, chatGPTUserUnavailable:
+		return e.StatusCode == http.StatusServiceUnavailable
+	}
+	return false
 }
