@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"charm.land/fantasy"
@@ -154,6 +156,46 @@ func TestAgentInFlightDeadlineGetsFreshFinalWindow(t *testing.T) {
 	}
 	if !deadlineFired || calls != 2 || out.Answer != "deadline" {
 		t.Fatalf("deadlineFired=%v calls=%d answer=%q", deadlineFired, calls, out.Answer)
+	}
+}
+
+func TestAgentKeepsProviderErrorOnOrdinaryFinalTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		providerErr error
+		want        error
+	}{
+		{name: "timeout", want: ErrEndpoint},
+		{
+			name: "rejected", want: ErrAuth,
+			providerErr: &fantasy.ProviderError{StatusCode: http.StatusForbidden, Message: "permission denied"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				calls, notices := 0, 0
+				c := testClient(func(ctx context.Context, _ fantasy.Call) (*fantasy.Response, error) {
+					calls++
+					<-ctx.Done()
+					if tc.providerErr != nil {
+						return nil, tc.providerErr
+					}
+					return nil, ctx.Err()
+				})
+				c.cfg.Protocol = "responses"
+				var out struct{ Answer string }
+				err := c.Converse(t.Context(), "system", "user", ConverseOpts{
+					MaxTurns: 1, FinalTool: "submit", Tools: basicTools(nil),
+					WorkDeadline: time.Now().Add(time.Second), OnWorkDeadline: func() { notices++ },
+				}, &out)
+				if calls != 1 || notices != 1 {
+					t.Fatalf("calls=%d deadline notices=%d, want one of each", calls, notices)
+				}
+				if !errors.Is(err, tc.want) || errors.Is(err, ErrNoFinalCall) || errors.Is(err, ErrWorkDeadline) {
+					t.Fatalf("error = %v, want %v without a wrap-up cutoff", err, tc.want)
+				}
+			})
+		})
 	}
 }
 

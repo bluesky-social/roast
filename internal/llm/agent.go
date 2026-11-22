@@ -237,9 +237,9 @@ func (m *managedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 		_, reported := errors.AsType[providerCallError](err)
 		// A new cutoff could turn an in-flight capture failure into a
 		// partial review. Keep that failure fatal.
-		if !captureFailed && deadlineReached && (reported || ctx.Err() == nil) {
+		if !captureFailed && deadlineReached && (reported || (!final && ctx.Err() == nil)) {
 			m.state.forceFinal(ErrWorkDeadline)
-			if !final && !reported && ctx.Err() == nil {
+			if !reported && ctx.Err() == nil {
 				m.streamFinal(ctx, call, yield)
 				return
 			}
