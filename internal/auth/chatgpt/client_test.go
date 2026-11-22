@@ -10,19 +10,25 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/zalando/go-keyring"
-
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/chatgpttest"
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
+func TestNewWithStoreRequiresStore(t *testing.T) {
+	if _, err := NewWithStore(t.Context(), nil); err == nil {
+		t.Fatal("opened a client without a credential store")
+	}
+}
+
 func TestNewDoesNotCreateCredentials(t *testing.T) {
-	mockKeyring(t)
-	c, err := New(t.Context())
+	t.Parallel()
+	root := t.TempDir()
+	store, _ := chatgpttest.NewStore(t, root)
+	c, err := NewWithStore(t.Context(), store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,24 +38,13 @@ func TestNewDoesNotCreateCredentials(t *testing.T) {
 	if _, err = c.Token(context.Background()); !errors.Is(err, ErrAuth) {
 		t.Fatal("missing login not classified")
 	}
-	store, err := storage.Open()
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = os.Stat(store.(interface{ LockPath() string }).LockPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("read-only action created the keyring lock file")
+	if len(entries) != 0 {
+		t.Fatalf("read-only action created files in the lock directory: %v", entries)
 	}
-}
-
-func mockKeyring(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	t.Cleanup(storage.UseTestKeyring(dir))
 }
 
 type transportFunc func(*http.Request) (*http.Response, error)
@@ -68,53 +63,16 @@ func jsonResponse(status int, value any) (*http.Response, error) {
 
 func testClient(t *testing.T) *Client {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", dir)
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	store, err := storage.OpenWithKeyring(&testKeyring{items: make(map[string]string)}, dir)
+	store, _ := chatgpttest.NewStore(t, t.TempDir())
+	client, err := NewWithStore(t.Context(), testAccountStore{Store: store, faults: &storeFaults{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := oauth.NewClient()
-	provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+	client.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
 		t.Error("unexpected network request")
 		return nil, errors.New("unexpected")
 	})
-	return &Client{store: testAccountStore{Store: store, faults: &storeFaults{}}, now: time.Now, provider: provider}
-}
-
-type testKeyring struct {
-	mu    sync.Mutex
-	items map[string]string
-}
-
-func (k *testKeyring) Get(_, item string) (string, error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if value, ok := k.items[item]; ok {
-		return value, nil
-	}
-	return "", keyring.ErrNotFound
-}
-
-func (k *testKeyring) Set(_, item, value string) error {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.items[item] = value
-	return nil
-}
-
-func (k *testKeyring) Delete(_, item string) error {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if _, ok := k.items[item]; !ok {
-		return keyring.ErrNotFound
-	}
-	delete(k.items, item)
-	return nil
+	return client
 }
 
 type storeFaults struct {
