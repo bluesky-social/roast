@@ -23,12 +23,11 @@ type chatGPTStreamBody struct {
 	bytesRead int
 	err       error
 	call      *chatGPTCall
-	owner     *responseBody
 }
 
-func newChatGPTStreamBody(body io.ReadCloser, call *chatGPTCall, owner *responseBody) *chatGPTStreamBody {
+func newChatGPTStreamBody(body io.ReadCloser, call *chatGPTCall) *chatGPTStreamBody {
 	// Limit the source before ReadString, including a stream with no newline.
-	return &chatGPTStreamBody{body: body, reader: bufio.NewReader(io.LimitReader(body, maxCapturedResponseSize+1)), call: call, owner: owner}
+	return &chatGPTStreamBody{body: body, reader: bufio.NewReader(io.LimitReader(body, maxCapturedResponseSize+1)), call: call}
 }
 
 func (b *chatGPTStreamBody) Read(p []byte) (int, error) {
@@ -39,7 +38,7 @@ func (b *chatGPTStreamBody) Read(p []byte) (int, error) {
 		b.pending, b.err = b.readEvent()
 		if b.err != nil && !errors.Is(b.err, io.EOF) {
 			// Preserve the guard error if the SDK maps the read failure.
-			b.owner.recordFailure(b.err)
+			b.call.recordFailure(b.err)
 		}
 	}
 	if len(b.pending) > 0 {
@@ -141,8 +140,8 @@ func (b *chatGPTStreamBody) validate(name string, data []byte) error {
 			if !valid && event.Type == "response.completed" {
 				return errors.New("ChatGPT reported inconsistent token usage")
 			}
-			if valid && b.owner != nil {
-				b.owner.terminalUsage = &fantasy.Usage{InputTokens: u.Input - u.Details.Cached, CacheReadTokens: u.Details.Cached, OutputTokens: u.Output}
+			if valid && b.call != nil {
+				b.call.usage = &fantasy.Usage{InputTokens: u.Input - u.Details.Cached, CacheReadTokens: u.Details.Cached, OutputTokens: u.Output}
 			}
 		}
 	}

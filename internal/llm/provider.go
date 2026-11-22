@@ -60,10 +60,6 @@ type client struct {
 	cfg       ClientConfig
 	model     fantasy.LanguageModel
 	transport *captureTransport
-	// Providers that rewrite the conversation can supply their own byte count.
-	measurePrompt func(fantasy.Prompt) int
-	// A provider-owned output limit cannot be raised through MaxOutputTokens.
-	fixedOutputLimit bool
 
 	mu    sync.Mutex
 	usage Usage
@@ -135,13 +131,6 @@ func userAgent() string { return "roast/" + buildinfo.Version }
 
 func (c *client) Name() string { return c.cfg.Model }
 
-func (c *client) conversationBytes(prompt fantasy.Prompt) int {
-	if c.measurePrompt != nil {
-		return c.measurePrompt(prompt)
-	}
-	return fantasyConversationBytes(prompt)
-}
-
 func (c *client) Usage() Usage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -196,37 +185,13 @@ func protocolName(cfg ClientConfig) string {
 
 type captureError struct{ err error }
 
-// A provider can report a specific call failure independently of deadline
-// cancellation. Even if the work deadline passes, preserve that failure
-// instead of opening another request solely to wrap up.
-type providerCallError struct{ error }
-
-func (e providerCallError) Unwrap() error { return e.error }
-
-func isProviderCallFailure(err error) bool {
-	var reported providerCallError
-	return errors.As(err, &reported) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
-}
-
 type sessionContextKey struct{}
 
 // Each model attempt owns its response body, including when a provider stops
 // reading at a terminal SSE event rather than EOF. Never share bodies between
 // concurrent verifier calls.
 type responseBodyKey struct{}
-type responseBody struct {
-	body io.ReadCloser
-	// The transport can report terminal details that an SDK may discard.
-	failure       error
-	terminalUsage *fantasy.Usage
-}
-
-func (b *responseBody) recordFailure(err error) error {
-	if b != nil {
-		b.failure = providerCallError{err}
-	}
-	return err
-}
+type responseBody struct{ body io.ReadCloser }
 
 func (b *responseBody) close() error {
 	if b.body == nil {

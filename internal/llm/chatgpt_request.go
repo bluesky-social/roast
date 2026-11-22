@@ -1,11 +1,11 @@
 package llm
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 
 	"charm.land/fantasy"
 )
@@ -62,14 +62,23 @@ const chatGPTOutputKey = "roast_chatgpt_output"
 
 type chatGPTCallKey struct{}
 type chatGPTCall struct {
-	prompt fantasy.Prompt
-	output chatGPTOutput
+	prompt   fantasy.Prompt
+	output   chatGPTOutput
+	usage    *fantasy.Usage
+	failure  error
+	deadline *chatGPTDeadline
 }
 
-// Finalized raw output survives Fantasy's conversion to prompt messages. Its
-// Responses adapter otherwise discards reasoning and namespace metadata. One
-// shared marker on the turn's content restores the complete output exactly
-// once, in server order, without promoting it to a higher-priority message.
+func (c *chatGPTCall) recordFailure(err error) error {
+	if c != nil {
+		c.failure = err
+	}
+	return err
+}
+
+// Store finalized output once, after the provider's content and before any
+// tools added locally. It carries the server's order and encrypted reasoning
+// through Fantasy's conversion to prompt messages.
 type chatGPTOutput struct {
 	items []json.RawMessage
 }
@@ -81,75 +90,115 @@ func (o *chatGPTOutput) UnmarshalJSON(data []byte) error { return json.Unmarshal
 type chatGPTModel struct{ fantasy.LanguageModel }
 
 func (m *chatGPTModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-	state := &chatGPTCall{prompt: call.Prompt}
+	deadline, _ := ctx.Value(chatGPTDeadlineKey{}).(*chatGPTDeadline)
+	if deadline != nil {
+		// A tool can start another agent run with this context. The deadline
+		// state belongs to the outer run's session.
+		session, _ := ctx.Value(sessionContextKey{}).(string)
+		if deadline.session == "" {
+			deadline.session = session
+		}
+		if deadline.session != session {
+			deadline = nil
+		}
+	}
+	if deadline != nil {
+		// The reserved wrap-up can follow a deadline interruption. Reuse a
+		// provider failure already received at the cutoff without a new request.
+		if deadline.reached && deadline.failure != nil {
+			return nil, deadline.failure
+		}
+		deadline.failure = nil
+	}
+	state := &chatGPTCall{prompt: call.Prompt, deadline: deadline}
 	ctx = context.WithValue(ctx, chatGPTCallKey{}, state)
 	stream, err := m.LanguageModel.Stream(ctx, call)
 	if err != nil {
-		return nil, providerCallError{err}
+		return func(yield func(fantasy.StreamPart) bool) {
+			state.yieldError(yield, nil, cmp.Or(state.failure, err))
+		}, nil
 	}
 	return func(yield func(fantasy.StreamPart) bool) {
-		yieldError := func(err error) {
-			if err != nil {
-				err = providerCallError{err}
+		state.stream(stream, yield)
+	}, nil
+}
+
+func (c *chatGPTCall) stream(stream fantasy.StreamResponse, yield func(fantasy.StreamPart) bool) {
+	calls := make(map[string]fantasy.StreamPart)
+	var finish *fantasy.StreamPart
+	var streamErr error
+consume:
+	for part := range stream {
+		// The finalized output carries replay metadata, including any encrypted
+		// reasoning the SDK also put on individual parts.
+		part.ProviderMetadata = nil
+		switch part.Type {
+		case fantasy.StreamPartTypeError:
+			streamErr = part.Error
+			break consume
+		case fantasy.StreamPartTypeToolCall:
+			if _, exists := calls[part.ID]; exists || part.ID == "" || part.ProviderExecuted {
+				streamErr = errors.New("invalid ChatGPT streamed tool call")
+				break consume
 			}
-			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
-		}
-		calls := make(map[string]fantasy.StreamPart)
-		markedOutput := false
-		for part := range stream {
-			switch part.Type {
-			case fantasy.StreamPartTypeError:
-				yieldError(part.Error)
-				return
-			case fantasy.StreamPartTypeToolCall, fantasy.StreamPartTypeTextEnd, fantasy.StreamPartTypeReasoningEnd:
-				markedOutput = true
-				metadata := make(fantasy.ProviderMetadata, len(part.ProviderMetadata)+1)
-				maps.Copy(metadata, part.ProviderMetadata)
-				metadata[chatGPTOutputKey] = &state.output
-				part.ProviderMetadata = metadata
-				if part.Type == fantasy.StreamPartTypeToolCall {
-					if _, exists := calls[part.ID]; exists || part.ID == "" || part.ProviderExecuted {
-						yieldError(errors.New("invalid ChatGPT streamed tool call"))
-						return
-					}
-					calls[part.ID] = part
-					continue
-				}
-			case fantasy.StreamPartTypeFinish:
-				// Parallel calls can finish in a different order. Dispatch them in
-				// the order that the server finalized and Roast will replay.
-				ordered, err := state.output.finalizedToolCalls(calls)
-				if err != nil {
-					// The managed model records finish usage and discards its
-					// buffered output when the error follows.
-					if yield(part) {
-						yieldError(err)
-					}
-					return
-				}
-				if !markedOutput && len(state.output.items) != 0 {
-					// A terminal response may contain only opaque reasoning that
-					// the SDK never streamed. Carry its exact output into history.
-					const id = "roast-finalized-output"
-					if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningStart, ID: id}) ||
-						!yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: id, ProviderMetadata: fantasy.ProviderMetadata{chatGPTOutputKey: &state.output}}) {
-						return
-					}
-				}
-				for _, call := range ordered {
-					if !yield(call) {
-						return
-					}
-				}
-			}
+			calls[part.ID] = part
+		case fantasy.StreamPartTypeFinish:
+			finish = &part
+		default:
 			if !yield(part) {
 				return
 			}
 		}
-	}, nil
+	}
+
+	// The SDK may stop after a terminal event without reporting a guard error.
+	if err := cmp.Or(c.failure, streamErr); err != nil {
+		c.yieldError(yield, finish, err)
+		return
+	}
+	if finish == nil {
+		c.yieldError(yield, nil, fantasy.NewIncompleteStreamError())
+		return
+	}
+	ordered, err := c.output.finalizedToolCalls(calls)
+	if err != nil {
+		c.yieldError(yield, finish, err)
+		return
+	}
+	for _, call := range ordered {
+		if !yield(call) {
+			return
+		}
+	}
+	const id = "roast-finalized-output"
+	if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningStart, ID: id}) ||
+		!yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: id, ProviderMetadata: fantasy.ProviderMetadata{chatGPTOutputKey: &c.output}}) {
+		return
+	}
+	yield(*finish)
+}
+
+func (c *chatGPTCall) yieldError(yield func(fantasy.StreamPart) bool, finish *fantasy.StreamPart, err error) {
+	if c.deadline != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		c.deadline.failure = err
+	}
+	usage := c.usage
+	if finish != nil {
+		usage = &finish.Usage
+	}
+	// Report usage from the failed attempt before propagating the error.
+	if usage != nil && !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonError, Usage: *usage}) {
+		return
+	}
+	yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
 }
 
 func (o *chatGPTOutput) finalizedToolCalls(calls map[string]fantasy.StreamPart) ([]fantasy.StreamPart, error) {
+	if o.items == nil {
+		return nil, errors.New("ChatGPT stream ended without response.completed; no tools were executed")
+	}
+	// Parallel calls can finish in a different order. Dispatch them in the
+	// order in which the server finalized them and Roast will replay them.
 	ordered := make([]fantasy.StreamPart, 0, len(calls))
 	for _, raw := range o.items {
 		var item struct {
@@ -183,20 +232,22 @@ func (o *chatGPTOutput) finalizedToolCalls(calls map[string]fantasy.StreamPart) 
 func chatGPTInput(prompt fantasy.Prompt) (json.RawMessage, error) {
 	input := make([]any, 0, len(prompt))
 	for _, message := range prompt {
-		seen := make(map[*chatGPTOutput]bool)
-		for _, part := range message.Content {
+		parts := message.Content
+		for i, part := range parts {
 			if original, ok := part.Options()[chatGPTOutputKey].(*chatGPTOutput); ok {
-				if message.Role != fantasy.MessageRoleAssistant || original == nil || len(original.items) == 0 {
+				if message.Role != fantasy.MessageRoleAssistant || original == nil || original.items == nil {
 					return nil, errors.New("ChatGPT history is missing finalized assistant output")
 				}
-				if !seen[original] {
-					for _, item := range original.items {
-						input = append(input, item)
-					}
-					seen[original] = true
+				for _, item := range original.items {
+					input = append(input, item)
 				}
-				continue
+				// The marker replaces the provider's prefix. Any local nudge
+				// appended by the agent still belongs to this assistant turn.
+				parts = parts[i+1:]
+				break
 			}
+		}
+		for _, part := range parts {
 			item, err := chatGPTInputPart(message.Role, part)
 			if err != nil {
 				return nil, err
@@ -205,14 +256,6 @@ func chatGPTInput(prompt fantasy.Prompt) (json.RawMessage, error) {
 		}
 	}
 	return json.Marshal(input)
-}
-
-func chatGPTConversationBytes(prompt fantasy.Prompt) int {
-	// Replay shared finalized output once, as it appears on the wire.
-	if input, err := chatGPTInput(prompt); err == nil {
-		return len(input)
-	}
-	return fantasyConversationBytes(prompt)
 }
 
 func chatGPTInputPart(role fantasy.MessageRole, part fantasy.MessagePart) (map[string]string, error) {

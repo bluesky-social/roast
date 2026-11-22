@@ -228,7 +228,8 @@ func TestChatGPTUsageCountsCachedInputOnce(t *testing.T) {
 func TestChatGPTCountsUnsuccessfulTerminalUsage(t *testing.T) {
 	for _, status := range []string{"incomplete", "failed"} {
 		t.Run(status, func(t *testing.T) {
-			c := planTestClient(t, ClientConfig{MaxAttempts: 1}, planRoundTripper(func(*http.Request) (*http.Response, error) {
+			ledger := NewLedger(20_000)
+			c := planTestClient(t, ClientConfig{MaxAttempts: 1, Ledger: ledger}, planRoundTripper(func(*http.Request) (*http.Response, error) {
 				frame := fmt.Sprintf("data: "+`{"type":"response.%s","response":{"status":"%s","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":30},"output_tokens":10}}}`+"\n\n", status, status)
 				return planResponse([]byte(frame)), nil
 			}))
@@ -239,6 +240,9 @@ func TestChatGPTCountsUnsuccessfulTerminalUsage(t *testing.T) {
 			u := c.Usage()
 			if u.Calls != 1 || u.UncachedInputTokens != 70 || u.CachedInputTokens != 30 || u.OutputTokens != 10 {
 				t.Fatalf("usage = %+v", u)
+			}
+			if spent, _ := ledger.Committed(); spent != 83 {
+				t.Fatalf("committed %d tokens, want 83 including discounted cached input", spent)
 			}
 		})
 	}
@@ -300,17 +304,33 @@ func TestChatGPTReplaysFinalizedReasoningInOriginalOrder(t *testing.T) {
 		if err := testutil.WriteInferenceStream(w, "responses", response); err != nil {
 			return nil, err
 		}
-		// Encrypted content is only final at output_item.done/completed in real
-		// streams. The SDK's metadata at item.added must not be the replay source.
+		// One item supplies its ciphertext only at completion. The other also
+		// exposes it in the SDK metadata, where it could inflate the estimate.
 		stream := w.Body.String()
 		lines := strings.Split(stream, "\n")
 		for i, line := range lines {
 			if strings.HasPrefix(line, "data:") && strings.Contains(line, `"type":"response.output_item.added"`) {
-				lines[i] = strings.ReplaceAll(strings.ReplaceAll(line, `,"encrypted_content":"opaque-before"`, ""), `,"encrypted_content":"opaque-finalized"`, "")
+				lines[i] = strings.ReplaceAll(line, `,"encrypted_content":"opaque-finalized"`, "")
 			}
 		}
 		return planResponse([]byte(strings.Join(lines, "\n"))), nil
 	}))
+	model := c.(*chatGPTClient).model.(*chatGPTModel)
+	stream := model.LanguageModel.Stream
+	model.LanguageModel = &fakeLanguageModel{stream: func(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+		if calls == 1 {
+			data, err := json.Marshal(call.Prompt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, opaque := range []string{"opaque-before", "opaque-finalized"} {
+				if n := bytes.Count(data, []byte(opaque)); n != 1 {
+					t.Fatalf("serialized prompt contains %d copies of %q, want 1", n, opaque)
+				}
+			}
+		}
+		return stream(ctx, call)
+	}}
 	var out struct{ Answer string }
 	err := c.Converse(t.Context(), "system", "user", ConverseOpts{MaxTurns: 2, FinalTool: "submit", Tools: basicTools(func(context.Context, map[string]any) (any, error) { return "result", nil })}, &out)
 	if err != nil || calls != 2 || out.Answer != "done" {
@@ -347,17 +367,20 @@ func TestChatGPTTerminalGuardFailureStopsBeforeDispatch(t *testing.T) {
 	c.cfg.Protocol = "chatgpt"
 	c.model.(*fakeLanguageModel).stream = func(ctx context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
 		return func(yield func(fantasy.StreamPart) bool) {
-			// Simulate an SDK which stops reading at a completion event. The
-			// transport has flagged it, but no subsequent Read exposes the error.
-			owner := ctx.Value(responseBodyKey{}).(*responseBody)
-			owner.recordFailure(errors.New("terminal stream guard rejected output"))
-			if yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: "read", ToolCallName: "read", ToolCallInput: `{}`}) {
-				if yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: "submit", ToolCallName: "submit", ToolCallInput: `{"answer":"must not succeed"}`}) {
-					yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonToolCalls})
-				}
+			call := ctx.Value(chatGPTCallKey{}).(*chatGPTCall)
+			call.output.items = []json.RawMessage{
+				json.RawMessage(`{"type":"function_call","call_id":"read","name":"read","arguments":"{}"}`),
+				json.RawMessage(`{"type":"function_call","call_id":"submit","name":"submit","arguments":"{\"answer\":\"must not succeed\"}"}`),
+			}
+			if yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: "read", ToolCallName: "read", ToolCallInput: `{}`}) &&
+				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolCall, ID: "submit", ToolCallName: "submit", ToolCallInput: `{"answer":"must not succeed"}`}) &&
+				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonToolCalls}) {
+				// Simulate an SDK that finishes without surfacing the guard's error.
+				call.recordFailure(errors.New("terminal stream guard rejected output"))
 			}
 		}, nil
 	}
+	c.model = &chatGPTModel{LanguageModel: c.model}
 	var out struct{ Answer string }
 	err := c.Converse(t.Context(), "system", "user", ConverseOpts{MaxTurns: 2, FinalTool: "submit", Tools: basicTools(func(context.Context, map[string]any) (any, error) {
 		t.Error("tool dispatched after terminal guard failure")
@@ -445,7 +468,7 @@ func TestChatGPTRequestRejectsInvalidInput(t *testing.T) {
 
 func TestChatGPTStreamBoundsUnterminatedLine(t *testing.T) {
 	source := strings.NewReader(strings.Repeat("x", maxCapturedResponseSize+2))
-	body := newChatGPTStreamBody(io.NopCloser(source), nil, nil)
+	body := newChatGPTStreamBody(io.NopCloser(source), nil)
 	if _, err := io.Copy(io.Discard, body); err == nil || !strings.Contains(err.Error(), "bounded stream size") {
 		t.Fatalf("oversized frame returned %v", err)
 	}
@@ -603,14 +626,11 @@ func TestChatGPTRejectsOversizedRestoredHistoryBeforeCredentials(t *testing.T) {
 	}}
 	state := &chatGPTCall{prompt: fantasy.Prompt{{
 		Role: fantasy.MessageRoleAssistant,
-		Content: []fantasy.MessagePart{fantasy.TextPart{
-			Text:            "small SDK history",
+		Content: []fantasy.MessagePart{fantasy.ReasoningPart{
 			ProviderOptions: fantasy.ProviderOptions{chatGPTOutputKey: output},
 		}},
 	}}}
-	owner := &responseBody{}
 	ctx := context.WithValue(t.Context(), chatGPTCallKey{}, state)
-	ctx = context.WithValue(ctx, responseBodyKey{}, owner)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatGPTBaseURL+"/responses", strings.NewReader(`{"input":[]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -626,14 +646,14 @@ func TestChatGPTRejectsOversizedRestoredHistoryBeforeCredentials(t *testing.T) {
 		}),
 	}
 	resp, err := transport.RoundTrip(req)
-	if resp != nil || err == nil || !strings.Contains(err.Error(), "exceeds the bounded input size") || !errors.Is(owner.failure, err) {
-		t.Fatalf("response=%v error=%v retained failure=%v", resp, err, owner.failure)
+	if resp != nil || err == nil || !strings.Contains(err.Error(), "exceeds the bounded input size") || !errors.Is(state.failure, err) {
+		t.Fatalf("response=%v error=%v retained failure=%v", resp, err, state.failure)
 	}
 }
 
 func TestChatGPTStreamAllowsCommentsCRLFAndMultilineData(t *testing.T) {
 	stream := ": keepalive\r\n\r\ndata: {\"type\":\"response.completed\",\r\ndata: \"response\":{\"status\":\"completed\",\"output\":[]}}\r\n\r\n"
-	b := newChatGPTStreamBody(io.NopCloser(strings.NewReader(stream)), nil, nil)
+	b := newChatGPTStreamBody(io.NopCloser(strings.NewReader(stream)), nil)
 	got, err := io.ReadAll(b)
 	if err != nil || string(got) != stream || !b.completed {
 		t.Fatalf("completed=%v error=%v stream=%q", b.completed, err, got)
@@ -667,25 +687,29 @@ func TestChatGPTRejectsNonStreamingSuccess(t *testing.T) {
 	}
 }
 
-func TestChatGPTBudgetCountsSharedOutputOnce(t *testing.T) {
-	output := &chatGPTOutput{items: []json.RawMessage{json.RawMessage(`{"type":"reasoning","summary":[]}`)}}
-	part := fantasy.TextPart{Text: "one part", ProviderOptions: fantasy.ProviderOptions{chatGPTOutputKey: output}}
-	prompt := fantasy.Prompt{{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{part, part}}}
-	wire, err := chatGPTInput(prompt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := planTestClient(t, ClientConfig{}, http.DefaultTransport).(*client)
-	if n := c.conversationBytes(prompt); n != len(wire) {
-		t.Fatalf("budgeted %d bytes, sent %d", n, len(wire))
-	}
-}
-
-func TestChatGPTWrapUpRetainsProviderFailure(t *testing.T) {
-	state := &agentRunState{cutoff: ErrBudgetExhausted}
-	err := state.cutoffError("wrap-up call failed", ErrAuth)
-	if !errors.Is(err, ErrBudgetExhausted) || !errors.Is(err, ErrAuth) {
-		t.Fatalf("lost the cutoff or provider failure: %v", err)
+func TestChatGPTInputKeepsLocalNudgeAfterFinalizedOutput(t *testing.T) {
+	const reasoning = `{"type":"reasoning","summary":[]}`
+	const nudge = `{"arguments":"{}","call_id":"nudge","name":"__roast_continue","namespace":"roast","type":"function_call"}`
+	for _, tc := range []struct {
+		name  string
+		items []json.RawMessage
+		want  string
+	}{
+		{"reasoning", []json.RawMessage{json.RawMessage(reasoning)}, "[" + reasoning + "," + nudge + "]"},
+		{"empty", []json.RawMessage{}, "[" + nudge + "]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := &chatGPTOutput{items: tc.items}
+			prompt := fantasy.Prompt{{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+				fantasy.ReasoningPart{Text: "SDK reasoning summary"},
+				fantasy.ReasoningPart{ProviderOptions: fantasy.ProviderOptions{chatGPTOutputKey: output}},
+				fantasy.ToolCallPart{ToolCallID: "nudge", ToolName: nudgeToolName, Input: `{}`},
+			}}}
+			wire, err := chatGPTInput(prompt)
+			if err != nil || string(wire) != tc.want {
+				t.Fatalf("input = %s, error = %v, want %s", wire, err, tc.want)
+			}
+		})
 	}
 }
 
@@ -699,8 +723,7 @@ func TestChatGPTWrapUpDoesNotRetryPlanRejection(t *testing.T) {
 	var out struct{ Answer string }
 	opts := ConverseOpts{MaxTurns: 4, FinalTool: "submit", Tools: basicTools(nil), WorkDeadline: time.Now().Add(-time.Second)}
 	err := c.Converse(t.Context(), "system", "user", opts, &out)
-	var planErr *chatGPTError
-	if requests != 1 || !errors.Is(err, ErrWorkDeadline) || !errors.As(err, &planErr) || planErr.Code != "subscription_sharing_usage_unavailable" {
+	if requests != 1 || !errors.Is(err, ErrWorkDeadline) || !errors.Is(err, ErrNoFinalCall) || !strings.Contains(err.Error(), "ChatGPT plan usage failed (HTTP 503)") {
 		t.Fatalf("wrap-up made %d requests, returned %v", requests, err)
 	}
 }
@@ -718,8 +741,31 @@ func TestChatGPTRejectionAtWorkDeadlineDoesNotStartWrapUp(t *testing.T) {
 		var out struct{ Answer string }
 		opts := ConverseOpts{MaxTurns: 4, FinalTool: "submit", Tools: basicTools(nil), WorkDeadline: time.Now().Add(time.Second)}
 		err := c.Converse(t.Context(), "system", "user", opts, &out)
-		if requests != 1 || !errors.Is(err, ErrWorkDeadline) || !errors.Is(err, ErrAuth) {
-			t.Fatalf("made %d requests, returned %v, want one request and both deadline and auth errors", requests, err)
+		if requests != 1 || !errors.Is(err, ErrWorkDeadline) || !errors.Is(err, ErrNoFinalCall) || !strings.Contains(err.Error(), "ChatGPT plan usage failed (HTTP 403)") {
+			t.Fatalf("made %d requests, returned %v, want one request and a cutoff with the provider rejection", requests, err)
+		}
+	})
+}
+
+func TestChatGPTInterruptedAtWorkDeadlineCanWrapUp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		requests := 0
+		c := planTestClient(t, ClientConfig{}, planRoundTripper(func(req *http.Request) (*http.Response, error) {
+			requests++
+			if requests == 1 {
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			}
+			return planResponse(planStream(t, "submit", `{"answer":"done"}`)), nil
+		}))
+		var out struct{ Answer string }
+		notices := 0
+		opts := ConverseOpts{
+			MaxTurns: 4, FinalTool: "submit", Tools: basicTools(nil), WorkDeadline: time.Now().Add(time.Second),
+			OnWorkDeadline: func() { notices++ },
+		}
+		if err := c.Converse(t.Context(), "system", "user", opts, &out); err != nil || requests != 2 || notices != 1 || out.Answer != "done" {
+			t.Fatalf("requests=%d deadline notices=%d result=%+v error=%v", requests, notices, out, err)
 		}
 	})
 }

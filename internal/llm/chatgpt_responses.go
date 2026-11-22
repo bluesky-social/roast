@@ -45,10 +45,32 @@ func newChatGPTResponsesClient(ctx context.Context, cfg ClientConfig, token func
 	if err != nil {
 		return nil, err
 	}
-	return &client{
-		cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture,
-		measurePrompt: chatGPTConversationBytes, fixedOutputLimit: true,
-	}, nil
+	return &chatGPTClient{client: &client{cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture}}, nil
+}
+
+type chatGPTClient struct{ *client }
+
+type chatGPTDeadlineKey struct{}
+
+type chatGPTDeadline struct {
+	session string
+	reached bool
+	failure error
+}
+
+func (c *chatGPTClient) Converse(ctx context.Context, system, user string, opts ConverseOpts, out any) error {
+	if !opts.WorkDeadline.IsZero() {
+		deadline := &chatGPTDeadline{}
+		ctx = context.WithValue(ctx, chatGPTDeadlineKey{}, deadline)
+		onDeadline := opts.OnWorkDeadline
+		opts.OnWorkDeadline = func() {
+			deadline.reached = true
+			if onDeadline != nil {
+				onDeadline()
+			}
+		}
+	}
+	return c.client.Converse(ctx, system, user, opts, out)
 }
 
 type chatGPTTransport struct {
@@ -57,11 +79,10 @@ type chatGPTTransport struct {
 }
 
 func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, error) {
-	owner, _ := original.Context().Value(responseBodyKey{}).(*responseBody)
 	call, _ := original.Context().Value(chatGPTCallKey{}).(*chatGPTCall)
 	req, err := t.prepareRequest(original, call)
 	if err != nil {
-		return nil, owner.recordFailure(err)
+		return nil, call.recordFailure(err)
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
@@ -81,12 +102,12 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 		data = bytes.ReplaceAll(data, []byte(token), []byte("[redacted]"))
 		resp.Body = io.NopCloser(bytes.NewReader(data))
-		owner.recordFailure(newChatGPTError(resp.StatusCode, data))
+		call.recordFailure(newChatGPTError(resp.StatusCode, data))
 		return resp, nil
 	}
 	if resp.ContentLength > maxCapturedResponseSize {
 		_ = resp.Body.Close()
-		return nil, owner.recordFailure(errors.New("ChatGPT response exceeds the bounded stream size"))
+		return nil, call.recordFailure(errors.New("ChatGPT response exceeds the bounded stream size"))
 	}
 	if types := resp.Header.Values("Content-Type"); len(types) == 0 {
 		// The plan endpoint can omit Content-Type on an SSE response. Let
@@ -97,9 +118,9 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 		resp.Header.Set("Content-Type", "text/event-stream")
 	} else if mediaType, _, _ := mime.ParseMediaType(types[0]); mediaType != "text/event-stream" {
 		_ = resp.Body.Close()
-		return nil, owner.recordFailure(errors.New("ChatGPT returned a non-streaming response; no tools were executed"))
+		return nil, call.recordFailure(errors.New("ChatGPT returned a non-streaming response; no tools were executed"))
 	}
-	resp.Body = newChatGPTStreamBody(resp.Body, call, owner)
+	resp.Body = newChatGPTStreamBody(resp.Body, call)
 	return resp, nil
 }
 
