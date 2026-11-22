@@ -47,6 +47,14 @@ func New(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewWithStore(ctx, store)
+}
+
+// NewWithStore loads the supplied registration store and pins its active registration.
+func NewWithStore(ctx context.Context, store storage.Store) (*Client, error) {
+	if store == nil {
+		return nil, errors.New("a ChatGPT credential store is required")
+	}
 	c := &Client{
 		store:    store,
 		provider: oauth.NewClient(),

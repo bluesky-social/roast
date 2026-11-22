@@ -190,7 +190,11 @@ func Execute() (int, error) {
 
 // ExecuteContext runs the CLI with explicit streams for tests and embedding.
 func ExecuteContext(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
-	root := newRootCommand(stdout, stderr)
+	return executeContext(ctx, args, stdout, stderr, chatgpt.New)
+}
+
+func executeContext(ctx context.Context, args []string, stdout, stderr io.Writer, openAccount chatGPTAccountOpener) (int, error) {
+	root := newRootCommand(stdout, stderr, openAccount)
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
@@ -223,7 +227,7 @@ func exitCode(err error) int {
 	return ExitPartial
 }
 
-func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
+func newRootCommand(stdout, stderr io.Writer, openAccount chatGPTAccountOpener) *cobra.Command {
 	var rootFlags reviewFlags
 	root := &cobra.Command{
 		Use:           "roast",
@@ -241,7 +245,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 				}
 				return nil
 			}
-			return runReview(cmd, &rootFlags, stdout, stderr)
+			return runReview(cmd, &rootFlags, stdout, stderr, openAccount)
 		},
 	}
 	root.PersistentFlags().String("error-format", "text", "error output: text|json")
@@ -267,7 +271,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 		SilenceErrors: true,
 		Args:          noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReview(cmd, &subFlags, stdout, stderr)
+			return runReview(cmd, &subFlags, stdout, stderr, openAccount)
 		},
 	}
 	reviewCmd.SetFlagErrorFunc(flagUsageError)
@@ -277,8 +281,8 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(newGateCommand(stdout))
 	root.AddCommand(newConfigCommand(stdout, stderr))
 	root.AddCommand(newSkillCommand(stdout))
-	root.AddCommand(newDoctorCommand(stdout))
-	root.AddCommand(newChatGPTCommand(stdout))
+	root.AddCommand(newDoctorCommand(stdout, openAccount))
+	root.AddCommand(newChatGPTCommand(stdout, openAccount))
 	return root
 }
 
@@ -406,15 +410,15 @@ func addRoleFlags(fl interface {
 	fl.IntVar(&role.maxOutputTokens, name+"-max-output-tokens", 0, name+" output-token ceiling")
 }
 
-func runReview(cmd *cobra.Command, f *reviewFlags, stdout, stderr io.Writer) error {
+func runReview(cmd *cobra.Command, f *reviewFlags, stdout, stderr io.Writer, openAccount chatGPTAccountOpener) error {
 	resolved := func() bool { return rolesResolve(cmd.Flags().Changed, f.finder, f.verifier) }
 	if err := maybeProvision(cmd, f.configPath, stderr, resolved); err != nil {
 		return err
 	}
-	return runReviewCommand(cmd.Context(), cmd.Flags().Changed, f, stdout, stderr)
+	return runReviewCommand(cmd.Context(), cmd.Flags().Changed, f, stdout, stderr, openAccount)
 }
 
-func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewFlags, stdout, stderr io.Writer) error {
+func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewFlags, stdout, stderr io.Writer, openAccount chatGPTAccountOpener) error {
 	if f.staged && f.uncommittedOnly {
 		return &usageError{msg: "--staged and --uncommitted-only cannot be combined"}
 	}
@@ -510,7 +514,7 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	if finderRole.Protocol == "chatgpt" || (doVerify && verifierRole.Protocol == "chatgpt") {
 		// Capture selection once before any review work. A verifier created
 		// after the finder must use this operation's account, not a later one.
-		ctx = llm.WithPinnedChatGPTAccount(ctx)
+		ctx = llm.WithPinnedChatGPTAccount(ctx, openAccount)
 	}
 
 	repo, err := scope.GitRoot(".")

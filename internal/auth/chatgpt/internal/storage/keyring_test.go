@@ -101,15 +101,25 @@ func TestKeyringReadsDistinguishMissingAndUnavailable(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsNonAbsoluteConfigDirectory(t *testing.T) {
+	root := t.TempDir()
+	for _, configDir := range []string{"", "relative"} {
+		if _, err := OpenWithKeyring(nil, configDir, root); err == nil || !strings.Contains(err.Error(), "absolute configuration directory") {
+			t.Errorf("OpenWithKeyring with config directory %q = %v", configDir, err)
+		}
+	}
+}
+
+func TestOpenRequiresKeyringBackend(t *testing.T) {
+	root := t.TempDir()
+	if _, err := OpenWithKeyring(nil, root, root); err == nil {
+		t.Fatal("opened a store without a keyring backend")
+	}
+}
+
 func TestOpenReportsPreviousCredentialFile(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	config, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile := filepath.Join(config, "roast", "chatgpt-plan")
+	profile := filepath.Join(dir, "roast", "chatgpt-plan")
 	if err := os.MkdirAll(profile, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +128,7 @@ func TestOpenReportsPreviousCredentialFile(t *testing.T) {
 		if err := os.WriteFile(path, []byte("synthetic previous credentials"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := OpenWithKeyring(nil, dir); err == nil || !strings.Contains(err.Error(), "previous Roast version") {
+		if _, err := OpenWithKeyring(nil, dir, dir); err == nil || !strings.Contains(err.Error(), "previous Roast version") {
 			t.Fatalf("opening with previous credential file %q = %v", name, err)
 		}
 		if got, err := os.ReadFile(path); err != nil || string(got) != "synthetic previous credentials" {
@@ -167,18 +177,14 @@ func TestProfileAliasUsesSameKeyringScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	ring := &memoryKeyring{items: make(map[string]string)}
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_CONFIG_HOME", root)
-	store, err := OpenWithKeyring(ring, root)
+	store, err := OpenWithKeyring(ring, root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := save(store, t.Context(), "current"); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", link)
-	t.Setenv("XDG_CONFIG_HOME", link)
-	alias, err := OpenWithKeyring(ring, link)
+	alias, err := OpenWithKeyring(ring, link, link)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,9 +194,7 @@ func TestProfileAliasUsesSameKeyringScope(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "missing"), dangling); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", dangling)
-	t.Setenv("XDG_CONFIG_HOME", dangling)
-	if _, err := OpenWithKeyring(ring, root); err == nil {
+	if _, err := OpenWithKeyring(ring, dangling, root); err == nil {
 		t.Fatal("accepted a profile alias whose target is missing")
 	}
 }

@@ -39,7 +39,7 @@ type doctorResult struct {
 	Detail string       `json:"detail"`
 }
 
-func newDoctorCommand(stdout io.Writer) *cobra.Command {
+func newDoctorCommand(stdout io.Writer, openAccount chatGPTAccountOpener) *cobra.Command {
 	var configPath string
 	var asJSON bool
 	cmd := &cobra.Command{
@@ -49,7 +49,7 @@ func newDoctorCommand(stdout io.Writer) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			results := doctorChecks(cmd.Context(), configPath)
+			results := doctorChecks(cmd.Context(), configPath, openAccount)
 			if asJSON {
 				encoder := json.NewEncoder(stdout)
 				encoder.SetIndent("", "  ")
@@ -76,7 +76,7 @@ func newDoctorCommand(stdout io.Writer) *cobra.Command {
 	return cmd
 }
 
-func doctorChecks(ctx context.Context, configPath string) []doctorResult {
+func doctorChecks(ctx context.Context, configPath string, openAccount chatGPTAccountOpener) []doctorResult {
 	results := []doctorResult{doctorBuildCheck()}
 	path := configPath
 	if path == "" {
@@ -123,7 +123,7 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 		}
 	}
 	if usesChatGPT {
-		ctx = llm.WithPinnedChatGPTAccount(ctx)
+		ctx = llm.WithPinnedChatGPTAccount(ctx, openAccount)
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	for _, check := range roles {

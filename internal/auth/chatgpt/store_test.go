@@ -10,13 +10,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zalando/go-keyring"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/chatgpttest"
 )
 
 func TestNewReportsUnavailableKeyring(t *testing.T) {
-	mockKeyring(t)
-	keyring.MockInitWithError(errors.New("test backend failure"))
-	if _, err := New(t.Context()); err == nil || !strings.Contains(err.Error(), "system keyring") {
+	t.Parallel()
+	store, ring := chatgpttest.NewStore(t, t.TempDir())
+	ring.SetError(errors.New("test backend failure"))
+	if _, err := NewWithStore(t.Context(), store); err == nil || !strings.Contains(err.Error(), "system keyring") || strings.Contains(err.Error(), "test backend failure") {
 		t.Fatalf("New on an unavailable keyring = %v", err)
 	}
 }

@@ -24,8 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zalando/go-keyring"
-
 	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/chatgpttest"
 	"github.com/bluesky-social/roast/internal/review"
@@ -36,7 +34,7 @@ func TestChatGPTCommands(t *testing.T) {
 	for _, name := range []string{"signin", "login", "status", "select", "signout", "models"} {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer
-			cmd := newChatGPTCommand(&out)
+			cmd := newChatGPTCommand(&out, rejectAccountOpen(t))
 			found, _, err := cmd.Find([]string{name})
 			if err != nil || found == cmd {
 				t.Fatalf("Find(%q) = %v, %v", name, found, err)
@@ -53,6 +51,8 @@ func TestChatGPTCommands(t *testing.T) {
 }
 
 func TestChatGPTCommandRejectsInvalidArguments(t *testing.T) {
+	isolateUserConfig(t)
+	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	for _, tc := range []struct {
 		command string
 		args    []string
@@ -75,7 +75,7 @@ func TestChatGPTCommandRejectsInvalidArguments(t *testing.T) {
 	} {
 		t.Run(tc.command+"/"+strings.Join(tc.args, ","), func(t *testing.T) {
 			args := append([]string{"chatgpt", tc.command}, tc.args...)
-			code, err := ExecuteContext(t.Context(), args, io.Discard, io.Discard)
+			code, err := executeContext(t.Context(), args, io.Discard, io.Discard, rejectAccountOpen(t))
 			if code != ExitUsage || err == nil {
 				t.Fatalf("invalid arguments gave exit code %d and error %v, want usage error", code, err)
 			}
@@ -83,10 +83,19 @@ func TestChatGPTCommandRejectsInvalidArguments(t *testing.T) {
 	}
 }
 
+func rejectAccountOpen(t *testing.T) chatGPTAccountOpener {
+	return func(context.Context) (*chatgpt.Client, error) {
+		t.Helper()
+		err := errors.New("unexpected ChatGPT account open")
+		t.Error(err)
+		return nil, err
+	}
+}
+
 func TestChatGPTEmptyStatus(t *testing.T) {
-	chatgpttest.UseKeyring(t)
+	openAccount, _ := testAccountOpener(t)
 	var out bytes.Buffer
-	cmd := newChatGPTCommand(&out)
+	cmd := newChatGPTCommand(&out, openAccount)
 	cmd.SetArgs([]string{"status"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -97,9 +106,9 @@ func TestChatGPTEmptyStatus(t *testing.T) {
 }
 
 func TestChatGPTModelsRequiresSignIn(t *testing.T) {
-	chatgpttest.UseKeyring(t)
+	openAccount, _ := testAccountOpener(t)
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
-	code, err := ExecuteContext(t.Context(), []string{"chatgpt", "models", "--error-format", "json"}, io.Discard, io.Discard)
+	code, err := executeContext(t.Context(), []string{"chatgpt", "models", "--error-format", "json"}, io.Discard, io.Discard, openAccount)
 	if code != ExitAuth || !errors.Is(err, chatgpt.ErrAuth) {
 		t.Fatalf("models without sign-in returned exit code %d, error %v", code, err)
 	}
@@ -114,21 +123,22 @@ func TestChatGPTModelsRequiresSignIn(t *testing.T) {
 }
 
 func TestChatGPTCommandsReportUnavailableKeyring(t *testing.T) {
-	configPath := filepath.Join(chatgpttest.UseKeyring(t), "plan.yaml")
+	openAccount, ring := testAccountOpener(t)
+	configPath := filepath.Join(t.TempDir(), "plan.yaml")
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	writeAccountConfig(t, configPath, "chatgpt", "chatgpt")
-	keyring.MockInitWithError(errors.New("private keyring diagnostic"))
+	ring.SetError(errors.New("private keyring diagnostic"))
 	mockAccountTransport(t, func(*http.Request) (*http.Response, error) {
 		t.Error("an unavailable keyring must stop plan requests")
 		return nil, errors.New("unexpected request")
 	})
 
 	var output bytes.Buffer
-	_, err := ExecuteContext(t.Context(), []string{"chatgpt", "signin"}, &output, io.Discard)
+	_, err := executeContext(t.Context(), []string{"chatgpt", "signin"}, &output, io.Discard, openAccount)
 	if err == nil || !strings.Contains(err.Error(), "system keyring") || output.Len() != 0 {
 		t.Fatalf("sign-in with unavailable keyring: %v, output: %q", err, output.String())
 	}
-	for _, result := range doctorChecks(t.Context(), configPath) {
+	for _, result := range doctorChecks(t.Context(), configPath, openAccount) {
 		if result.Name == "finder-roundtrip" && result.Status == doctorFail &&
 			strings.Contains(result.Detail, "system keyring") && !strings.Contains(result.Detail, "private keyring diagnostic") {
 			return
@@ -151,18 +161,26 @@ func mockAccountTransport(t *testing.T, transport accountRoundTripper) {
 	t.Cleanup(func() { http.DefaultTransport = previous })
 }
 
-func accountFixture(t *testing.T) (configPath string, selectAccount func(string) error) {
+func testAccountOpener(t *testing.T, accounts ...string) (chatGPTAccountOpener, *chatgpttest.Keyring) {
+	t.Helper()
+	isolateUserConfig(t)
+	store, ring := chatgpttest.NewStore(t, t.TempDir())
+	if len(accounts) > 0 {
+		chatgpttest.SeedAccounts(t, store, accounts[0], accounts[1:]...)
+	}
+	return func(ctx context.Context) (*chatgpt.Client, error) {
+		return chatgpt.NewWithStore(ctx, store)
+	}, ring
+}
+
+func accountFixture(t *testing.T) (configPath string, openAccount chatGPTAccountOpener, ring *chatgpttest.Keyring) {
 	t.Helper()
 	configPath = filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
-	chatgpttest.SeedAccounts(t, "account-a", "account-b")
-	selector, err := chatgpt.New(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return configPath, func(account string) error { return selector.Select(t.Context(), account) }
+	openAccount, ring = testAccountOpener(t, "account-a", "account-b")
+	return configPath, openAccount, ring
 }
 
 func writeAccountConfig(t *testing.T, path, finder, verifier string) {
@@ -209,8 +227,8 @@ func accountToolResponse(model, tool, args string, direct bool) (*http.Response,
 const unconditionalPanicFinding = `{"assessment":"FINDINGS_PRESENT","findings":[{"reasoning":"panic is reachable","severity":"HIGH","confidence":0.95,"cwe":"CWE-248","description":"The function always panics.","file":"bad.go","lines":[3],"code_quote":"panic(\"oops\")","fixed_code":"return","frontend_category":""}]}`
 
 func TestReviewProtocolFlagCanUseRoleAPISettings(t *testing.T) {
-	configPath, _ := accountFixture(t)
-	keyring.MockInitWithError(errors.New("keyring unavailable in test"))
+	configPath, openAccount, ring := accountFixture(t)
+	ring.SetError(errors.New("keyring unavailable in test"))
 	writeAccountConfig(t, configPath, "chatgpt", "responses")
 	t.Chdir(initChangedRepo(t))
 	t.Setenv("ROAST_FINDER_BASE_URL", "https://provider.invalid/v1")
@@ -223,7 +241,7 @@ func TestReviewProtocolFlagCanUseRoleAPISettings(t *testing.T) {
 		calls++
 		return accountToolResponse("finder-model", "findings", `{"assessment":"NO_FINDINGS","findings":[]}`, false)
 	})
-	code, err := ExecuteContext(t.Context(), []string{"review", "--config", configPath, "--finder-protocol", "responses", "--quick", "--uncommitted-only", "--max-attempts=1"}, io.Discard, io.Discard)
+	code, err := executeContext(t.Context(), []string{"review", "--config", configPath, "--finder-protocol", "responses", "--quick", "--uncommitted-only", "--max-attempts=1"}, io.Discard, io.Discard, openAccount)
 	if err != nil || code != ExitClean || calls != 1 {
 		t.Fatalf("protocol override: code=%d, calls=%d, err=%v", code, calls, err)
 	}
@@ -232,7 +250,11 @@ func TestReviewProtocolFlagCanUseRoleAPISettings(t *testing.T) {
 func TestReviewPinsChatGPTAccountAcrossRoles(t *testing.T) {
 	for _, protocols := range [][2]string{{"chatgpt", "chatgpt"}, {"responses", "chatgpt"}, {"chatgpt", "responses"}} {
 		t.Run(strings.Join(protocols[:], "-"), func(t *testing.T) {
-			configPath, selectAccount := accountFixture(t)
+			configPath, openAccount, _ := accountFixture(t)
+			selector, err := openAccount(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
 			writeAccountConfig(t, configPath, protocols[0], protocols[1])
 			t.Chdir(initChangedRepo(t))
 			var mu sync.Mutex
@@ -252,7 +274,7 @@ func TestReviewPinsChatGPTAccountAcrossRoles(t *testing.T) {
 				args := `{"reasoning":"the panic is unconditional","status":"confirmed","confidence":0.99,"grounding":"bad.go line 3 calls panic unconditionally","recalibrated_severity":""}`
 				if request.Model == "finder-model" {
 					// This models another process selecting B while finder A runs.
-					if err := selectAccount("account-b"); err != nil {
+					if err := selector.Select(t.Context(), "account-b"); err != nil {
 						return nil, err
 					}
 					tool = "findings"
@@ -261,9 +283,9 @@ func TestReviewPinsChatGPTAccountAcrossRoles(t *testing.T) {
 				return accountToolResponse(request.Model, tool, args, r.URL.Host == "api.openai.com")
 			})
 			for _, account := range []string{"account-a", "account-b"} {
-				code, err := ExecuteContext(t.Context(), []string{
+				code, err := executeContext(t.Context(), []string{
 					"review", "--config", configPath, "--format", "json", "--uncommitted-only", "--max-attempts=1",
-				}, io.Discard, io.Discard)
+				}, io.Discard, io.Discard, openAccount)
 				if err != nil || code != ExitClean {
 					t.Fatalf("operation starting with %s: code=%d err=%v", account, code, err)
 				}
@@ -290,7 +312,11 @@ func TestReviewPinsChatGPTAccountAcrossRoles(t *testing.T) {
 func TestDoctorPinsChatGPTAccountAcrossChecks(t *testing.T) {
 	for _, finderProtocol := range []string{"chatgpt", "responses"} {
 		t.Run(finderProtocol+"-finder", func(t *testing.T) {
-			configPath, selectAccount := accountFixture(t)
+			configPath, openAccount, _ := accountFixture(t)
+			selector, err := openAccount(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
 			writeAccountConfig(t, configPath, finderProtocol, "chatgpt")
 			var accounts []string
 			var methods []string
@@ -301,7 +327,7 @@ func TestDoctorPinsChatGPTAccountAcrossChecks(t *testing.T) {
 					methods = append(methods, r.Method)
 				}
 				// Both turns and the next role use the account selected at startup.
-				if err := selectAccount("account-b"); err != nil {
+				if err := selector.Select(t.Context(), "account-b"); err != nil {
 					return nil, err
 				}
 				switch {
@@ -327,7 +353,7 @@ func TestDoctorPinsChatGPTAccountAcrossChecks(t *testing.T) {
 			})
 			for _, account := range []string{"account-a", "account-b"} {
 				accounts, methods = nil, nil
-				results := doctorChecks(t.Context(), configPath)
+				results := doctorChecks(t.Context(), configPath, openAccount)
 				for _, result := range results {
 					if result.Status == doctorFail {
 						t.Errorf("operation starting with %s: %#v", account, result)
@@ -351,7 +377,7 @@ func TestDoctorPinsChatGPTAccountAcrossChecks(t *testing.T) {
 }
 
 func TestDoctorEscapesChatGPTProviderErrors(t *testing.T) {
-	configPath, _ := accountFixture(t)
+	configPath, openAccount, _ := accountFixture(t)
 	writeAccountConfig(t, configPath, "chatgpt", "chatgpt")
 	t.Setenv("ROAST_FINDER_MODEL", "finder-model\n\x1b")
 	mockAccountTransport(t, func(r *http.Request) (*http.Response, error) {
@@ -366,7 +392,7 @@ func TestDoctorEscapesChatGPTProviderErrors(t *testing.T) {
 		}
 	})
 	var out bytes.Buffer
-	cmd := newDoctorCommand(&out)
+	cmd := newDoctorCommand(&out, openAccount)
 	cmd.SetArgs([]string{"--config", configPath})
 	if err := cmd.ExecuteContext(t.Context()); err == nil {
 		t.Fatal("doctor succeeded despite provider failure")
@@ -378,7 +404,7 @@ func TestDoctorEscapesChatGPTProviderErrors(t *testing.T) {
 	reader, writer := io.Pipe()
 	reader.Close()
 	defer writer.Close()
-	cmd = newDoctorCommand(writer)
+	cmd = newDoctorCommand(writer, openAccount)
 	cmd.SetArgs([]string{"--config", configPath})
 	if err := cmd.ExecuteContext(t.Context()); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("doctor with closed output: %v", err)
@@ -386,7 +412,8 @@ func TestDoctorEscapesChatGPTProviderErrors(t *testing.T) {
 }
 
 func TestDoctorSkipsLoginForInvalidChatGPTProfiles(t *testing.T) {
-	configPath, _ := accountFixture(t)
+	configPath := isolateUserConfig(t)
+	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	writeAccountConfig(t, configPath, "chatgpt", "chatgpt")
 	t.Setenv("ROAST_FINDER_MODEL", " ")
 	t.Setenv("ROAST_VERIFIER_MODEL", " ")
@@ -394,20 +421,28 @@ func TestDoctorSkipsLoginForInvalidChatGPTProfiles(t *testing.T) {
 		t.Errorf("invalid profiles made a request to %s", r.URL)
 		return nil, errors.New("unexpected request")
 	})
-	for _, result := range doctorChecks(t.Context(), configPath) {
+	results := doctorChecks(t.Context(), configPath, rejectAccountOpen(t))
+	checks := make(map[string]doctorResult, len(results))
+	for _, result := range results {
+		checks[result.Name] = result
 		if strings.HasSuffix(result.Name, "-credential") {
 			t.Errorf("invalid profile checked credentials: %#v", result)
 		}
-		if strings.HasSuffix(result.Name, "-profile") && result.Status != doctorFail {
-			t.Errorf("invalid profile passed: %#v", result)
+	}
+	if checks["config"].Status != doctorPass {
+		t.Fatalf("doctor did not load the test configuration: %#v", results)
+	}
+	for _, name := range []string{"finder-profile", "verifier-profile"} {
+		if result := checks[name]; result.Status != doctorFail || !strings.Contains(result.Detail, "model is not configured") {
+			t.Errorf("%s = %#v, want a missing-model failure", name, result)
 		}
 	}
 }
 
 func TestReviewWithUnreadableChatGPTVerifierAccount(t *testing.T) {
-	configPath, _ := accountFixture(t)
+	configPath, openAccount, ring := accountFixture(t)
 	writeAccountConfig(t, configPath, "responses", "chatgpt")
-	keyring.MockInitWithError(errors.New("keyring unavailable in test"))
+	ring.SetError(errors.New("keyring unavailable in test"))
 	t.Chdir(initChangedRepo(t))
 	for _, tc := range []struct {
 		name, response string
@@ -426,9 +461,9 @@ func TestReviewWithUnreadableChatGPTVerifierAccount(t *testing.T) {
 				return accountToolResponse("finder-model", "findings", tc.response, false)
 			})
 			var output bytes.Buffer
-			code, err := ExecuteContext(t.Context(), []string{
+			code, err := executeContext(t.Context(), []string{
 				"review", "--config", configPath, "--format", "json", "--uncommitted-only", "--max-attempts=1", "--max-severity=HIGH",
-			}, &output, io.Discard)
+			}, &output, io.Discard, openAccount)
 			if err != nil || code != tc.exit || requests != 1 {
 				t.Fatalf("code=%d err=%v requests=%d", code, err, requests)
 			}
@@ -448,11 +483,11 @@ func TestReviewWithUnreadableChatGPTVerifierAccount(t *testing.T) {
 }
 
 func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
-	root := chatgpttest.UseKeyring(t)
+	openAccount, _ := testAccountOpener(t)
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
-	configPath := filepath.Join(root, "plan.yaml")
+	configPath := filepath.Join(t.TempDir(), "plan.yaml")
 	writeAccountConfig(t, configPath, "chatgpt", "chatgpt")
 	t.Chdir(initChangedRepo(t))
 
@@ -515,7 +550,7 @@ func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
 	signedIn := make(chan struct{})
 	var signInErr error
 	go func() {
-		_, err := ExecuteContext(ctx, []string{"chatgpt", "signin"}, writer, io.Discard)
+		_, err := executeContext(ctx, []string{"chatgpt", "signin"}, writer, io.Discard, openAccount)
 		_ = writer.CloseWithError(err)
 		signInErr = err
 		close(signedIn)
@@ -560,19 +595,19 @@ func TestChatGPTBrowserSignInFeedsModelsAndReview(t *testing.T) {
 		t.Fatal(signInErr)
 	}
 	var out bytes.Buffer
-	if _, err := ExecuteContext(ctx, []string{"chatgpt", "models"}, &out, io.Discard); err != nil || out.String() != "finder-model\tFinder\\nlabel\\tvalue\n" {
+	if _, err := executeContext(ctx, []string{"chatgpt", "models"}, &out, io.Discard, openAccount); err != nil || out.String() != "finder-model\tFinder\\nlabel\\tvalue\n" {
 		t.Fatalf("model listing: %q, %v", out.String(), err)
 	}
 	closedReader, closedWriter := io.Pipe()
 	closedReader.Close()
 	defer closedWriter.Close()
 	for _, command := range []string{"models", "status"} {
-		if _, err := ExecuteContext(ctx, []string{"chatgpt", command}, closedWriter, io.Discard); !errors.Is(err, io.ErrClosedPipe) {
+		if _, err := executeContext(ctx, []string{"chatgpt", command}, closedWriter, io.Discard, openAccount); !errors.Is(err, io.ErrClosedPipe) {
 			t.Fatalf("%s with closed output: %v", command, err)
 		}
 	}
 	out.Reset()
-	code, err := ExecuteContext(ctx, []string{"review", "--config", configPath, "--uncommitted-only", "--max-attempts=1", "--format", "json"}, &out, io.Discard)
+	code, err := executeContext(ctx, []string{"review", "--config", configPath, "--uncommitted-only", "--max-attempts=1", "--format", "json"}, &out, io.Discard, openAccount)
 	if code != ExitClean || err != nil || reviewRequests.Load() != 1 {
 		t.Fatalf("plan review: code=%d, requests=%d, error=%v", code, reviewRequests.Load(), err)
 	}

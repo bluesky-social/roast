@@ -53,8 +53,8 @@ type chatGPTAccountSnapshot struct {
 // This reads local account state without refreshing tokens or making network
 // requests. Initialization errors are deferred until a ChatGPT role is
 // used, so an unused verifier cannot fail an otherwise successful review.
-func WithPinnedChatGPTAccount(ctx context.Context) context.Context {
-	client, err := chatgpt.New(ctx)
+func WithPinnedChatGPTAccount(ctx context.Context, openAccount func(context.Context) (*chatgpt.Client, error)) context.Context {
+	client, err := openAccount(ctx)
 	return context.WithValue(ctx, chatGPTAccountKey{}, chatGPTAccountSnapshot{client, err})
 }
 

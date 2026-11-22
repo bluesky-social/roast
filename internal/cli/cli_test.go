@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 	"github.com/bluesky-social/roast/internal/config"
 	"github.com/bluesky-social/roast/internal/llm"
 	"github.com/bluesky-social/roast/internal/record"
@@ -158,7 +159,7 @@ func TestHelpNeedsNoConfiguration(t *testing.T) {
 }
 
 func TestPublicCommandSurface(t *testing.T) {
-	root := newRootCommand(io.Discard, io.Discard)
+	root := newRootCommand(io.Discard, io.Discard, chatgpt.New)
 	commands := make(map[string]bool)
 	for _, command := range root.Commands() {
 		commands[command.Name()] = true

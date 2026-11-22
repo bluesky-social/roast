@@ -12,7 +12,9 @@ import (
 	"github.com/bluesky-social/roast/internal/textsafe"
 )
 
-func newChatGPTCommand(stdout io.Writer) *cobra.Command {
+type chatGPTAccountOpener func(context.Context) (*chatgpt.Client, error)
+
+func newChatGPTCommand(stdout io.Writer, openAccount chatGPTAccountOpener) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "chatgpt",
 		Short: "Manage Roast's independent ChatGPT plan connection",
@@ -20,11 +22,11 @@ func newChatGPTCommand(stdout io.Writer) *cobra.Command {
 		RunE:  showHelp,
 	}
 	root.AddCommand(
-		newChatGPTSignInCommand(stdout),
-		newChatGPTStatusCommand(stdout),
-		newChatGPTSelectCommand(),
-		newChatGPTSignOutCommand(stdout),
-		newChatGPTModelsCommand(stdout),
+		newChatGPTSignInCommand(stdout, openAccount),
+		newChatGPTStatusCommand(stdout, openAccount),
+		newChatGPTSelectCommand(openAccount),
+		newChatGPTSignOutCommand(stdout, openAccount),
+		newChatGPTModelsCommand(stdout, openAccount),
 	)
 	root.SetFlagErrorFunc(flagUsageError)
 	for _, command := range root.Commands() {
@@ -33,7 +35,7 @@ func newChatGPTCommand(stdout io.Writer) *cobra.Command {
 	return root
 }
 
-func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
+func newChatGPTSignInCommand(stdout io.Writer, openAccount chatGPTAccountOpener) *cobra.Command {
 	var account string
 	var enablePlan bool
 	signin := &cobra.Command{
@@ -50,7 +52,7 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := chatgpt.New(cmd.Context())
+			client, err := openAccount(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -77,11 +79,11 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 }
 
 // Open the account selected when the command starts and bound the operation.
-func runAccountCommand(timeout time.Duration, run func(context.Context, *chatgpt.Client, []string) error) func(*cobra.Command, []string) error {
+func runAccountCommand(openAccount chatGPTAccountOpener, timeout time.Duration, run func(context.Context, *chatgpt.Client, []string) error) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 		defer cancel()
-		client, err := chatgpt.New(ctx)
+		client, err := openAccount(ctx)
 		if err != nil {
 			return err
 		}
@@ -89,12 +91,12 @@ func runAccountCommand(timeout time.Duration, run func(context.Context, *chatgpt
 	}
 }
 
-func newChatGPTStatusCommand(stdout io.Writer) *cobra.Command {
+func newChatGPTStatusCommand(stdout io.Writer, openAccount chatGPTAccountOpener) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "List saved accounts and the active registration",
 		Args:  cobra.NoArgs,
-		RunE: runAccountCommand(10*time.Second, func(ctx context.Context, client *chatgpt.Client, _ []string) error {
+		RunE: runAccountCommand(openAccount, 10*time.Second, func(ctx context.Context, client *chatgpt.Client, _ []string) error {
 			accounts, err := client.Status(ctx)
 			if err != nil {
 				return err
@@ -115,7 +117,7 @@ func newChatGPTStatusCommand(stdout io.Writer) *cobra.Command {
 	}
 }
 
-func newChatGPTSelectCommand() *cobra.Command {
+func newChatGPTSelectCommand(openAccount chatGPTAccountOpener) *cobra.Command {
 	return &cobra.Command{
 		Use:   "select CLIENT_ID",
 		Short: "Select a saved ChatGPT registration",
@@ -128,13 +130,13 @@ func newChatGPTSelectCommand() *cobra.Command {
 			}
 			return nil
 		},
-		RunE: runAccountCommand(10*time.Second, func(ctx context.Context, client *chatgpt.Client, args []string) error {
+		RunE: runAccountCommand(openAccount, 10*time.Second, func(ctx context.Context, client *chatgpt.Client, args []string) error {
 			return client.Select(ctx, args[0])
 		}),
 	}
 }
 
-func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
+func newChatGPTSignOutCommand(stdout io.Writer, openAccount chatGPTAccountOpener) *cobra.Command {
 	return &cobra.Command{
 		Use:   "signout [CLIENT_ID]",
 		Short: "Clear this registration's local tokens and ask ChatGPT to revoke them",
@@ -147,7 +149,7 @@ func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 			}
 			return nil
 		},
-		RunE: runAccountCommand(time.Minute, func(ctx context.Context, client *chatgpt.Client, args []string) error {
+		RunE: runAccountCommand(openAccount, time.Minute, func(ctx context.Context, client *chatgpt.Client, args []string) error {
 			id := ""
 			if len(args) > 0 {
 				id = args[0]
@@ -163,12 +165,12 @@ func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 	}
 }
 
-func newChatGPTModelsCommand(stdout io.Writer) *cobra.Command {
+func newChatGPTModelsCommand(stdout io.Writer, openAccount chatGPTAccountOpener) *cobra.Command {
 	return &cobra.Command{
 		Use:   "models",
 		Short: "List models available to the selected ChatGPT account",
 		Args:  cobra.NoArgs,
-		RunE: runAccountCommand(time.Minute, func(ctx context.Context, client *chatgpt.Client, _ []string) error {
+		RunE: runAccountCommand(openAccount, time.Minute, func(ctx context.Context, client *chatgpt.Client, _ []string) error {
 			models, err := client.Models(ctx)
 			if err != nil {
 				return err

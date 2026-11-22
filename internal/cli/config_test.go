@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 	"github.com/bluesky-social/roast/internal/config"
 	"github.com/bluesky-social/roast/internal/llm"
 	"github.com/bluesky-social/roast/internal/testutil"
@@ -326,7 +327,7 @@ func TestReviewWithDevNullStdinKeepsStdoutClean(t *testing.T) {
 	defer devNull.Close()
 
 	var stdout, stderr bytes.Buffer
-	root := newRootCommand(&stdout, &stderr)
+	root := newRootCommand(&stdout, &stderr, chatgpt.New)
 	root.SetIn(devNull)
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
