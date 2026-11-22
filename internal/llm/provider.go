@@ -91,7 +91,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 			openaicompat.WithSDKOptions(deleteHeaders(envHeaders)...),
 		)
 	case "responses":
-		provider, err = responsesProvider(cfg.APIKey, cfg.BaseURL, httpClient, deleteHeaders(envHeaders))
+		provider, err = responsesProvider(cfg.APIKey, cfg.BaseURL, httpClient, deleteHeaders(envHeaders)...)
 	case "anthropic":
 		// The Anthropic SDK appends /v1/messages itself; Roast profiles use the
 		// same base-URL convention as the OpenAI protocols and include /v1.
@@ -115,7 +115,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	return &client{cfg: cfg, model: mdl, transport: httpClient.Transport.(*captureTransport)}, nil
 }
 
-func responsesProvider(apiKey, baseURL string, httpClient *http.Client, options []option.RequestOption) (fantasy.Provider, error) {
+func responsesProvider(apiKey, baseURL string, httpClient *http.Client, options ...option.RequestOption) (fantasy.Provider, error) {
 	return fantasyopenai.New(
 		fantasyopenai.WithAPIKey(apiKey),
 		fantasyopenai.WithBaseURL(baseURL),
@@ -142,11 +142,8 @@ func (c *client) addUsage(providerUsage fantasy.Usage) Usage {
 	cacheRead := max(int(providerUsage.CacheReadTokens), 0)
 	cacheWrite := max(int(providerUsage.CacheCreationTokens), 0)
 	uncached := input
-	// OpenAI-shaped protocols report cached input as a subset of input_tokens;
-	// Anthropic reports input, cache-read, and cache-creation as disjoint counts.
-	// chatgpt deliberately stays out of this branch: the pinned Fantasy
-	// Responses adapter already subtracts cached input in responsesUsage.
-	// Its end-to-end wire test guards against subtracting that cache twice.
+	// Anthropic and the ChatGPT adapter supply disjoint input and cache
+	// counts. The other routes treat cached tokens as a subset of input.
 	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" {
 		cacheRead = min(cacheRead, input)
 		cacheWrite = min(cacheWrite, input-cacheRead)

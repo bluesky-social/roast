@@ -12,14 +12,12 @@ import (
 	"charm.land/fantasy"
 )
 
-// Validate complete SSE frames before passing their unchanged bytes to the
-// SDK. In particular, response.incomplete must never masquerade as a successful
-// tool submission even if an SDK maps its missing finish reason to "stop".
+// Validate complete SSE frames before passing their original bytes to the SDK
+// and response capture.
 type chatGPTStreamBody struct {
 	body      io.ReadCloser
 	reader    *bufio.Reader
 	pending   []byte
-	completed bool
 	bytesRead int
 	err       error
 	call      *chatGPTCall
@@ -41,12 +39,12 @@ func (b *chatGPTStreamBody) Read(p []byte) (int, error) {
 			b.call.recordFailure(b.err)
 		}
 	}
-	if len(b.pending) > 0 {
-		n := copy(p, b.pending)
-		b.pending = b.pending[n:]
-		return n, nil
+	if b.err != nil {
+		return 0, b.err
 	}
-	return 0, b.err
+	n := copy(p, b.pending)
+	b.pending = b.pending[n:]
+	return n, nil
 }
 
 // readEvent keeps the original SSE bytes for capture. Only data fields are
@@ -64,7 +62,7 @@ func (b *chatGPTStreamBody) readEvent() ([]byte, error) {
 		if err != nil {
 			// An event without a terminating blank line is incomplete.
 			if errors.Is(err, io.EOF) {
-				if !b.completed {
+				if b.call.output == nil {
 					return nil, errors.New("ChatGPT stream ended without response.completed; no tools were executed")
 				}
 				if line != "" || frame.Len() != 0 {
@@ -75,20 +73,21 @@ func (b *chatGPTStreamBody) readEvent() ([]byte, error) {
 		}
 		frame.WriteString(line)
 		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-		if value, ok := strings.CutPrefix(line, "data:"); ok {
+		if line == "" {
+			if len(data) > 0 {
+				if err := b.validate(eventName, []byte(strings.Join(data, "\n"))); err != nil {
+					return nil, err
+				}
+			}
+			return frame.Bytes(), nil
+		}
+		field, value, _ := strings.Cut(line, ":")
+		switch field {
+		case "data":
 			data = append(data, strings.TrimPrefix(value, " "))
-		} else if value, ok := strings.CutPrefix(line, "event:"); ok {
+		case "event":
 			eventName = strings.TrimPrefix(value, " ")
 		}
-		if line != "" {
-			continue
-		}
-		if len(data) > 0 {
-			if invalid := b.validate(eventName, []byte(strings.Join(data, "\n"))); invalid != nil {
-				return nil, invalid
-			}
-		}
-		return frame.Bytes(), nil
 	}
 }
 
@@ -100,22 +99,23 @@ func (b *chatGPTStreamBody) validate(name string, data []byte) error {
 		if named && name != "done" {
 			return errors.New("ChatGPT stream event name does not match its end marker")
 		}
-		if !b.completed {
+		if b.call.output == nil {
 			return errors.New("ChatGPT stream ended before response.completed")
 		}
 		return nil
 	}
-	if b.completed {
+	if b.call.output != nil {
 		return errors.New("ChatGPT sent an unexpected event after response.completed")
 	}
 	var event struct {
 		Type     string          `json:"type"`
 		Item     json.RawMessage `json:"item"`
+		Error    json.RawMessage `json:"error"`
 		Response struct {
-			Status            string            `json:"status"`
-			Error             json.RawMessage   `json:"error"`
-			IncompleteDetails json.RawMessage   `json:"incomplete_details"`
-			Output            []json.RawMessage `json:"output"`
+			Status            string          `json:"status"`
+			Error             json.RawMessage `json:"error"`
+			IncompleteDetails json.RawMessage `json:"incomplete_details"`
+			Output            chatGPTOutput   `json:"output"`
 			Usage             *struct {
 				Input   int64 `json:"input_tokens"`
 				Output  int64 `json:"output_tokens"`
@@ -125,22 +125,23 @@ func (b *chatGPTStreamBody) validate(name string, data []byte) error {
 			} `json:"usage"`
 		} `json:"response"`
 	}
-	if err := json.Unmarshal(data, &event); err != nil {
+	if err := json.Unmarshal(data, &event); err != nil || event.Type == "" {
 		return errors.New("invalid ChatGPT stream event")
 	}
 	if named && name != event.Type {
 		return errors.New("ChatGPT stream event name does not match its payload")
 	}
+	completed := event.Type == "response.completed"
 	// Failed and incomplete responses can still spend plan usage. Retain the
 	// provider's terminal count when no successful SDK finish reaches Roast.
 	switch event.Type {
 	case "response.completed", "response.failed", "response.incomplete":
 		if u := event.Response.Usage; u != nil {
 			valid := u.Input >= 0 && u.Output >= 0 && u.Details.Cached >= 0 && u.Details.Cached <= u.Input
-			if !valid && event.Type == "response.completed" {
+			if !valid && completed {
 				return errors.New("ChatGPT reported inconsistent token usage")
 			}
-			if valid && b.call != nil {
+			if valid {
 				b.call.usage = &fantasy.Usage{InputTokens: u.Input - u.Details.Cached, CacheReadTokens: u.Details.Cached, OutputTokens: u.Output}
 			}
 		}
@@ -153,17 +154,25 @@ func (b *chatGPTStreamBody) validate(name string, data []byte) error {
 	case "error":
 		return newChatGPTError(http.StatusOK, data)
 	}
+	// The SDK includes the raw payload in errors from this envelope.
+	if len(event.Error) != 0 {
+		return newChatGPTError(http.StatusOK, data)
+	}
 	if len(event.Item) > 0 {
-		if err := validateChatGPTOutputItem(event.Item, false); err != nil {
+		if _, err := decodeChatGPTOutputItem(event.Item, false); err != nil {
 			return err
 		}
 	}
 	for _, item := range event.Response.Output {
-		if err := validateChatGPTOutputItem(item, event.Type == "response.completed"); err != nil {
+		output, err := decodeChatGPTOutputItem(item, completed)
+		if err != nil {
 			return err
 		}
+		if completed && output.Type == "function_call" {
+			b.call.completedCalls = append(b.call.completedCalls, output)
+		}
 	}
-	if event.Type == "response.completed" {
+	if completed {
 		if event.Response.Output == nil {
 			return errors.New("ChatGPT finalized output is missing")
 		}
@@ -173,10 +182,8 @@ func (b *chatGPTStreamBody) validate(name string, data []byte) error {
 		if jsonValuePresent(event.Response.Error) || jsonValuePresent(event.Response.IncompleteDetails) {
 			return errors.New("ChatGPT completion event reported an error or incomplete response")
 		}
-		b.completed = true
-		if b.call != nil {
-			b.call.output.items = event.Response.Output
-		}
+		output := event.Response.Output
+		b.call.output = &output
 	}
 	return nil
 }
@@ -185,31 +192,36 @@ func jsonValuePresent(raw json.RawMessage) bool {
 	return len(raw) != 0 && !bytes.Equal(raw, []byte("null"))
 }
 
-func validateChatGPTOutputItem(raw json.RawMessage, final bool) error {
-	var item struct {
-		Type      string `json:"type"`
-		Role      string `json:"role"`
-		Namespace string `json:"namespace"`
-		Status    string `json:"status"`
-	}
+type chatGPTOutputItem struct {
+	Type      string `json:"type"`
+	Role      string `json:"role"`
+	Namespace string `json:"namespace"`
+	Status    string `json:"status"`
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+func decodeChatGPTOutputItem(raw json.RawMessage, final bool) (chatGPTOutputItem, error) {
+	var item chatGPTOutputItem
 	if err := json.Unmarshal(raw, &item); err != nil {
-		return errors.New("invalid ChatGPT stream output item")
+		return item, errors.New("invalid ChatGPT stream output item")
 	}
 	if final && item.Status != "" && item.Status != "completed" {
-		return errors.New("ChatGPT finalized output contains an unfinished item; no tools were executed")
+		return item, errors.New("ChatGPT finalized output contains an unfinished item")
 	}
 	switch item.Type {
 	case "function_call":
 		if item.Namespace != chatGPTToolNamespace {
-			return errors.New("ChatGPT returned a function outside the Roast tool namespace; no tools were executed")
+			return item, errors.New("ChatGPT returned a function outside the Roast tool namespace")
 		}
 	case "message":
 		if item.Role != "assistant" {
-			return errors.New("ChatGPT returned an output message with an invalid role; no tools were executed")
+			return item, errors.New("ChatGPT returned an output message with an invalid role")
 		}
 	case "reasoning":
 	default:
-		return errors.New("ChatGPT returned an unsupported output type; no tools were executed")
+		return item, errors.New("ChatGPT returned an unsupported output type")
 	}
-	return nil
+	return item, nil
 }
