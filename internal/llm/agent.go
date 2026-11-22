@@ -136,20 +136,19 @@ func (s *agentRunState) cutoffError(what string, cause error) error {
 		sentinel = ErrNoFinalCall
 	}
 	if cause != nil {
-		return fmt.Errorf("%w (%s): %w: %w", sentinel, what, ErrNoFinalCall, cause)
+		return fmt.Errorf("%w; %s: %w: %v", sentinel, what, ErrNoFinalCall, cause)
 	}
-	return fmt.Errorf("%w (%s): %w", sentinel, what, ErrNoFinalCall)
+	return fmt.Errorf("%w; %s: %w", sentinel, what, ErrNoFinalCall)
 }
 
-func (m *managedModel) prepareStep(ctx context.Context, opts fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
-	s := m.state
+func (s *agentRunState) prepareStep(ctx context.Context, opts fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
 	s.turn++
 	s.base = opts.Messages
 	ceiling := s.opts.InputByteCeiling
 	if ceiling <= 0 {
 		ceiling = defaultInputByteCeiling
 	}
-	if s.turn > 1 && !s.inputWarn && m.client.conversationBytes(s.messages()) > ceiling {
+	if s.turn > 1 && !s.inputWarn && fantasyConversationBytes(s.messages()) > ceiling {
 		s.inputWarn = true
 		s.inject(fantasy.NewUserMessage(
 			"INPUT BUDGET EXHAUSTED. Do not request more files. Call `" + s.opts.FinalTool + "` now with what you have — partial results beat none.",
@@ -211,8 +210,7 @@ func (m *managedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 	call.ToolChoice = &choice
 	return func(yield func(fantasy.StreamPart) bool) {
 		toolJSON, _ := json.Marshal(call.Tools)
-		inputBytes := m.client.conversationBytes(call.Prompt) + len(toolJSON) + 2048
-		release, err := m.client.cfg.Ledger.Reserve(inputBytes, m.client.cfg.MaxOutputTokens, final)
+		release, err := m.client.cfg.Ledger.Reserve(fantasyConversationBytes(call.Prompt)+len(toolJSON)+2048, m.client.cfg.MaxOutputTokens, final)
 		if err != nil {
 			if final {
 				if m.state.cutoff == nil {
@@ -233,19 +231,15 @@ func (m *managedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 		if err == nil || errors.Is(err, errStreamStopped) {
 			return
 		}
-		_, captureFailed := errors.AsType[*captureError](err)
-		_, reported := errors.AsType[providerCallError](err)
-		// A new cutoff could turn an in-flight capture failure into a
-		// partial review. Keep that failure fatal.
-		if !captureFailed && deadlineReached && (reported || (!final && ctx.Err() == nil)) {
-			m.state.forceFinal(ErrWorkDeadline)
-			if !reported && ctx.Err() == nil {
-				m.streamFinal(ctx, call, yield)
-				return
-			}
-		}
-		if captureFailed || m.state.cutoff != nil || (reported && ctx.Err() != nil) {
+		var captureErr *captureError
+		if errors.As(err, &captureErr) {
 			err = permanentModelError{err: err}
+		} else if !final && deadlineReached && ctx.Err() == nil {
+			m.state.forceFinal(ErrWorkDeadline)
+			m.streamFinal(ctx, call, yield)
+			return
+		} else if final && m.state.cutoff != nil {
+			err = m.state.cutoffError("wrap-up call failed", normalizeProviderError(ctx, m.client.cfg.Model, err))
 		}
 		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: err})
 	}, nil
@@ -287,20 +281,10 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 		release(usage)
 	}()
 	defer func() {
-		requestErr := callCtx.Err()
 		cancel()
 		_ = body.close()
-		_, reported := errors.AsType[providerCallError](callErr)
-		captureErr := m.client.transport.failure()
-		if captureErr != nil && !errors.Is(callErr, captureErr) {
-			if reported || errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded) {
-				callErr = fmt.Errorf("%w: %w", captureErr, callErr)
-			} else {
-				callErr = captureErr
-			}
-		}
-		if requestErr != nil && (reported || captureErr != nil) && !errors.Is(callErr, requestErr) {
-			callErr = fmt.Errorf("%w: %w", callErr, requestErr)
+		if err := m.client.transport.failure(); err != nil {
+			callErr = err
 		}
 	}()
 	m.state.blockExploration, m.state.rejectFinal, m.state.acceptFinal = "", "", nil
@@ -367,7 +351,7 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 		if rawFinish != "" && rawFinish != string(reason) {
 			m.state.stopCause += fmt.Sprintf(" (the provider sent %q)", rawFinish)
 		}
-		if reason == fantasy.FinishReasonLength && !m.client.fixedOutputLimit {
+		if reason == fantasy.FinishReasonLength {
 			m.state.stopCause += "; raise max_output_tokens if the output was cut off"
 		}
 	}
@@ -393,9 +377,7 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 
 type permanentModelError struct{ err error }
 
-func (e permanentModelError) Error() string     { return e.err.Error() }
-func (e permanentModelError) Unwrap() error     { return e.err }
-func (e permanentModelError) IsRetryable() bool { return false }
+func (e permanentModelError) Error() string { return e.err.Error() }
 
 func (m *managedModel) GenerateObject(context.Context, fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
 	return nil, errors.New("roast agent runtime does not generate objects directly")
@@ -581,7 +563,7 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 		fantasy.WithMaxOutputTokens(int64(c.cfg.MaxOutputTokens)),
 		fantasy.WithTools(tools...),
 		fantasy.WithMaxRetries(maxAttempts(c.cfg)-1),
-		fantasy.WithPrepareStep(managed.prepareStep),
+		fantasy.WithPrepareStep(state.prepareStep),
 		fantasy.WithRepairToolCall(func(context.Context, fantasy.ToolCallRepairOptions) (*fantasy.ToolCallContent, error) {
 			return nil, errors.New("tool-call repair disabled")
 		}),
@@ -594,26 +576,31 @@ func runAgent(ctx context.Context, c *client, system, user string, opts Converse
 
 	ctx = context.WithValue(ctx, sessionContextKey{}, "roast-"+rand.Text())
 	_, runErr := agent.Stream(ctx, fantasy.AgentStreamCall{Prompt: user})
+	var permanent permanentModelError
+	if errors.As(runErr, &permanent) {
+		// permanentModelError is intentionally opaque while Fantasy classifies
+		// retries. Restore its cause once that layer has finished.
+		runErr = permanent.err
+	}
 	if state.finalDone {
 		return nil
 	}
 	if state.finalErr != nil {
-		message := fmt.Sprintf("%s: %s arguments did not satisfy the schema (%v)", state.model, opts.FinalTool, state.finalErr)
-		if !c.fixedOutputLimit {
-			message += "; if truncated, raise max_output_tokens"
-		}
-		err := errors.New(message)
+		err := fmt.Errorf("%s: %s arguments did not satisfy the schema (%v); if truncated, raise max_output_tokens", state.model, opts.FinalTool, state.finalErr)
 		if state.cutoff != nil {
 			return state.cutoffError("wrap-up submission was invalid", err)
 		}
 		return err
 	}
 	if runErr != nil {
-		runErr = normalizeProviderError(ctx, c.cfg.Model, runErr)
-		if state.cutoff != nil && !errors.Is(runErr, ErrNoFinalCall) {
+		if errors.Is(runErr, ErrNoFinalCall) {
+			// The wrap-up call already explained itself, provider error included.
+			return runErr
+		}
+		if state.cutoff != nil {
 			return state.cutoffError("wrap-up turn failed", runErr)
 		}
-		return runErr
+		return normalizeProviderError(ctx, c.cfg.Model, runErr)
 	}
 	var cause error
 	if state.stopCause != "" {
@@ -837,13 +824,6 @@ func findTool(tools []Tool, name string) *Tool {
 		}
 	}
 	return nil
-}
-
-func (c *client) conversationBytes(messages fantasy.Prompt) int {
-	if c.measurePrompt != nil {
-		return c.measurePrompt(messages)
-	}
-	return fantasyConversationBytes(messages)
 }
 
 func fantasyConversationBytes(messages fantasy.Prompt) int {

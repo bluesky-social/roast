@@ -48,16 +48,6 @@ func encodeChatGPTRequest(body []byte, prompt fantasy.Prompt) ([]byte, error) {
 	return json.Marshal(request)
 }
 
-func chatGPTConversationBytes(prompt fantasy.Prompt) int {
-	input, err := chatGPTInput(prompt)
-	if err == nil {
-		if body, err := json.Marshal(input); err == nil {
-			return len(body)
-		}
-	}
-	return fantasyConversationBytes(prompt)
-}
-
 // chatGPTInput encodes the full conversation for a stateless Responses call.
 func chatGPTInput(prompt fantasy.Prompt) ([]any, error) {
 	input := make([]any, 0, len(prompt))
