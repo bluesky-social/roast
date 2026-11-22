@@ -1,5 +1,4 @@
-//go:build darwin || linux
-
+// Package storage saves ChatGPT credentials in the system keyring.
 package storage
 
 import (
@@ -13,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -22,6 +20,28 @@ import (
 
 	"github.com/zalando/go-keyring"
 )
+
+// ErrPublished marks a write whose snapshot is visible or may have become
+// visible. A caller must keep a grant that may already be saved.
+var ErrPublished = errors.New("ChatGPT credential update may have been published")
+
+// Store reads complete credential snapshots and serializes their updates.
+type Store interface {
+	ReadJSON(ctx context.Context, dst any) error
+	WriteJSON(ctx context.Context, value any) error
+	WithLock(ctx context.Context, fn func(Store) error) error
+}
+
+// Open prepares a handle without accessing the vault or creating the lock directory.
+func Open() (Store, error) {
+	if openStore == nil {
+		return nil, errors.New("ChatGPT sign-in is available on macOS and Linux")
+	}
+	return openStore()
+}
+
+// The platform lock implementation sets this on supported builds.
+var openStore func() (Store, error)
 
 const (
 	service        = "roast-chatgpt-plan-v1"
@@ -64,69 +84,26 @@ type keyringStore struct {
 	lock      *storeLock
 }
 
-func init() {
-	openStore = openSystemStore
+type storeLock struct {
+	file                 *os.File
+	info                 os.FileInfo
+	writes               chan struct{}
+	closed               bool
+	securityProcessAttrs *syscall.SysProcAttr
 }
 
-func openSystemStore() (Store, error) {
-	lockRoot, err := userLockRoot()
+func (l *storeLock) checkName() error {
+	named, err := os.Lstat(l.file.Name())
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("the ChatGPT keyring lock file disappeared")
+	}
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return OpenWithKeyring(systemKeyring{}, lockRoot)
-}
-
-// UseTestKeyring isolates both the operating-system keyring and the lock
-// location. Tests using the library's process-wide mock must run serially.
-func UseTestKeyring(lockRoot string) (restore func()) {
-	keyring.MockInit()
-	previous := openStore
-	openStore = func() (Store, error) {
-		// Use the library mock instead of the native macOS mutation path.
-		return OpenWithKeyring(struct{ systemKeyring }{}, lockRoot)
+	if !os.SameFile(l.info, named) {
+		return errors.New("the ChatGPT keyring lock file was replaced")
 	}
-	return func() { openStore = previous }
-}
-
-func userLockRoot() (string, error) {
-	if runtime.GOOS == "darwin" {
-		// A home-directory ACL can grant access beyond its POSIX mode bits.
-		// Use the system-managed local directory for the current user.
-		path, err := exec.Command("/usr/bin/getconf", "DARWIN_USER_DIR").Output()
-		if err != nil {
-			return "", fmt.Errorf("locate the macOS ChatGPT keyring lock directory: %w", err)
-		}
-		return strings.TrimSpace(string(path)), nil
-	}
-	account, err := user.LookupId(fmt.Sprint(os.Geteuid()))
-	if err == nil && account.HomeDir != "" {
-		return account.HomeDir, nil
-	}
-	// Some Linux containers have no passwd entry for their effective UID.
-	return os.UserHomeDir()
-}
-
-// OpenWithKeyring creates a store with the given keyring client and lock root.
-func OpenWithKeyring(ring keyringAccess, lockRoot string) (Store, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return nil, err
-	}
-	if !filepath.IsAbs(lockRoot) {
-		return nil, errors.New("the ChatGPT keyring lock requires an absolute directory")
-	}
-	lockRoot, err = filepath.EvalSymlinks(lockRoot)
-	if err != nil {
-		return nil, fmt.Errorf("resolve ChatGPT keyring lock directory: %w", err)
-	}
-	profile, err := resolveProfilePath(filepath.Join(dir, "roast", "chatgpt-plan"))
-	if err != nil {
-		return nil, fmt.Errorf("resolve ChatGPT profile directory: %w", err)
-	}
-	if err := checkPreviewFiles(profile); err != nil {
-		return nil, err
-	}
-	return newStore(profile, lockRoot, ring), nil
+	return nil
 }
 
 // Resolve aliases of the same profile without creating any directories.
@@ -564,7 +541,7 @@ func (s keyringStore) runSecurityMutation(cmd *exec.Cmd) error {
 	// Keep the flock until the child finishes, even if Roast exits or the
 	// foreground process group receives a terminal interrupt.
 	cmd.ExtraFiles = []*os.File{s.lock.file}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = s.lock.securityProcessAttrs
 	return cmd.Run()
 }
 

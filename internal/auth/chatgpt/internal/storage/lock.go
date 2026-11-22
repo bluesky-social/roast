@@ -7,18 +7,81 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/user"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/zalando/go-keyring"
 	"golang.org/x/sys/unix"
 )
 
-type storeLock struct {
-	file   *os.File
-	info   os.FileInfo
-	writes chan struct{}
-	closed bool
+func init() {
+	openStore = openSystemStore
+}
+
+func openSystemStore() (Store, error) {
+	lockRoot, err := userLockRoot()
+	if err != nil {
+		return nil, err
+	}
+	return OpenWithKeyring(systemKeyring{}, lockRoot)
+}
+
+// UseTestKeyring isolates both the operating-system keyring and the lock
+// location. Tests using the library's process-wide mock must run serially.
+func UseTestKeyring(lockRoot string) (restore func()) {
+	keyring.MockInit()
+	previous := openStore
+	openStore = func() (Store, error) {
+		// Use the library mock instead of the native macOS mutation path.
+		return OpenWithKeyring(struct{ systemKeyring }{}, lockRoot)
+	}
+	return func() { openStore = previous }
+}
+
+func userLockRoot() (string, error) {
+	if runtime.GOOS == "darwin" {
+		// A home-directory ACL can grant access beyond its POSIX mode bits.
+		// Use the system-managed local directory for the current user.
+		path, err := exec.Command("/usr/bin/getconf", "DARWIN_USER_DIR").Output()
+		if err != nil {
+			return "", fmt.Errorf("locate the macOS ChatGPT keyring lock directory: %w", err)
+		}
+		return strings.TrimSpace(string(path)), nil
+	}
+	account, err := user.LookupId(fmt.Sprint(os.Geteuid()))
+	if err == nil && account.HomeDir != "" {
+		return account.HomeDir, nil
+	}
+	// Some Linux containers have no passwd entry for their effective UID.
+	return os.UserHomeDir()
+}
+
+// OpenWithKeyring creates a store with the given keyring client and lock root.
+func OpenWithKeyring(ring keyringAccess, lockRoot string) (Store, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	if !filepath.IsAbs(lockRoot) {
+		return nil, errors.New("the ChatGPT keyring lock requires an absolute directory")
+	}
+	lockRoot, err = filepath.EvalSymlinks(lockRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ChatGPT keyring lock directory: %w", err)
+	}
+	profile, err := resolveProfilePath(filepath.Join(dir, "roast", "chatgpt-plan"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve ChatGPT profile directory: %w", err)
+	}
+	if err := checkPreviewFiles(profile); err != nil {
+		return nil, err
+	}
+	return newStore(profile, lockRoot, ring), nil
 }
 
 // WithLock serializes whole account operations, including token rotation,
@@ -61,7 +124,12 @@ func (s keyringStore) WithLock(ctx context.Context, fn func(Store) error) error 
 	if err := waitCtx.Err(); err != nil {
 		return err
 	}
-	s.lock = &storeLock{file: file, info: info, writes: make(chan struct{}, 1)}
+	s.lock = &storeLock{
+		file:                 file,
+		info:                 info,
+		writes:               make(chan struct{}, 1),
+		securityProcessAttrs: &syscall.SysProcAttr{Setpgid: true},
+	}
 	if err := s.lock.checkName(); err != nil {
 		return err
 	}
@@ -102,20 +170,6 @@ func openLock(path string) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
-}
-
-func (l *storeLock) checkName() error {
-	named, err := os.Lstat(l.file.Name())
-	if errors.Is(err, os.ErrNotExist) {
-		return errors.New("the ChatGPT keyring lock file disappeared")
-	}
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(l.info, named) {
-		return errors.New("the ChatGPT keyring lock file was replaced")
-	}
-	return nil
 }
 
 func waitForLock(ctx context.Context, file *os.File) error {
