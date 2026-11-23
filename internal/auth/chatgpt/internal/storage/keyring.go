@@ -142,7 +142,9 @@ func checkPreviewFiles(profile string) error {
 	}
 	for _, entry := range entries {
 		name := strings.ToLower(entry.Name())
-		if name == "accounts.json" || (strings.HasPrefix(name, ".credentials-") && entry.Type().IsRegular()) {
+		isAccountsPath := name == "accounts.json"
+		isCredentialTempFile := strings.HasPrefix(name, ".credentials-") && entry.Type().IsRegular()
+		if isAccountsPath || isCredentialTempFile {
 			return fmt.Errorf("found a previous ChatGPT credential file at %q. Sign out with your previous Roast version or disconnect the old registration in ChatGPT Settings, then remove the old credential files and sign in again", filepath.Join(profile, entry.Name()))
 		}
 	}
@@ -168,10 +170,20 @@ func (v snapshot) valid() bool {
 	if v.ID == "" {
 		return v.Chunks == 0 && v.Digest == ""
 	}
-	_, digestErr := hex.DecodeString(v.Digest)
-	return len(v.Digest) == sha256.Size*2 && digestErr == nil && v.Chunks > 0 && v.Chunks <= maxChunks && len(v.ID) <= 64 && strings.IndexFunc(v.ID, func(r rune) bool {
-		return !(r >= 'A' && r <= 'Z' || r >= '2' && r <= '7')
-	}) == -1
+	validChunkCount := v.Chunks > 0 && v.Chunks <= maxChunks
+	validIDLength := len(v.ID) <= 64
+	validDigestLength := len(v.Digest) == sha256.Size*2
+	if !validChunkCount || !validIDLength || !validDigestLength {
+		return false
+	}
+	if _, err := hex.DecodeString(v.Digest); err != nil {
+		return false
+	}
+	return strings.IndexFunc(v.ID, func(r rune) bool {
+		isUppercaseLetter := r >= 'A' && r <= 'Z'
+		isBase32Digit := r >= '2' && r <= '7'
+		return !isUppercaseLetter && !isBase32Digit
+	}) < 0
 }
 
 // A single manifest publishes an immutable snapshot. Discard tracks either a
@@ -201,16 +213,23 @@ func (s keyringStore) readManifest(ctx context.Context) (manifest, error) {
 	if err != nil {
 		return manifest{}, keyringError("read")
 	}
+	const invalidIndexMessage = "invalid ChatGPT credential index in the keyring"
 	var m *manifest
-	if len(raw) > maxManifestSize || json.Unmarshal([]byte(raw), &m) != nil || m == nil || !m.Current.valid() || !m.Discard.valid() ||
-		m.Current.ID == m.Discard.ID {
-		return manifest{}, errors.New("invalid ChatGPT credential index in the keyring")
+	withinSizeLimit := len(raw) <= maxManifestSize
+	decoded := withinSizeLimit && json.Unmarshal([]byte(raw), &m) == nil
+	if !decoded || m == nil {
+		return manifest{}, errors.New(invalidIndexMessage)
+	}
+	validSnapshots := m.Current.valid() && m.Discard.valid()
+	distinctSnapshotIDs := m.Current.ID != m.Discard.ID
+	if !validSnapshots || !distinctSnapshotIDs {
+		return manifest{}, errors.New(invalidIndexMessage)
 	}
 	// An empty snapshot is encoded explicitly. Missing or duplicate fields
 	// must never be mistaken for an interrupted first write.
 	canonical, err := json.Marshal(m)
 	if err != nil || string(canonical) != raw {
-		return manifest{}, errors.New("invalid ChatGPT credential index in the keyring")
+		return manifest{}, errors.New(invalidIndexMessage)
 	}
 	return *m, nil
 }
@@ -311,7 +330,9 @@ func (s keyringStore) readSnapshot(ctx context.Context, v snapshot) (string, err
 			return "", errors.New("oversized ChatGPT credential entry in the keyring")
 		}
 		chunk, err := base64.RawStdEncoding.DecodeString(raw)
-		if err != nil || len(chunk) == 0 || len(chunk) > chunkSize || (i+1 < v.Chunks && len(chunk) != chunkSize) {
+		fullChunk := len(chunk) == chunkSize
+		partialFinalChunk := i+1 == v.Chunks && len(chunk) > 0 && len(chunk) < chunkSize
+		if err != nil || (!fullChunk && !partialFinalChunk) {
 			return "", errors.New("invalid ChatGPT credential entry in the keyring")
 		}
 		data.Write(chunk)
@@ -440,12 +461,14 @@ func (s keyringStore) setVerified(ctx context.Context, item, value string) (bool
 		}
 		// A failed provider call may still complete later. An older value
 		// observed by a retry cannot rule out that earlier publication.
-		uncertain = uncertain || (setErr != nil && !errors.Is(setErr, keyring.ErrSetDataTooBig)) ||
-			(err != nil && !errors.Is(err, keyring.ErrNotFound))
+		writeRejectedForSize := errors.Is(setErr, keyring.ErrSetDataTooBig)
+		writeMayHaveSucceeded := setErr != nil && !writeRejectedForSize
+		readbackFailed := err != nil && !errors.Is(err, keyring.ErrNotFound)
+		uncertain = uncertain || writeMayHaveSucceeded || readbackFailed
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return uncertain, ctxErr
 		}
-		if errors.Is(setErr, keyring.ErrSetDataTooBig) {
+		if writeRejectedForSize {
 			return uncertain, errors.New("ChatGPT credential entry exceeds the system keyring size limit")
 		}
 	}

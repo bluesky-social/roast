@@ -101,12 +101,18 @@ func callbackHandler(host, state, clientID string, callbacks chan<- callback) ht
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		if r.Method != http.MethodGet || r.URL.Path != callbackPath || r.Host != host {
+		isCallbackRequest := r.Method == http.MethodGet &&
+			r.URL.Path == callbackPath && r.Host == host
+		if !isCallbackRequest {
 			http.NotFound(w, r)
 			return
 		}
 		values, err := url.ParseQuery(r.URL.RawQuery)
-		if err != nil || len(values["state"]) != 1 || subtle.ConstantTimeCompare([]byte(values.Get("state")), []byte(state)) != 1 {
+		queryParsed := err == nil
+		hasSingleState := len(values["state"]) == 1
+		validState := queryParsed && hasSingleState &&
+			subtle.ConstantTimeCompare([]byte(values.Get("state")), []byte(state)) == 1
+		if !validState {
 			http.Error(w, "Invalid authorization state", http.StatusBadRequest)
 			return
 		}
@@ -122,21 +128,28 @@ func callbackHandler(host, state, clientID string, callbacks chan<- callback) ht
 
 func parseCallback(values url.Values, clientID string) (Result, error) {
 	code, issuedID := values.Get("code"), values.Get("client_id")
+	hasOAuthError := values.Has("error")
+	hasAuthorizationCode := len(values["code"]) == 1 && code != ""
+	hasDuplicateClientID := len(values["client_id"]) > 1
+	newRegistration := clientID == ""
+	invalidIssuedID := newRegistration && !ValidIssuedClientID(issuedID)
+	registrationChanged := !newRegistration && values.Has("client_id") && issuedID != clientID
+
 	switch {
-	case values.Has("error"):
+	case hasOAuthError:
 		category := "oauth_error"
 		if len(values["error"]) == 1 {
 			category = oauth.ErrorCategory(values.Get("error"))
 		}
 		return Result{}, fmt.Errorf("ChatGPT authorization failed (%s)", category)
-	case len(values["code"]) != 1 || code == "" || len(values["client_id"]) > 1:
+	case !hasAuthorizationCode || hasDuplicateClientID:
 		return Result{}, errors.New("incomplete ChatGPT callback")
-	case clientID == "" && !ValidIssuedClientID(issuedID):
+	case invalidIssuedID:
 		return Result{}, errors.New("missing issued ChatGPT client ID")
-	case clientID != "" && values.Has("client_id") && issuedID != clientID:
+	case registrationChanged:
 		return Result{}, errors.New("ChatGPT registration changed during sign-in")
 	}
-	if clientID == "" {
+	if newRegistration {
 		clientID = issuedID
 	}
 	return Result{Code: code, ClientID: clientID}, nil
@@ -163,7 +176,9 @@ func closeCallback(server *http.Server) {
 // ValidIssuedClientID checks an opaque client ID issued by the provider. The documented example prefix is not a format
 // contract; reject only the registration placeholder and malformed values.
 func ValidIssuedClientID(id string) bool {
-	if id == "" || id == oauth.DynamicClientID || len(id) > 256 || !utf8.ValidString(id) {
+	hasIssuedValue := id != "" && id != oauth.DynamicClientID
+	withinLengthLimit := len(id) <= 256
+	if !hasIssuedValue || !withinLengthLimit || !utf8.ValidString(id) {
 		return false
 	}
 	return strings.IndexFunc(id, func(r rune) bool {
