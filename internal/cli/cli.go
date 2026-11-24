@@ -616,11 +616,35 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	if err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	// Settle whether the finder gets exploration tools before building its
+	// prompt: the prompt has to say which kind of run this is.
+	interactive := f.interactive && !f.quick
+	maxTurns := f.maxTurns
+	if survey {
+		interactive = true
+		if !changed("max-turns") {
+			maxTurns = surveyMaxTurnsDefault
+		}
+	}
+	if interactive && !survey {
+		minLines, limitErr := envIntAtLeast("ROAST_INTERACTIVE_MIN_DIFF_LINES", 80, 0)
+		if limitErr != nil {
+			return &usageError{msg: limitErr.Error()}
+		}
+		minFiles, limitErr := envIntAtLeast("ROAST_INTERACTIVE_MIN_FILES", 4, 0)
+		if limitErr != nil {
+			return &usageError{msg: limitErr.Error()}
+		}
+		if strings.Count(sc.Diff, "\n") < minLines && len(sc.Files) < minFiles {
+			logf(stderr, "diff is small; using a single structured finder call")
+			interactive = false
+		}
+	}
 	finderPrompt := cfg.Prompts.FinderCode
 	if mode == "prose" {
 		finderPrompt = cfg.Prompts.FinderProse
 	}
-	system, err := prompts.Finder(mode, f.scope, f.quick, langs, finderPrompt)
+	system, err := prompts.Finder(mode, f.scope, f.quick, interactive, langs, finderPrompt)
 	if err != nil {
 		return err
 	}
@@ -662,28 +686,6 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		}
 	}
 	ledger := llm.NewLedger(maxTokensTotal)
-	interactive := f.interactive && !f.quick
-	maxTurns := f.maxTurns
-	if survey {
-		interactive = true
-		if !changed("max-turns") {
-			maxTurns = surveyMaxTurnsDefault
-		}
-	}
-	if interactive && !survey {
-		minLines, limitErr := envIntAtLeast("ROAST_INTERACTIVE_MIN_DIFF_LINES", 80, 0)
-		if limitErr != nil {
-			return &usageError{msg: limitErr.Error()}
-		}
-		minFiles, limitErr := envIntAtLeast("ROAST_INTERACTIVE_MIN_FILES", 4, 0)
-		if limitErr != nil {
-			return &usageError{msg: limitErr.Error()}
-		}
-		if strings.Count(sc.Diff, "\n") < minLines && len(sc.Files) < minFiles {
-			logf(stderr, "diff is small; using a single structured finder call")
-			interactive = false
-		}
-	}
 	deadlineDuration := f.deadline
 	if !changed("deadline") {
 		deadlineDuration = defaultDeadline

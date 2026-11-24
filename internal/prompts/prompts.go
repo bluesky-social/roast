@@ -31,6 +31,9 @@ var finderMixedAddendumTmpl string
 //go:embed templates/finder_quick_addendum.tmpl
 var finderQuickAddendumTmpl string
 
+//go:embed templates/finder_single_call.tmpl
+var finderSingleCallTmpl string
+
 //go:embed templates/finder_go_addendum.tmpl
 var finderGoAddendumTmpl string
 
@@ -73,19 +76,28 @@ type VerifierVars struct {
 }
 
 // Finder returns the finder system prompt for the given mode, scope, quick
-// flag, and detected language families.
+// flag, interactive flag, and detected language families.
 //
 // mode must be "code", "prose", or "mixed". The code/mixed prompt is assembled as
 // finder_core + scope framing + lang addenda (+ mixed addendum for mixed),
-// with the quick-mode constraints addendum appended last so it overrides
-// everything above it. langs selects language-scoped addenda (e.g. "go",
-// "react", "frontend"); see appendLangAddenda.
+// then the single-call addendum when interactive is false, with the
+// quick-mode constraints addendum appended last so it overrides everything
+// above it. langs selects language-scoped addenda (e.g. "go", "react",
+// "frontend"); see appendLangAddenda.
+//
+// interactive reports whether the finder will actually get the exploration
+// tools. The core, prose, and frontend texts describe those tools, so a
+// single structured call (the default, --quick, or a small diff under
+// --interactive) gets an addendum saying they are absent and that files it
+// was not shown still exist. Without it the finder reads the core text,
+// cannot check a path the diff references, and reports the path missing.
 //
 // overridePath, when non-empty, replaces only the CORE template — the
-// scope framing stays roast-controlled because it encodes review invariants,
-// not taste. Prose mode ignores scope and uses finder_prose.tmpl as its
-// whole base; overridePath there replaces that base wholesale.
-func Finder(mode, scope string, quick bool, langs []string, overridePath string) (string, error) {
+// scope framing and the single-call addendum stay roast-controlled because
+// they encode review invariants, not taste. Prose mode ignores scope and
+// uses finder_prose.tmpl as its whole base; overridePath there replaces
+// that base wholesale.
+func Finder(mode, scope string, quick, interactive bool, langs []string, overridePath string) (string, error) {
 	var base string
 	switch mode {
 	case "prose":
@@ -114,6 +126,9 @@ func Finder(mode, scope string, quick bool, langs []string, overridePath string)
 		}
 		base += scopeFraming(scope)
 		base += appendLangAddenda(langs)
+	}
+	if !interactive {
+		base += finderSingleCallTmpl
 	}
 	if quick {
 		base += finderQuickAddendumTmpl
