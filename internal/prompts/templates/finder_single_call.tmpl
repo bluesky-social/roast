@@ -1,0 +1,7 @@
+
+
+Single-call review (no exploration tools in this run):
+- This review is one structured call. `read_file`, `list_files`, `grep_repo`, and `submit_findings` are not available, and any instruction above to use them does not apply. Return your findings through the one structured-result tool you are given.
+- You can see only the <diff> and the files in <files>. The rest of the repository exists in the tree under review but is not shown to you, and you cannot inspect it.
+- Do not claim that a file, directory, or symbol you were not shown is missing, untracked, empty, or undefined. A reference to an unseen path (a relative file path, an import, an include) is not evidence that its target is absent, and a diff that does not touch a file says nothing about whether the repository already contains it.
+- A finding that depends on content outside <diff> and <files> is unverifiable. Do not emit it unless what you can see establishes the defect on its own.

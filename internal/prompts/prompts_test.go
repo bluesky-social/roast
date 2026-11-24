@@ -12,7 +12,7 @@ import (
 // TestFinderProseContainsProseRulesNotCodeRules verifies that "prose" mode
 // returns the prose system prompt and NOT Go-specific code rules.
 func TestFinderProseContainsProseRulesNotCodeRules(t *testing.T) {
-	p, err := prompts.Finder("prose", "diff", false, nil, "")
+	p, err := prompts.Finder("prose", "diff", false, true, nil, "")
 	if err != nil {
 		t.Fatalf("Finder(prose): %v", err)
 	}
@@ -32,7 +32,7 @@ func TestFinderProseContainsProseRulesNotCodeRules(t *testing.T) {
 // must not lose the coverage contract a code survey gets.
 func TestFinderProseSurveyContainsProtocol(t *testing.T) {
 	for _, sc := range []string{"repo"} {
-		p, err := prompts.Finder("prose", sc, false, nil, "")
+		p, err := prompts.Finder("prose", sc, false, true, nil, "")
 		if err != nil {
 			t.Fatalf("Finder(prose,%s): %v", sc, err)
 		}
@@ -52,7 +52,7 @@ func TestFinderProseSurveyContainsProtocol(t *testing.T) {
 // TestFinderProseDiffUnaffectedBySurvey verifies prose+diff assembly is
 // unchanged: no survey framing leaks into the non-survey case.
 func TestFinderProseDiffUnaffectedBySurvey(t *testing.T) {
-	p, err := prompts.Finder("prose", "diff", false, nil, "")
+	p, err := prompts.Finder("prose", "diff", false, true, nil, "")
 	if err != nil {
 		t.Fatalf("Finder(prose,diff): %v", err)
 	}
@@ -66,7 +66,7 @@ func TestFinderProseDiffUnaffectedBySurvey(t *testing.T) {
 // (extracted into finder_go_addendum.tmpl — regression guard for the
 // extraction).
 func TestFinderCodeContainsCodeRules(t *testing.T) {
-	p, err := prompts.Finder("code", "diff", false, []string{"go"}, "")
+	p, err := prompts.Finder("code", "diff", false, true, []string{"go"}, "")
 	if err != nil {
 		t.Fatalf("Finder(code): %v", err)
 	}
@@ -77,7 +77,7 @@ func TestFinderCodeContainsCodeRules(t *testing.T) {
 		t.Error("code prompt must not contain prose-only 'Unverified factual claims' rule")
 	}
 
-	noLangs, err := prompts.Finder("code", "diff", false, nil, "")
+	noLangs, err := prompts.Finder("code", "diff", false, true, nil, "")
 	if err != nil {
 		t.Fatalf("Finder(code, no langs): %v", err)
 	}
@@ -93,7 +93,7 @@ func TestFinderCodeContainsCodeRules(t *testing.T) {
 // goes missing, the split relocated or dropped a rule rather than being a
 // pure extraction.
 func TestFinderCodeDiffBehaviorNeutral(t *testing.T) {
-	p, err := prompts.Finder("code", "diff", false, nil, "")
+	p, err := prompts.Finder("code", "diff", false, true, nil, "")
 	if err != nil {
 		t.Fatalf("Finder(code,diff): %v", err)
 	}
@@ -136,7 +136,7 @@ func TestFinderCodeDiffBehaviorNeutral(t *testing.T) {
 // authorization and the exploration protocol, and pulls in the shared core.
 func TestFinderSurveyContainsProtocolAndAltitude(t *testing.T) {
 	for _, sc := range []string{"repo"} {
-		p, err := prompts.Finder("code", sc, false, nil, "")
+		p, err := prompts.Finder("code", sc, false, true, nil, "")
 		if err != nil {
 			t.Fatalf("Finder(code,%s): %v", sc, err)
 		}
@@ -170,7 +170,7 @@ func TestFinderSurveyContainsProtocolAndAltitude(t *testing.T) {
 // TestFinderDiffScopeUnaffectedBySurvey verifies diff-mode assembly is
 // unchanged: it still carries the diff framing and NOT the survey framing.
 func TestFinderDiffScopeUnaffectedBySurvey(t *testing.T) {
-	p, err := prompts.Finder("code", "diff", false, nil, "")
+	p, err := prompts.Finder("code", "diff", false, true, nil, "")
 	if err != nil {
 		t.Fatalf("Finder(code,diff): %v", err)
 	}
@@ -206,7 +206,7 @@ func TestFinderUserSurveyManifest(t *testing.T) {
 
 // TestFinderMixedContainsBothRules verifies that "mixed" appends the mixed addendum.
 func TestFinderMixedContainsBothRules(t *testing.T) {
-	p, err := prompts.Finder("mixed", "diff", false, nil, "")
+	p, err := prompts.Finder("mixed", "diff", false, true, nil, "")
 	if err != nil {
 		t.Fatalf("Finder(mixed): %v", err)
 	}
@@ -217,11 +217,11 @@ func TestFinderMixedContainsBothRules(t *testing.T) {
 
 // TestFinderQuickAppendsConstraints verifies quick mode appends the addendum.
 func TestFinderQuickAppendsConstraints(t *testing.T) {
-	base, err := prompts.Finder("code", "diff", false, nil, "")
+	base, err := prompts.Finder("code", "diff", false, true, nil, "")
 	if err != nil {
 		t.Fatalf("Finder base: %v", err)
 	}
-	quick, err := prompts.Finder("code", "diff", true, nil, "")
+	quick, err := prompts.Finder("code", "diff", true, false, nil, "")
 	if err != nil {
 		t.Fatalf("Finder quick: %v", err)
 	}
@@ -236,10 +236,62 @@ func TestFinderQuickAppendsConstraints(t *testing.T) {
 	}
 }
 
+// TestFinderSingleCallStatesItsContext: a finder without exploration tools
+// sees only the diff and the touched files, yet the core, prose, and
+// frontend texts describe read_file/list_files/grep_repo. Told nothing else,
+// it reports a file the diff references but does not touch as missing (a
+// pre-commit gate blocked a commit that way on a file already in HEAD). The
+// single-call addendum must say the tools are absent and unseen files exist,
+// for every mode and even under a core override.
+func TestFinderSingleCallStatesItsContext(t *testing.T) {
+	dir := t.TempDir()
+	override := filepath.Join(dir, "custom_finder.tmpl")
+	if err := os.WriteFile(override, []byte("my custom finder prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wants := []string{
+		"no exploration tools in this run",
+		"any instruction above to use them does not apply",
+		"exists in the tree under review but is not shown to you",
+		"is not evidence that its target is absent",
+		"says nothing about whether the repository already contains it",
+	}
+	for _, mode := range []string{"code", "prose", "mixed"} {
+		for _, overridePath := range []string{"", override} {
+			single, err := prompts.Finder(mode, "diff", false, false, []string{"react"}, overridePath)
+			if err != nil {
+				t.Fatalf("Finder(%s, single call): %v", mode, err)
+			}
+			for _, want := range wants {
+				if !strings.Contains(single, want) {
+					t.Errorf("Finder(%s, single call, override=%v) missing %q", mode, overridePath != "", want)
+				}
+			}
+			explore, err := prompts.Finder(mode, "diff", false, true, []string{"react"}, overridePath)
+			if err != nil {
+				t.Fatalf("Finder(%s, interactive): %v", mode, err)
+			}
+			if strings.Contains(explore, "Single-call review") {
+				t.Errorf("Finder(%s, interactive, override=%v) must not deny the tools it has", mode, overridePath != "")
+			}
+		}
+	}
+
+	// Quick constraints stay last so they still override everything above.
+	quick, err := prompts.Finder("code", "diff", true, false, nil, "")
+	if err != nil {
+		t.Fatalf("Finder(quick): %v", err)
+	}
+	single, constraints := strings.Index(quick, "Single-call review"), strings.Index(quick, "Quick-mode constraints")
+	if single < 0 || constraints < single {
+		t.Errorf("single-call addendum at %d must precede quick constraints at %d", single, constraints)
+	}
+}
+
 // TestFinderFrontendAddendum verifies the frontend and React-hooks addenda
 // are selected by the react/frontend lang tags and absent for unrelated tags.
 func TestFinderFrontendAddendum(t *testing.T) {
-	react, err := prompts.Finder("code", "diff", false, []string{"react"}, "")
+	react, err := prompts.Finder("code", "diff", false, true, []string{"react"}, "")
 	if err != nil {
 		t.Fatalf("Finder(react): %v", err)
 	}
@@ -250,7 +302,7 @@ func TestFinderFrontendAddendum(t *testing.T) {
 		t.Error("react prompt missing react-hooks addendum (useEffect)")
 	}
 
-	frontend, err := prompts.Finder("code", "diff", false, []string{"frontend"}, "")
+	frontend, err := prompts.Finder("code", "diff", false, true, []string{"frontend"}, "")
 	if err != nil {
 		t.Fatalf("Finder(frontend): %v", err)
 	}
@@ -261,7 +313,7 @@ func TestFinderFrontendAddendum(t *testing.T) {
 		t.Error("frontend prompt must not contain react-hooks addendum (useEffect)")
 	}
 
-	goOnly, err := prompts.Finder("code", "diff", false, []string{"go"}, "")
+	goOnly, err := prompts.Finder("code", "diff", false, true, []string{"go"}, "")
 	if err != nil {
 		t.Fatalf("Finder(go): %v", err)
 	}
@@ -276,7 +328,7 @@ func TestFinderFrontendAddendum(t *testing.T) {
 // TestFinderFrontendAddendumDedup verifies the frontend addendum is appended
 // exactly once when both "react" and "frontend" tags are present.
 func TestFinderFrontendAddendumDedup(t *testing.T) {
-	p, err := prompts.Finder("code", "diff", false, []string{"frontend", "react"}, "")
+	p, err := prompts.Finder("code", "diff", false, true, []string{"frontend", "react"}, "")
 	if err != nil {
 		t.Fatalf("Finder(frontend,react): %v", err)
 	}
@@ -488,7 +540,7 @@ func TestFinderOverridePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := prompts.Finder("code", "diff", false, nil, override)
+	p, err := prompts.Finder("code", "diff", false, true, nil, override)
 	if err != nil {
 		t.Fatalf("Finder with override: %v", err)
 	}
@@ -509,7 +561,7 @@ func TestFinderOverridePath(t *testing.T) {
 func TestFinderInjectionClauseCoversManifestAndTools(t *testing.T) {
 	for _, mode := range []string{"code", "prose", "mixed"} {
 		for _, sc := range []string{"diff", "repo"} {
-			p, err := prompts.Finder(mode, sc, false, nil, "")
+			p, err := prompts.Finder(mode, sc, false, true, nil, "")
 			if err != nil {
 				t.Fatalf("Finder(%s,%s): %v", mode, sc, err)
 			}

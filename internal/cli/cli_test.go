@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -834,6 +835,122 @@ roles:
 	joined := strings.Join(prompts, "\n")
 	if !strings.Contains(joined, "Repository under review") || !strings.Contains(joined, "bad.go") {
 		t.Fatalf("survey prompt did not contain manifest: %s", joined)
+	}
+}
+
+// TestFinderPromptMatchesItsTools runs the finder the ways the CLI can and
+// checks that the system prompt says whether exploration tools exist in the
+// same request. The pre-commit gate's `--staged --quick` call, the default
+// single call, and an --interactive run demoted for a small diff send one
+// structured tool; a prompt that still offers read_file there leads the
+// finder to report files it cannot see as missing.
+func TestFinderPromptMatchesItsTools(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		env        map[string]string
+		singleCall bool
+	}{
+		{name: "gate quick", args: []string{"--staged", "--quick", "--max-severity", "HIGH", "--task", "pre-commit gate"}, singleCall: true},
+		{name: "default", args: []string{"--staged", "--no-verify"}, singleCall: true},
+		{name: "interactive small diff", args: []string{"--staged", "--no-verify", "--interactive"}, singleCall: true},
+		{name: "interactive", args: []string{"--staged", "--no-verify", "--interactive"},
+			env: map[string]string{"ROAST_INTERACTIVE_MIN_DIFF_LINES": "0", "ROAST_INTERACTIVE_MIN_FILES": "0"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ROAST_RECORD_DIR", t.TempDir())
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			var mu sync.Mutex
+			var systems []string
+			var toolSets [][]string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer func() { _ = r.Body.Close() }()
+				var request struct {
+					Messages []struct {
+						Role    string          `json:"role"`
+						Content json.RawMessage `json:"content"`
+					} `json:"messages"`
+					Tools []struct {
+						Function struct {
+							Name string `json:"name"`
+						} `json:"function"`
+					} `json:"tools"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				var tools []string
+				for _, tool := range request.Tools {
+					tools = append(tools, tool.Function.Name)
+				}
+				mu.Lock()
+				for _, message := range request.Messages {
+					if message.Role == "system" {
+						systems = append(systems, string(message.Content))
+					}
+				}
+				toolSets = append(toolSets, tools)
+				mu.Unlock()
+				name := "findings"
+				if slices.Contains(tools, "submit_findings") {
+					name = "submit_findings"
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = testutil.WriteJSONStream(w, "chat", fmt.Sprintf(`{"id":"test","object":"chat.completion","created":1,"model":"finder-test","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`, name, `{"assessment":"NO_FINDINGS","findings":[]}`))
+			}))
+			defer server.Close()
+
+			repo := initChangedRepo(t)
+			runGit(t, repo, "add", "bad.go")
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			configBody := fmt.Sprintf(`version: 1
+inference_profiles:
+  finder-test:
+    endpoint: %s/v1
+    api_key: test-key
+    model: finder-test
+    protocol: chat
+    max_output_tokens: 2048
+roles:
+  finder:
+    profile: finder-test
+`, server.URL)
+			if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			old, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(repo); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(old) })
+
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"review", "--config", configPath, "--format", "json", "--max-attempts=1"}, tc.args...)
+			code, runErr := ExecuteContext(t.Context(), args, &stdout, &stderr)
+			if runErr != nil || code != ExitClean {
+				t.Fatalf("code=%d err=%v stdout=%s stderr=%s", code, runErr, stdout.String(), stderr.String())
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(systems) != 1 || len(toolSets) != 1 {
+				t.Fatalf("finder requests: %d system prompts, %d tool sets; want one each", len(systems), len(toolSets))
+			}
+			hasReadFile := slices.Contains(toolSets[0], "read_file")
+			saysSingleCall := strings.Contains(systems[0], "no exploration tools in this run")
+			if hasReadFile == tc.singleCall {
+				t.Fatalf("tools = %v, want single call %v", toolSets[0], tc.singleCall)
+			}
+			if saysSingleCall != tc.singleCall {
+				t.Fatalf("system prompt says single call = %v with tools %v", saysSingleCall, toolSets[0])
+			}
+		})
 	}
 }
 
