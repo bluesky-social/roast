@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.5.0 (2026-11-25)
+
+## What's Changed
+* chore(deps): update module github.com/klauspost/cpuid/v2 to v2.4.2 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/183
+* feat: Review a pull request without switching branches by @wn-mitch in https://github.com/bluesky-social/roast/pull/174
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/184
+* chore(deps): update ci go tools by @renovate[bot] in https://github.com/bluesky-social/roast/pull/185
+* fix(deps): update module go.yaml.in/yaml/v3 to v4 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/180
+* chore(deps): update module github.com/mattn/go-shellwords to v1.0.17 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/190
+* chore(deps): update module github.com/charmbracelet/x/ansi to v0.11.10 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/191
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/192
+* chore(deps): update actions/create-github-app-token action to v3.4.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/193
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/194
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/196
+* chore(deps): update dependency goreleaser/goreleaser to v2.20.3 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/197
+* chore(deps): update ci go tools by @renovate[bot] in https://github.com/bluesky-social/roast/pull/200
+* fix(deps): update docker/dockerfile:1 docker digest to 572cebb by @renovate[bot] in https://github.com/bluesky-social/roast/pull/199
+* fix(deps): update module github.com/klauspost/compress to v1.20.5 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/201
+* fix(deps): update module go.opentelemetry.io/auto/sdk to v1.2.2 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/202
+* fix: tell a single-call finder it has no tools and cannot see other files by @amckinley in https://github.com/bluesky-social/roast/pull/203
+* fix(deps): update module github.com/standard-webhooks/standard-webhooks/libraries to v1 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/179
+* chore(deps): update module github.com/pierrec/lz4/v4 to v4.1.34 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/205
+
+## New Contributors
+* @wn-mitch made their first contribution in https://github.com/bluesky-social/roast/pull/174
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.9...v1.5.0
+
 ## 1.4.9 (2026-11-20)
 
 ## What's Changed
