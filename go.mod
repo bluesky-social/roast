@@ -62,7 +62,7 @@ require (
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/spf13/pflag v1.1.0 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v1.3.0 // indirect
-	github.com/tidwall/gjson v1.20.5 // indirect
+	github.com/tidwall/gjson v1.20.6 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.3.0 // indirect
 	github.com/tidwall/sjson v1.2.11 // indirect
