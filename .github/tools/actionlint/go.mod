@@ -5,7 +5,7 @@ go 1.27.4
 tool github.com/rhysd/actionlint/cmd/actionlint
 
 require (
-	github.com/bmatcuk/doublestar/v4 v4.10.4 // indirect
+	github.com/bmatcuk/doublestar/v4 v4.10.7 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/mattn/go-colorable v0.1.16 // indirect
