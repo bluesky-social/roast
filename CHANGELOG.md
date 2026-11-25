@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.1 (2026-11-25)
+
+## What's Changed
+* fix(deps): update module github.com/tidwall/gjson to v1.20.6 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/206
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.5.0...v1.5.1
+
 ## 1.5.0 (2026-11-25)
 
 ## What's Changed
