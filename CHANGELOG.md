@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.2 (2026-11-26)
+
+## What's Changed
+* chore(deps): update module github.com/bmatcuk/doublestar/v4 to v4.10.7 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/208
+* fix(deps): update module github.com/tidwall/pretty to v1.3.1 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/210
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.5.1...v1.5.2
+
 ## 1.5.1 (2026-11-25)
 
 ## What's Changed
