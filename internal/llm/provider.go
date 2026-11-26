@@ -18,6 +18,7 @@ import (
 	fantasyanthropic "charm.land/fantasy/providers/anthropic"
 	fantasyopenai "charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
+	"github.com/charmbracelet/openai-go/option"
 
 	"github.com/bluesky-social/roast/internal/buildinfo"
 )
@@ -69,6 +70,9 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if cfg.MaxOutputTokens <= 0 {
 		return nil, fmt.Errorf("%s: max output tokens must be positive", cfg.Model)
 	}
+	if cfg.Protocol == "chatgpt" {
+		return newChatGPTClient(ctx, cfg)
+	}
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		// Fantasy omits an empty key, and the SDKs then fall back to ambient
 		// credentials: environment variables, profile files, or federation.
@@ -90,15 +94,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 			openaicompat.WithSDKOptions(deleteHeaders(envHeaders)...),
 		)
 	case "responses":
-		provider, err = fantasyopenai.New(
-			fantasyopenai.WithAPIKey(cfg.APIKey),
-			fantasyopenai.WithBaseURL(cfg.BaseURL),
-			fantasyopenai.WithHTTPClient(httpClient),
-			fantasyopenai.WithUserAgent(userAgent()),
-			fantasyopenai.WithSDKOptions(deleteHeaders(envHeaders)...),
-			fantasyopenai.WithUseResponsesAPI(),
-			fantasyopenai.WithResponsesAPIFunc(func(string) bool { return true }),
-		)
+		provider, err = responsesProvider(cfg.APIKey, cfg.BaseURL, httpClient, deleteHeaders(envHeaders)...)
 	case "anthropic":
 		// The Anthropic SDK appends /v1/messages itself; Roast profiles use the
 		// same base-URL convention as the OpenAI protocols and include /v1.
@@ -122,6 +118,18 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	return &client{cfg: cfg, model: mdl, transport: httpClient.Transport.(*captureTransport)}, nil
 }
 
+func responsesProvider(apiKey, baseURL string, httpClient *http.Client, options ...option.RequestOption) (fantasy.Provider, error) {
+	return fantasyopenai.New(
+		fantasyopenai.WithAPIKey(apiKey),
+		fantasyopenai.WithBaseURL(baseURL),
+		fantasyopenai.WithHTTPClient(httpClient),
+		fantasyopenai.WithUserAgent(userAgent()),
+		fantasyopenai.WithSDKOptions(options...),
+		fantasyopenai.WithUseResponsesAPI(),
+		fantasyopenai.WithResponsesAPIFunc(func(string) bool { return true }),
+	)
+}
+
 func userAgent() string { return "roast/" + buildinfo.Version }
 
 func (c *client) Name() string { return c.cfg.Model }
@@ -137,8 +145,8 @@ func (c *client) addUsage(providerUsage fantasy.Usage) Usage {
 	cacheRead := max(int(providerUsage.CacheReadTokens), 0)
 	cacheWrite := max(int(providerUsage.CacheCreationTokens), 0)
 	uncached := input
-	// OpenAI-shaped protocols report cached input as a subset of input_tokens;
-	// Anthropic reports input, cache-read, and cache-creation as disjoint counts.
+	// Anthropic and the ChatGPT adapter supply disjoint input and cache
+	// counts. The other routes treat cached tokens as a subset of input.
 	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" {
 		cacheRead = min(cacheRead, input)
 		cacheWrite = min(cacheWrite, input-cacheRead)
@@ -176,6 +184,12 @@ func protocolName(cfg ClientConfig) string {
 }
 
 type captureError struct{ err error }
+
+// A failure reported by an adapter stays available if a deadline or
+// cancellation arrives before the agent handles it.
+type providerCallError struct{ error }
+
+func (e providerCallError) Unwrap() error { return e.error }
 
 type sessionContextKey struct{}
 
@@ -342,10 +356,22 @@ func normalizeProviderError(ctx context.Context, modelName string, err error) er
 	if err == nil {
 		return nil
 	}
+	noSubmission := errors.Is(err, ErrNoFinalCall)
+	_, captureFailed := errors.AsType[*captureError](err)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
+		_, reported := errors.AsType[providerCallError](err)
+		if !reported && !captureFailed && !noSubmission {
+			return ctxErr
+		}
+		if errors.Is(err, ctxErr) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", ctxErr, err)
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if noSubmission {
+		return err
+	}
+	if captureFailed || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)
 	}
 	if errors.Is(err, ErrAuth) || errors.Is(err, ErrEndpoint) || errors.Is(err, ErrBudgetExhausted) {

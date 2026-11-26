@@ -404,3 +404,12 @@ func TestAnthropicDoesNotForwardCredentialsThroughRedirect(t *testing.T) {
 		t.Fatalf("error=%v credential_forwarded=%v", err, forwarded)
 	}
 }
+
+func TestChatGPTRejectsCredentialAndEndpointOverrides(t *testing.T) {
+	for _, cfg := range []ClientConfig{{APIKey: "secret"}, {BaseURL: "https://chatgpt.com/backend-api/codex"}, {SessionHeader: "X-Session"}} {
+		cfg.Protocol, cfg.Model, cfg.MaxOutputTokens = "chatgpt", "test", 100
+		if _, err := New(t.Context(), cfg); err == nil || !strings.Contains(err.Error(), "not accepted") || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("invalid config error=%v", err)
+		}
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/bluesky-social/roast/internal/llm"
 	"github.com/bluesky-social/roast/internal/scope"
 	"github.com/bluesky-social/roast/internal/skill"
+	"github.com/bluesky-social/roast/internal/textsafe"
 	"github.com/bluesky-social/roast/internal/updatecheck"
 )
 
@@ -38,7 +39,7 @@ type doctorResult struct {
 	Detail string       `json:"detail"`
 }
 
-func newDoctorCommand(stdout io.Writer) *cobra.Command {
+func newDoctorCommand(stdout io.Writer, openAccount chatGPTAccountOpener) *cobra.Command {
 	var configPath string
 	var asJSON bool
 	cmd := &cobra.Command{
@@ -48,7 +49,7 @@ func newDoctorCommand(stdout io.Writer) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			results := doctorChecks(cmd.Context(), configPath)
+			results := doctorChecks(cmd.Context(), configPath, openAccount)
 			if asJSON {
 				encoder := json.NewEncoder(stdout)
 				encoder.SetIndent("", "  ")
@@ -57,7 +58,9 @@ func newDoctorCommand(stdout io.Writer) *cobra.Command {
 				}
 			} else {
 				for _, result := range results {
-					fmt.Fprintf(stdout, "%-5s %-18s %s\n", strings.ToUpper(string(result.Status)), result.Name, result.Detail)
+					if _, err := fmt.Fprintf(stdout, "%-5s %-18s %s\n", strings.ToUpper(string(result.Status)), result.Name, textsafe.Line(result.Detail)); err != nil {
+						return fmt.Errorf("write doctor results: %w", err)
+					}
 				}
 			}
 			for _, result := range results {
@@ -73,7 +76,7 @@ func newDoctorCommand(stdout io.Writer) *cobra.Command {
 	return cmd
 }
 
-func doctorChecks(ctx context.Context, configPath string) []doctorResult {
+func doctorChecks(ctx context.Context, configPath string, openAccount chatGPTAccountOpener) []doctorResult {
 	results := []doctorResult{doctorBuildCheck()}
 	path := configPath
 	if path == "" {
@@ -99,28 +102,45 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 	}
 	results = append(results, doctorResult{"config", doctorPass, fmt.Sprintf("schema version %d", cfg.Version)})
 
+	// Pin the account before either probe, including when only the verifier
+	// uses ChatGPT and the account changes during the finder probe.
+	roles := []struct {
+		name string
+		role config.ResolvedRole
+		err  error
+	}{{name: "finder"}, {name: "verifier"}}
+	usesChatGPT := false
+	for i := range roles {
+		check := &roles[i]
+		check.role, check.err = cfg.ResolveRole(check.name)
+		if check.err == nil && check.name == "finder" {
+			flip, err := cfg.ResolveFinderFlip(check.role, config.AuthorModel())
+			check.role, check.err = flip.Role, err
+		}
+		if check.err == nil && check.role.Protocol == "chatgpt" {
+			check.err = config.ValidateRole(check.name, check.role)
+			usesChatGPT = usesChatGPT || check.err == nil
+		}
+	}
+	if usesChatGPT {
+		ctx = llm.WithPinnedChatGPTAccount(ctx, openAccount)
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
-	for _, name := range []string{"finder", "verifier"} {
-		role, resolveErr := cfg.ResolveRole(name)
-		if resolveErr != nil {
-			results = append(results, doctorResult{name + "-profile", doctorFail, resolveErr.Error()})
+	for _, check := range roles {
+		name, role := check.name, check.role
+		if check.err != nil {
+			results = append(results, doctorResult{name + "-profile", doctorFail, check.err.Error()})
 			continue
 		}
-		if name == "finder" {
-			flip, flipErr := cfg.ResolveFinderFlip(role, config.AuthorModel())
-			if flipErr != nil {
-				results = append(results, doctorResult{name + "-profile", doctorFail, flipErr.Error()})
-				continue
+		if role.Protocol != "chatgpt" {
+			status := doctorPass
+			if strings.TrimSpace(role.APIKey) == "" {
+				status = doctorFail
 			}
-			role = flip.Role
+			results = append(results, doctorResult{name + "-credential", status, role.Credential.String()})
 		}
-		credential := doctorResult{name + "-credential", doctorPass, role.Credential.String()}
-		if strings.TrimSpace(role.APIKey) == "" {
-			credential.Status = doctorFail
-		}
-		results = append(results, credential)
-		if validateErr := config.ValidateRole(name, role); validateErr != nil {
-			results = append(results, doctorResult{name + "-profile", doctorFail, validateErr.Error()})
+		if err := config.ValidateRole(name, role); err != nil {
+			results = append(results, doctorResult{name + "-profile", doctorFail, err.Error()})
 			continue
 		}
 		detail := fmt.Sprintf("%s: %s via %s at %s with credential %s", role.Profile, role.Model, role.Protocol, role.BaseURL, role.Credential)
@@ -128,7 +148,9 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			detail += ", session header " + role.SessionHeader
 		}
 		results = append(results, doctorResult{Name: name + "-profile", Status: doctorPass, Detail: detail})
-		results = append(results, doctorEndpointCheck(ctx, client, name, role))
+		if role.Protocol != "chatgpt" {
+			results = append(results, doctorEndpointCheck(ctx, client, name, role))
+		}
 		results = append(results, doctorRoundtripCheck(ctx, name, role))
 	}
 
@@ -147,13 +169,17 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 	if maxOutputTokens <= 0 || maxOutputTokens > 512 {
 		maxOutputTokens = 512
 	}
-	// Two requests of at most 15 seconds each, plus setup.
-	probeContext, cancel := context.WithTimeout(ctx, 35*time.Second)
+	// Allow ChatGPT generation time for both turns.
+	requestTimeout, probeTimeout := 15*time.Second, 35*time.Second
+	if role.Protocol == "chatgpt" {
+		requestTimeout, probeTimeout = 120*time.Second, 250*time.Second
+	}
+	probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	client, err := llm.New(probeContext, llm.ClientConfig{
 		Role: name, BaseURL: role.BaseURL, APIKey: role.APIKey, Model: role.Model,
 		Protocol: role.Protocol, MaxOutputTokens: maxOutputTokens, SessionHeader: role.SessionHeader,
-		MaxAttempts: 1, RequestTimeout: 15 * time.Second,
+		MaxAttempts: 1, RequestTimeout: requestTimeout,
 	})
 	if err != nil {
 		return doctorResult{name + "-roundtrip", doctorFail, err.Error()}
@@ -192,7 +218,7 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 		"Run the check now.",
 		llm.ConverseOpts{Tools: []llm.Tool{lookup, final}, FinalTool: final.Name, MaxTurns: 2}, &output)
 	if err != nil {
-		if errors.Is(err, llm.ErrAuth) {
+		if errors.Is(err, llm.ErrAuth) && role.Protocol != "chatgpt" {
 			return doctorResult{name + "-roundtrip", doctorFail, "credential rejected by the configured inference route"}
 		}
 		return doctorResult{name + "-roundtrip", doctorFail, fmt.Sprintf("%s/%s two-turn tool probe failed: %v", role.Protocol, role.Model, err)}

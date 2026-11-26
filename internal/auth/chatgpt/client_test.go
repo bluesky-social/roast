@@ -1,0 +1,320 @@
+//go:build darwin || linux
+
+package chatgpt
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/chatgpttest"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
+)
+
+func TestNewWithStoreRequiresStore(t *testing.T) {
+	if _, err := NewWithStore(t.Context(), nil); err == nil {
+		t.Fatal("opened a client without a credential store")
+	}
+}
+
+func TestNewDoesNotCreateCredentials(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, _ := chatgpttest.NewStore(t, root)
+	c, err := NewWithStore(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Token(context.Background()); !errors.Is(err, ErrAuth) {
+		t.Fatal("missing login not classified")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("read-only action created files in the lock directory: %v", entries)
+	}
+}
+
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// jsonResponse returns encoding failures through the mock transport, including
+// when the request runs on a sign-in goroutine.
+func jsonResponse(status int, value any) (*http.Response, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(string(data)))}, nil
+}
+
+func testClient(t *testing.T) *Client {
+	t.Helper()
+	store, _ := chatgpttest.NewStore(t, t.TempDir())
+	client, err := NewWithStore(t.Context(), testAccountStore{Store: store, faults: &storeFaults{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		t.Error("unexpected network request")
+		return nil, errors.New("unexpected")
+	})
+	return client
+}
+
+type storeFaults struct {
+	read, write error
+	afterWrite  func() error
+}
+
+type testAccountStore struct {
+	storage.Store
+	faults *storeFaults
+}
+
+func (s testAccountStore) ReadJSON(ctx context.Context, dst any) error {
+	if s.faults.read != nil {
+		return s.faults.read
+	}
+	return s.Store.ReadJSON(ctx, dst)
+}
+
+func (s testAccountStore) WriteJSON(ctx context.Context, value any) error {
+	if s.faults.write != nil {
+		return s.faults.write
+	}
+	if err := s.Store.WriteJSON(ctx, value); err != nil {
+		return err
+	}
+	if s.faults.afterWrite != nil {
+		return s.faults.afterWrite()
+	}
+	return nil
+}
+
+func (s testAccountStore) WithLock(ctx context.Context, fn func(storage.Store) error) error {
+	return s.Store.WithLock(ctx, func(locked storage.Store) error {
+		return fn(testAccountStore{Store: locked, faults: s.faults})
+	})
+}
+
+func (c *Client) testStoreFaults() *storeFaults {
+	return c.store.(testAccountStore).faults
+}
+
+func seed(t *testing.T, c *Client, exp time.Time) {
+	t.Helper()
+	c.selected = "oaiapp_test"
+	if err := c.withStore(t.Context(), func(accounts *accountStore) error {
+		accounts.HostID, accounts.Active = "host", c.selected
+		saved := credential{Account: Account{ClientID: c.selected, Subject: "subject", ExpiresAt: exp}, AccessToken: "access", RefreshToken: "refresh", Scopes: oauth.Scope}
+		return accounts.saveCredential(&saved)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (c *Client) loadCredential(id string) (credential, error) {
+	accounts, err := c.loadStore(context.Background())
+	if err != nil {
+		return credential{}, err
+	}
+	return accounts.credential(id)
+}
+
+func (c *Client) saveCredential(saved *credential) error {
+	return c.withStore(context.Background(), func(accounts *accountStore) error {
+		return accounts.saveCredential(saved)
+	})
+}
+
+const (
+	tokenURL     = "https://auth.openai.com/api/accounts/oauth/token"
+	jwksURL      = "https://auth.openai.com/.well-known/jwks.json"
+	discoveryURL = "https://auth.openai.com/.well-known/openid-configuration"
+)
+
+func claims(nonce string) map[string]any {
+	return map[string]any{"iss": oauth.Issuer, "sub": "subject", "aud": "oaiapp_test", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": nonce}
+}
+
+func TestSignOutKeepsRegistrationOnNetworkFailure(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") })
+	e := c.SignOut(context.Background(), "")
+	if e == nil || !strings.Contains(e.Error(), "remote revocation was not confirmed") {
+		t.Fatal("must explain unconfirmed revocation")
+	}
+	v, err := c.loadCredential(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.AccessToken != "" || v.RefreshToken != "" || v.Subject != "subject" {
+		t.Fatal("wrong signout state")
+	}
+}
+
+func TestSignOutRevokesAccessOnlyGrant(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	saved, err := c.loadCredential(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved.RefreshToken, saved.Scopes = "", "openid resource.invoke"
+	saved.Pending = &pendingRefresh{Response: oauth.TokenResponse{RefreshToken: " ", AccessToken: "invalid access"}}
+	if err := c.saveCredential(&saved); err != nil {
+		t.Fatal(err)
+	}
+	revoked := false
+	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case discoveryURL:
+			return jsonResponse(http.StatusOK, map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": oauth.Issuer + "/revoke"})
+		case oauth.Issuer + "/revoke":
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			saved, err := c.loadCredential(c.selected)
+			if err != nil || saved.signedIn() || saved.Pending == nil || !saved.Pending.RevokeOnly || saved.Pending.Response.AccessToken != "access" {
+				t.Fatalf("access-only sign-out did not checkpoint its token: %v", err)
+			}
+			revoked = r.Form.Get("token") == "access" && r.Form.Get("token_type_hint") == "access_token"
+			return jsonResponse(http.StatusOK, nil)
+		default:
+			return nil, errors.New("unexpected revocation request")
+		}
+	})
+	if err := c.SignOut(t.Context(), ""); err != nil || !revoked {
+		t.Fatalf("sign-out did not revoke the access token: %v", err)
+	}
+	saved, err = c.loadCredential(c.selected)
+	if err != nil || saved.signedIn() {
+		t.Fatalf("sign-out did not clear the local grant: %v", err)
+	}
+}
+
+func TestSignOutResumesAfterPublishedCheckpointError(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	id := c.selected
+	faults := c.testStoreFaults()
+	faults.afterWrite = func() error {
+		faults.read = errors.New("keyring readback unavailable")
+		return storage.ErrPublished
+	}
+	if err := c.SignOut(t.Context(), ""); !errors.Is(err, storage.ErrPublished) ||
+		!strings.Contains(err.Error(), "roast chatgpt signout -- "+id) {
+		t.Fatalf("unconfirmed sign-out checkpoint = %v", err)
+	}
+	faults.afterWrite, faults.read = nil, nil
+	accounts, err := c.loadStore(t.Context())
+	if err != nil || accounts.Active != "" || accounts.Accounts[id].Pending == nil {
+		t.Fatalf("interrupted sign-out was not checkpointed: %v", err)
+	}
+	c.selected = accounts.Active
+	c.provider.HTTP.Transport = mockSignInTransport(t, nil)
+	if err := c.SignOut(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err = c.loadStore(t.Context())
+	if err != nil || accounts.Active != "" || accounts.Accounts[id].signedIn() {
+		t.Fatalf("sign-out retry did not clear the saved grant: %v", err)
+	}
+}
+
+func TestSignOutRevokesAfterVerifiedCheckpoint(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	faults := c.testStoreFaults()
+	faults.afterWrite = func() error {
+		faults.afterWrite = nil
+		return storage.ErrPublished
+	}
+	revoked := false
+	base := mockSignInTransport(t, nil)
+	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() == oauth.Issuer+"/revoke" {
+			revoked = true
+		}
+		return base.RoundTrip(r)
+	})
+	if err := c.SignOut(t.Context(), ""); err != nil || !revoked {
+		t.Fatalf("sign-out after verified checkpoint: revoked=%t, error=%v", revoked, err)
+	}
+}
+
+func TestSelectedRegistrationPinnedAndIndependent(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	other := credential{Account: Account{ClientID: "oaiapp_other", Subject: "another", ExpiresAt: time.Now().Add(time.Hour)}, AccessToken: "other-access", RefreshToken: "other-refresh", Scopes: oauth.Scope}
+	if err := c.saveCredential(&other); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Select(context.Background(), other.ClientID); err != nil {
+		t.Fatal(err)
+	}
+	token, err := c.Token(context.Background())
+	if err != nil || token != "access" {
+		t.Fatal("account switch changed in-flight client")
+	}
+	accounts, err := c.Status(context.Background())
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("status did not list both accounts: %v", err)
+	}
+	for _, account := range accounts {
+		if account.Active != (account.ClientID == other.ClientID) || !account.PlanEnabled {
+			t.Fatal("status did not reflect selected account")
+		}
+	}
+}
+
+func TestSignOutKeepsItsSelectedAccount(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	addMockAccount(t, c, "account-b")
+	c.provider.HTTP.Transport = mockSignInTransport(t, nil)
+	if err := c.Select(t.Context(), "account-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SignOut(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := c.loadStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accounts.Active != "account-b" || !accounts.Accounts["account-b"].signedIn() || accounts.Accounts[c.selected].signedIn() {
+		t.Fatal("sign-out did not clear the pinned account and preserve the newly active account")
+	}
+}
+
+func TestPendingRegistrationCannotSupplyAPlanToken(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	saved, err := c.loadCredential(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved.PendingRegistration = true
+	if err := c.saveCredential(&saved); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := c.Token(t.Context()); token != "" || !errors.Is(err, ErrAuth) {
+		t.Fatalf("invalid pending registration returned %q, %v", token, err)
+	}
+}

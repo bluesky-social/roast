@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 	"github.com/bluesky-social/roast/internal/config"
 )
 
@@ -81,7 +82,7 @@ func TestDoctorReportsWithheldAmbientCredential(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	results := doctorChecks(t.Context(), configPath)
+	results := doctorChecks(t.Context(), configPath, chatgpt.New)
 	byName := map[string]doctorResult{}
 	for _, result := range results {
 		byName[result.Name] = result
@@ -162,7 +163,7 @@ func TestDoctorReportsAndSendsSessionHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	byName := map[string]doctorResult{}
-	for _, result := range doctorChecks(t.Context(), configPath) {
+	for _, result := range doctorChecks(t.Context(), configPath, chatgpt.New) {
 		byName[result.Name] = result
 	}
 	if finder := byName["finder-profile"]; finder.Status != doctorPass || !strings.HasSuffix(finder.Detail, ", session header x-opencode-session") {
