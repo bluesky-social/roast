@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.3 (2026-11-27)
+
+## What's Changed
+* fix(deps): update module github.com/aws/smithy-go to v1.28.10 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/212
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.5.2...v1.5.3
+
 ## 1.5.2 (2026-11-26)
 
 ## What's Changed
