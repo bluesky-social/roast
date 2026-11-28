@@ -265,7 +265,7 @@ roles:
 
 func TestResolveFinderFlipRejectsSameFamilyTarget(t *testing.T) {
 	cfg := Config{InferenceProfiles: map[string]InferenceProfile{
-		"same": {Model: "o3-reviewer", Protocol: "responses", BaseURL: defaultOpenAIBaseURL, MaxOutputTokens: 100},
+		"same": {Model: "o3-reviewer", Protocol: "responses", BaseURL: OpenAIBaseURL, MaxOutputTokens: 100},
 	}}
 	finder := ResolvedRole{Model: "gpt-finder", AuthorRoutes: map[string]string{"openai": "same"}}
 	got, err := cfg.ResolveFinderFlip(finder, "openai")
