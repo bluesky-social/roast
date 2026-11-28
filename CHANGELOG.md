@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.4 (2026-11-28)
+
+## What's Changed
+* fix(deps): update golang:1.27.4 docker digest to 5f1b98f by @renovate[bot] in https://github.com/bluesky-social/roast/pull/214
+* chore(deps): update module github.com/huandu/xstrings to v1.6.5 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/217
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/215
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.5.3...v1.5.4
+
 ## 1.5.3 (2026-11-27)
 
 ## What's Changed
